@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0] - 2026-06-15
+
+### Added
+- URL indexing (fetch → HTML strip → chunk)
+- PDF text extraction (via unpdf, pure JS)
+- DOCX text extraction (via mammoth, pure JS)
+- Import/export knowledge bases (JSONL format, git-friendly)
+- Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
+- Pi Skill: /skill:search-docs
+- 9 tools total
+
 ## [0.1.4] - 2026-06-15
 
 ### Added
