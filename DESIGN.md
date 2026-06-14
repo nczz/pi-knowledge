@@ -423,7 +423,7 @@ Environment overrides:
 - [x] `knowledge_update` + `knowledge_status`
 - [x] Pagination
 - [x] Metadata filters
-- [ ] TUI custom renderers (planned)
+- [x] TUI custom renderers (renderCall + renderResult on search)
 
 ### Phase 3: Intelligence
 
@@ -441,7 +441,7 @@ Environment overrides:
 - [x] PDF/DOCX parsing (unpdf + mammoth, pure JS)
 - [x] URL indexing (fetch + HTML strip)
 - [x] Import/export KBs (JSONL format)
-- [ ] KB sharing
+- [x] KB sharing (via JSONL export/import — git-friendly)
 - [x] Pi skills integration (.pi/skills/search-docs.md)
 
 ---

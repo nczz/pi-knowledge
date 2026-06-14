@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { KnowledgeEngine } from "./src/engine.ts";
 import { getDefaultKnowledgeDir } from "./src/storage/sqlite.ts";
@@ -100,6 +101,15 @@ export default function (pi: ExtensionAPI) {
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 		}),
+		renderCall(args, theme) {
+			const mode = args.mode || "hybrid";
+			return new Text(`${theme.fg("accent", "Search")}: "${args.query}" ${theme.fg("muted", `(${mode})`)}`, 0, 0);
+		},
+		renderResult(result, options, theme) {
+			const text = result.content?.[0]?.text ?? "";
+			const lines = options.expanded ? text : text.split("\n").slice(0, 5).join("\n");
+			return new Text(lines, 0, 0);
+		},
 		async execute(_id, params) {
 			const { query, mode, limit, kb_id, offset, file_type } = params;
 			const filters = file_type ? { file_type } : undefined;
