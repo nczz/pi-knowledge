@@ -426,7 +426,7 @@ pi install git:github.com/user/pi-knowledge
 
 ---
 
-## 附錄 B: 第二輪深入研究（修正虛報與填補遺漏）
+## 附錄 B: 第二輪深入研究（修正過度宣稱與填補遺漏）
 
 日期: 2026-06-14 20:10
 觸發: 自我審計發現 6 個過度宣稱/隱性遺漏
@@ -435,7 +435,7 @@ pi install git:github.com/user/pi-knowledge
 
 ### B.1 ✅ Extension Native Dep 載入路徑 — 完整確認
 
-**之前的虛報**: 我用 Pi 自己的 clipboard addon 推論 extension 的 native dep 也能用，但這是不同的 code path。
+**之前的過度宣稱**: 我用 Pi 自己的 clipboard addon 推論 extension 的 native dep 也能用，但這是不同的 code path。
 
 **實際驗證 (from package-manager.ts source)**:
 

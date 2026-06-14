@@ -10,11 +10,9 @@ Phase 2: ✅ 完成 — +2 tools (update, status), incremental indexing, metadat
 
 ## 當前狀態快照
 
-- 專案: `/Users/chun/Projects/pi-knowledge/`
-- Pi: 已安裝，可用 `pi -e ./index.ts` 載入 extension
-- Spike: `/spike/` 已通過（better-sqlite3 ✅, embedding ✅, FTS5 ✅）
-- Dependencies: `@huggingface/transformers` + `better-sqlite3`（spike 已驗證可用）
-- Embedding model: `Xenova/multilingual-e5-small` quantized, 384d, cached at `/tmp/pi-knowledge-spike-models/`
+- Spike: ✅ 全部通過（better-sqlite3, embedding, FTS5）
+- Dependencies: `@huggingface/transformers` + `better-sqlite3` + `tree-sitter`
+- Embedding model: `Xenova/multilingual-e5-small` quantized, 384d
 
 ---
 

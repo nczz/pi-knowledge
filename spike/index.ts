@@ -28,7 +28,7 @@ export default function (pi: ExtensionAPI) {
 			onUpdate?.({ content: [{ type: "text", text: "Testing embedding (first run downloads ~32MB)..." }] });
 			try {
 				const { pipeline, env } = await import("@huggingface/transformers");
-				env.cacheDir = "/tmp/pi-knowledge-spike-models";
+				env.cacheDir = "/tmp/pi-knowledge-models";
 				const ext = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", { quantized: true });
 				const out = await ext("query: 測試中文嵌入", { pooling: "mean", normalize: true });
 				results.push(`✅ Embedding: dims=${JSON.stringify(out.dims)}`);

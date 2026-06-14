@@ -30,7 +30,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | Cross-session persistence | ✅ | ✅ | ✅ |
 | Pi extension native | ✅ | N/A | ✅ |
 | Context injection per turn | ✅ | ❌ | ✅ |
-| TUI custom rendering | ✅ | N/A | ❌ |
+| TUI custom rendering | planned | N/A | ❌ |
 | RPC mode support | ✅ | N/A | N/A |
 
 ## Quick Start

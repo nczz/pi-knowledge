@@ -47,5 +47,9 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nczz/pi-knowledge.git"
+  }
 }
