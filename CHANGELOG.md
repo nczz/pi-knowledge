@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.2] - 2026-06-15
+
+### Fixed
+- AbortSignal now threads end-to-end (tool → engine → embedding loop)
+- Cancellation actually works during long embedding operations
+
+### Added
+- TUI custom rendering for knowledge_search (renderCall + renderResult)
+- All DESIGN.md phases complete (30/30 checkboxes)
+
+## [0.2.1] - 2026-06-15
+
+### Fixed
+- README lists all 9 tools (was missing export/import)
+- npm package includes .pi/skills/ for skill distribution
+
 ## [0.2.0] - 2026-06-15
 
 ### Added
