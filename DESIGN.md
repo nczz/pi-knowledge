@@ -128,7 +128,7 @@ interface SearchResult {
 
 ### Hierarchy (highest priority first):
 
-1. **AST-based** (supported languages: TypeScript, JavaScript, Python, Go, Rust)
+1. **AST-based** (supported languages: TypeScript, JavaScript, Python, Go, Rust, Java)
    - Split at function/method/class boundaries
    - Preserve full signature + body as one chunk
    - Chunk size target: 500-2000 tokens

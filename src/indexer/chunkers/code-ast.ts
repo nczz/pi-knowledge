@@ -54,6 +54,13 @@ const LANGS: Record<string, LangConfig> = {
 		methodContainer: "impl_item",
 		fileType: "rust",
 	},
+	java: {
+		grammar: async () => { const m = await import("tree-sitter-java"); return m.default ?? m; },
+		fnTypes: new Set(["method_declaration", "constructor_declaration"]),
+		classTypes: new Set(["class_declaration", "interface_declaration", "enum_declaration"]),
+		classBody: "class_body",
+		fileType: "java",
+	},
 };
 
 function getName(node: ASTNode): string {

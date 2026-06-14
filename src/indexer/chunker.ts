@@ -252,7 +252,7 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const fileType = detectFileType(filePath);
 	if (fileType === "markdown") return chunkMarkdown(content, filePath);
-	if (["typescript", "javascript", "python", "go", "rust"].includes(fileType)) {
+	if (["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType)) {
 		try {
 			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
 			const astChunks = await chunkWithAST(content, filePath, fileType);
