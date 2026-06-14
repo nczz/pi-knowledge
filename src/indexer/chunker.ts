@@ -251,13 +251,32 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 
 export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const fileType = detectFileType(filePath);
-	if (fileType === "markdown") return chunkMarkdown(content, filePath);
-	if (["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType)) {
+	let chunks: Omit<ChunkInsert, "kb_id">[] = [];
+
+	if (fileType === "markdown") {
+		chunks = chunkMarkdown(content, filePath);
+	} else if (["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType)) {
 		try {
 			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
-			const astChunks = await chunkWithAST(content, filePath, fileType);
-			if (astChunks.length > 0) return astChunks;
-		} catch { /* fallback to text chunker */ }
+			chunks = await chunkWithAST(content, filePath, fileType);
+		} catch { /* fallback below */ }
 	}
-	return chunkText(content, filePath);
+
+	if (chunks.length === 0) chunks = chunkText(content, filePath);
+
+	// Fallback: if file has content but no chunks (too short for splitting), keep as single chunk
+	if (chunks.length === 0 && content.trim().length > 10) {
+		chunks = [{
+			content_hash: contentHash(content),
+			content: content.trim(),
+			content_tokenized: preTokenizeForFTS(content),
+			file_path: filePath,
+			file_type: fileType,
+			start_line: 1,
+			end_line: content.split("\n").length,
+			metadata_json: "{}",
+		}];
+	}
+
+	return chunks;
 }
