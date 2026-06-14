@@ -9,6 +9,9 @@
 - Model mismatch warning on search (suggests re-index)
 - Engine regression tests (+6, total 34)
 - README Data Storage section
+- URL indexing (knowledge_add with http/https URLs, auto HTML strip)
+- Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms, semantic: 2.0ms)
+- Pi Skill: `/skill:search-docs` for guided knowledge search
 
 ### Fixed
 - walkDir skips permission-denied directories

@@ -44,12 +44,14 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 
 | 優先 | 功能 | 說明 |
 |------|------|------|
-| 1 | **PDF/DOCX parsing** | 需要研究 pdf-parse v2.x API（v2 是 pure TS，API 和 v1 完全不同） |
-| 2 | **Performance benchmarks** | index 1000 files 端到端時間、search 延遲 p50/p99 |
-| 3 | **Pi Skill 整合** | `/skill:search-docs` 讓使用者直接用 skill 觸發搜尋 |
-| 4 | **TUI custom rendering** | renderResult 顯示 search results with highlights |
-| 5 | **URL/web indexing** | fetch URL → extract text → index |
-| 6 | **Import/export KBs** | git-friendly serialization format |
+| 1 | **PDF/DOCX parsing** | pdf-parse v2.x API 完全重寫，需獨立研究（見 docs/known-pitfalls.md） |
+| 2 | **TUI custom rendering** | 需深入研究 Pi renderResult component API |
+| 3 | **Import/export KBs** | 需設計 git-friendly 序列化格式 |
+
+已完成（本 session 最後一批）：
+- ✅ Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
+- ✅ Pi Skill (`/skill:search-docs`)
+- ✅ URL indexing (http/https → fetch → HTML strip → chunk)
 
 ## 技術文件交叉參考
 

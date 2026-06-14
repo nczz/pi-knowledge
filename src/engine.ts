@@ -71,17 +71,28 @@ export class KnowledgeEngine {
 	async add(source: string, name: string, onProgress?: ProgressCallback): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const resolvedSource = resolve(source);
-		const isDir = existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
-		const isFile = existsSync(resolvedSource) && statSync(resolvedSource).isFile();
+		const isUrl = source.startsWith("http://") || source.startsWith("https://");
+		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
+		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
 		const sourceType = isDir ? "directory" : isFile ? "file" : "text";
 
-		const kb = createKB(this.db, { name, source_path: isDir || isFile ? resolvedSource : undefined, source_type: sourceType });
+		const kb = createKB(this.db, { name, source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined, source_type: sourceType });
 		updateKBStatus(this.db, kb.id, "indexing");
 
 		try {
 			let allChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 
-			if (isDir) {
+			if (isUrl) {
+				onProgress?.(`Fetching ${source}...`);
+				const res = await fetch(source);
+				if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+				const html = await res.text();
+				const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+					.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+					.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ")
+					.replace(/\s+/g, " ").trim();
+				allChunks = await chunkFile(text, source);
+			} else if (isDir) {
 				onProgress?.(`Scanning ${resolvedSource}...`);
 				const files = walkDir(resolvedSource);
 				onProgress?.(`Found ${files.length} files, chunking...`);
