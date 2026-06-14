@@ -252,11 +252,10 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const fileType = detectFileType(filePath);
 	if (fileType === "markdown") return chunkMarkdown(content, filePath);
-	// AST chunking for TypeScript/JavaScript
-	if (fileType === "typescript" || fileType === "javascript") {
+	if (["typescript", "javascript", "python", "go", "rust"].includes(fileType)) {
 		try {
-			const { chunkTypeScript } = await import("./chunkers/code-ast.ts");
-			const astChunks = await chunkTypeScript(content, filePath);
+			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
+			const astChunks = await chunkWithAST(content, filePath, fileType);
 			if (astChunks.length > 0) return astChunks;
 		} catch { /* fallback to text chunker */ }
 	}
