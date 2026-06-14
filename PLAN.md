@@ -2,15 +2,16 @@
 
 ## 當前狀態
 
-**v0.1.4 已發佈** (npm + GitHub) — 2026-06-15
+**v0.2.1 已發佈** (npm + GitHub) — 2026-06-15
 
 | 指標 | 值 |
 |------|-----|
 | npm | https://www.npmjs.com/package/pi-knowledge |
 | GitHub | https://github.com/nczz/pi-knowledge |
 | Tests | 34 passing |
-| Tools | 7 (add, search, update, status, show, remove, clear) |
+| Tools | 9 (add, search, update, status, show, remove, clear, export, import) |
 | AST languages | 6 (TypeScript, JavaScript, Python, Go, Rust, Java) |
+| Formats | code, markdown, text, PDF, DOCX, URL |
 | Search modes | 4 (fast, semantic, hybrid, deep) |
 | Embedding | multilingual-e5-small (384d, local ONNX, zero API keys) |
 | Storage | ~/.pi/knowledge/ (SQLite + FTS5 + binary vectors) |

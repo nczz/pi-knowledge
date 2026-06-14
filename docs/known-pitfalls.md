@@ -12,9 +12,13 @@
 
 Grammar 版本必須和 core 配對。鎖定 0.22.x core + 0.23.x grammars。
 
-## pdf-parse v2.x (deferred)
+## PDF/DOCX — 已解決 (v0.2.0)
 
-v2.4.5 完全重寫：`new PDFParse()` class-based API，內建完整 pdf.js bundle。不要直接裝就嘗試整合 — 需獨立研究。
+最終方案不用 pdf-parse。改用：
+- **PDF**: `unpdf` (pure JS, `extractText(Uint8Array)`) ✅ 中文 PDF 實測通過
+- **DOCX**: `mammoth` (pure JS, `extractRawText({path})`) ✅ 中文 DOCX 實測通過
+
+pdf-parse v2.x 的 class-based API 過於複雜且 bundle 巨大，已棄用。
 
 ## Pi modelRegistry 不提供 API key
 
