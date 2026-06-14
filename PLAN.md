@@ -67,6 +67,7 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 | FTS5 tokenization | docs/fts5-code-tokenization.md |
 | 離線模式 | docs/offline-mode.md |
 | 技術決策 | docs/technical-decisions.md |
+| 已知陷阱 | docs/known-pitfalls.md |
 | 開發規則 | AGENTS.md |
 | 貢獻指南 | CONTRIBUTING.md |
 
