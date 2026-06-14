@@ -64,3 +64,25 @@ describe("walkDir", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });
+
+
+import { chunkFile } from "../../src/indexer/chunker.ts";
+
+describe("chunkFile (async)", () => {
+	it("dispatches .md to markdown chunker", async () => {
+		const chunks = await chunkFile("## Test\n\nContent that is long enough to pass the minimum character threshold.", "test.md");
+		expect(chunks.length).toBeGreaterThan(0);
+		expect(chunks[0].file_type).toBe("markdown");
+	});
+	it("dispatches .ts to AST chunker", async () => {
+		const code = 'export function hello(): string { return "hi"; }';
+		const chunks = await chunkFile(code, "test.ts");
+		expect(chunks.length).toBeGreaterThan(0);
+		expect(chunks[0].metadata_json).toContain("hello");
+	});
+	it("falls back to text for unknown types", async () => {
+		const text = Array(15).fill("A paragraph with enough meaningful content for testing purposes here.").join("\n\n");
+		const chunks = await chunkFile(text, "data.csv");
+		expect(chunks.length).toBeGreaterThan(0);
+	});
+});

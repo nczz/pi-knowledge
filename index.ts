@@ -72,6 +72,10 @@ export default function (pi: ExtensionAPI) {
 			const { kb, chunkCount } = await engine.add(source, name, (msg) => {
 				onUpdate?.({ content: [{ type: "text", text: msg }] });
 			});
+			// Start watcher for new directory KB
+			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
+				startWatcher(kb.id, kb.source_path, (kbId) => { engine.update(kbId).catch(() => {}); });
+			}
 			return {
 				content: [{ type: "text", text: `Indexed "${kb.name}": ${chunkCount} chunks from ${kb.file_count} files. KB ID: ${kb.id}` }],
 			};
@@ -137,7 +141,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute() {
 			const kbs = engine.list();
-			const lines = [`Storage: ${getDefaultKnowledgeDir()}`, `Knowledge bases: ${kbs.length}`, ""];
+			const watchCount = getActiveWatcherCount();
+			const lines = [`Storage: ${getDefaultKnowledgeDir()}`, `Knowledge bases: ${kbs.length}`, `Active watchers: ${watchCount}`, ""];
 			for (const kb of kbs) {
 				const age = Math.round((Date.now() - kb.updated_at) / 60000);
 				lines.push(`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`);
