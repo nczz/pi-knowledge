@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.4] - 2026-06-15
+
+### Added
+- Vector memory cache (search no longer re-reads disk per query)
+- AbortSignal support in embedding (cancellable long operations)
+- Schema migration infrastructure (future-proof DB upgrades)
+- Model mismatch warning on search (suggests re-index)
+- Engine regression tests (+6, total 34)
+- README Data Storage section
+
+### Fixed
+- walkDir skips permission-denied directories
+- DESIGN.md phases corrected
+
+## [0.1.3] - 2026-06-14
+
+### Fixed
+- Short files index correctly (single chunk fallback)
+
 ## [0.1.2] - 2026-06-14
 
 ### Fixed
