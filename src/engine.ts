@@ -68,7 +68,7 @@ export class KnowledgeEngine {
 		this.vectorCache.delete(kbId);
 	}
 
-	async add(source: string, name: string, onProgress?: ProgressCallback): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+	async add(source: string, name: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const resolvedSource = resolve(source);
 		const isUrl = source.startsWith("http://") || source.startsWith("https://");
@@ -120,7 +120,7 @@ export class KnowledgeEngine {
 
 			onProgress?.(`${allChunks.length} chunks, embedding...`);
 			const texts = allChunks.map((c) => c.content);
-			const vectors = await embedDocuments(texts);
+			const vectors = await embedDocuments(texts, signal);
 
 			onProgress?.(`Storing...`);
 			insertChunks(this.db, kb.id, allChunks);
@@ -141,7 +141,7 @@ export class KnowledgeEngine {
 		}
 	}
 
-	async update(nameOrId: string, onProgress?: ProgressCallback): Promise<{ added: number; removed: number; unchanged: number }> {
+	async update(nameOrId: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
@@ -350,7 +350,7 @@ export class KnowledgeEngine {
 		return chunks.length;
 	}
 
-	async importKB(inputPath: string, onProgress?: ProgressCallback): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+	async importKB(inputPath: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const { readFileSync } = await import("node:fs");
 		const lines = readFileSync(inputPath, "utf-8").trim().split("\n");
@@ -361,7 +361,7 @@ export class KnowledgeEngine {
 		const chunkData = lines.slice(1).map((l) => JSON.parse(l));
 		onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
 		const texts = chunkData.map((c: any) => c.content);
-		const vectors = await embedDocuments(texts);
+		const vectors = await embedDocuments(texts, signal);
 		const chunks = chunkData.map((c: any) => ({ content_hash: contentHash(c.content), content: c.content, content_tokenized: preTokenizeForFTS(c.content), file_path: c.file_path, file_type: c.file_type, start_line: c.start_line, end_line: c.end_line, metadata_json: c.metadata_json || "{}" }));
 		insertChunks(this.db, kb.id, chunks);
 		const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);

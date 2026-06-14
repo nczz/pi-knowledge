@@ -72,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 			const { source, name } = params;
 			const { kb, chunkCount } = await engine.add(source, name, (msg) => {
 				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			});
+			}, _signal);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
 				startWatcher(kb.id, kb.source_path, (kbId) => { engine.update(kbId).catch(() => {}); });
@@ -139,12 +139,13 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, _signal, onUpdate) {
 			const { added, removed, unchanged } = await engine.update(params.target, (msg) => {
 				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			});
+			}, _signal);
 			return {
 				content: [{ type: "text", text: `Updated: +${added} added, -${removed} removed, ${unchanged} unchanged.` }],
 			};
 		},
 	});
+
 
 	pi.registerTool({
 		name: "knowledge_status",
@@ -225,7 +226,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, _signal, onUpdate) {
 			const { kb, chunkCount } = await engine.importKB(params.input, (msg) => {
 				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			});
+			}, _signal);
 			return { content: [{ type: "text", text: `Imported "${kb.name}": ${chunkCount} chunks (re-embedded)` }] };
 		},
 	});
