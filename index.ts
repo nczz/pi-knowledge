@@ -192,6 +192,35 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "knowledge_export",
+		label: "Knowledge Export",
+		description: "Export a knowledge base to a JSONL file (shareable, git-friendly)",
+		parameters: Type.Object({
+			target: Type.String({ description: "KB name or ID to export" }),
+			output: Type.String({ description: "Output file path (.jsonl)" }),
+		}),
+		async execute(_id, params) {
+			const count = await engine.exportKB(params.target, params.output);
+			return { content: [{ type: "text", text: `Exported ${count} chunks to ${params.output}` }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_import",
+		label: "Knowledge Import",
+		description: "Import a knowledge base from a JSONL file (re-embeds content)",
+		parameters: Type.Object({
+			input: Type.String({ description: "Input JSONL file path" }),
+		}),
+		async execute(_id, params, _signal, onUpdate) {
+			const { kb, chunkCount } = await engine.importKB(params.input, (msg) => {
+				onUpdate?.({ content: [{ type: "text", text: msg }] });
+			});
+			return { content: [{ type: "text", text: `Imported "${kb.name}": ${chunkCount} chunks (re-embedded)` }] };
+		},
+	});
+
+	pi.registerTool({
 		name: "knowledge_clear",
 		label: "Knowledge Clear",
 		description: "Remove all knowledge bases",

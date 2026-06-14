@@ -45,8 +45,6 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 | 優先 | 功能 | 說明 |
 |------|------|------|
 | 1 | **TUI custom rendering** | 需深入研究 Pi renderResult component API |
-| 2 | **Import/export KBs** | 需設計 git-friendly 序列化格式 |
-
 已完成（本 session 最後一批）：
 - ✅ Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
 - ✅ Pi Skill (`/skill:search-docs`)

@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { embedDocuments, embedQuery, dispose as disposeEmbedding } from "./embedding/provider.ts";
 import { loadVectors, saveVectors } from "./embedding/vectors.ts";
-import { chunkFile, walkDir } from "./indexer/chunker.ts";
+import { chunkFile, walkDir, contentHash, preTokenizeForFTS } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { reciprocalRankFusion } from "./search/fusion.ts";
 import { rerank, disposeReranker } from "./search/reranker.ts";
@@ -336,6 +336,40 @@ export class KnowledgeEngine {
 	diagnose(): DiagnosticResult[] {
 		if (!this.db) return [];
 		return listKBs(this.db).map((kb) => diagnoseKB(this.db!, kb));
+	}
+
+	async exportKB(nameOrId: string, outputPath: string): Promise<number> {
+		if (!this.db) throw new Error("Engine not initialized");
+		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
+		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
+		const chunks = getChunksByKB(this.db, kb.id);
+		const { writeFileSync } = await import("node:fs");
+		const header = JSON.stringify({ name: kb.name, description: kb.description, source_path: kb.source_path, source_type: kb.source_type, chunk_count: chunks.length });
+		const lines = [header, ...chunks.map((c) => JSON.stringify({ content: c.content, file_path: c.file_path, file_type: c.file_type, start_line: c.start_line, end_line: c.end_line, metadata_json: c.metadata_json }))];
+		writeFileSync(outputPath, lines.join("\n") + "\n");
+		return chunks.length;
+	}
+
+	async importKB(inputPath: string, onProgress?: ProgressCallback): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+		if (!this.db) throw new Error("Engine not initialized");
+		const { readFileSync } = await import("node:fs");
+		const lines = readFileSync(inputPath, "utf-8").trim().split("\n");
+		if (lines.length < 1) throw new Error("Empty import file");
+		const header = JSON.parse(lines[0]);
+		const kb = createKB(this.db, { name: header.name, description: header.description, source_path: header.source_path, source_type: header.source_type || "text" });
+		updateKBStatus(this.db, kb.id, "indexing");
+		const chunkData = lines.slice(1).map((l) => JSON.parse(l));
+		onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
+		const texts = chunkData.map((c: any) => c.content);
+		const vectors = await embedDocuments(texts);
+		const chunks = chunkData.map((c: any) => ({ content_hash: contentHash(c.content), content: c.content, content_tokenized: preTokenizeForFTS(c.content), file_path: c.file_path, file_type: c.file_type, start_line: c.start_line, end_line: c.end_line, metadata_json: c.metadata_json || "{}" }));
+		insertChunks(this.db, kb.id, chunks);
+		const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+		saveVectors(vectorPath, vectors);
+		this.vectorCache.set(kb.id, vectors);
+		updateKBCounts(this.db, kb.id, chunks.length, new Set(chunks.map((c: any) => c.file_path)).size);
+		updateKBStatus(this.db, kb.id, "ready");
+		return { kb: getKB(this.db, kb.id)!, chunkCount: chunks.length };
 	}
 
 	async dispose(): Promise<void> {
