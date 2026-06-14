@@ -63,6 +63,8 @@ pi install ./pi-knowledge
 | `knowledge_show` | List all knowledge bases with stats |
 | `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
 | `knowledge_clear` | Remove all knowledge bases |
+| `knowledge_export` | Export a KB to shareable JSONL file |
+| `knowledge_import` | Import a KB from JSONL (re-embeds content) |
 
 ## Architecture
 
