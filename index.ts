@@ -137,17 +137,28 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_status",
 		label: "Knowledge Status",
-		description: "Show knowledge engine status and all indexed knowledge bases",
+		description: "Show knowledge engine status with health diagnostics: staleness, orphans, and coverage",
 		parameters: Type.Object({}),
 		async execute() {
 			const kbs = engine.list();
 			const watchCount = getActiveWatcherCount();
+			const diagnostics = engine.diagnose();
 			const lines = [`Storage: ${getDefaultKnowledgeDir()}`, `Knowledge bases: ${kbs.length}`, `Active watchers: ${watchCount}`, ""];
 			for (const kb of kbs) {
 				const age = Math.round((Date.now() - kb.updated_at) / 60000);
+				const diag = diagnostics.find((d) => d.kb_id === kb.id);
 				lines.push(`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`);
 				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
+				if (diag) {
+					lines.push(`    coverage: ${diag.coverage_percent}% (${diag.indexed_files}/${diag.total_source_files} files)`);
+					if (diag.stale_files.length > 0) lines.push(`    ⚠️ stale: ${diag.stale_files.length} files modified since last index`);
+					if (diag.orphan_files.length > 0) lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
+				}
 			}
+			const totalStale = diagnostics.reduce((n, d) => n + d.stale_files.length, 0);
+			const totalOrphans = diagnostics.reduce((n, d) => n + d.orphan_files.length, 0);
+			if (totalStale === 0 && totalOrphans === 0 && kbs.length > 0) lines.push("", "Health: ✓ all indexes up to date");
+			else if (totalStale > 0 || totalOrphans > 0) lines.push("", `Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans — run knowledge_update`);
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});

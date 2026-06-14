@@ -61,7 +61,7 @@ pi install ./pi-knowledge
 | `knowledge_remove` | Remove a knowledge base by name or ID |
 | `knowledge_update` | Incrementally re-index changed files in a knowledge base |
 | `knowledge_show` | List all knowledge bases with stats |
-| `knowledge_status` | Show engine status and knowledge base health |
+| `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
 | `knowledge_clear` | Remove all knowledge bases |
 
 ## Architecture

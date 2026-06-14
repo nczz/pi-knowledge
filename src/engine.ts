@@ -8,6 +8,7 @@ import { searchBM25 } from "./search/bm25.ts";
 import { reciprocalRankFusion } from "./search/fusion.ts";
 import { rerank, disposeReranker } from "./search/reranker.ts";
 import { searchVector } from "./search/vector.ts";
+import { diagnoseKB, type DiagnosticResult } from "./diagnostics/health.ts";
 import {
 	createKB, deleteKB, getChunkById, getChunkIdsByKB, getChunksByKB, getFileCount, getKB, getKBByName,
 	insertChunks, listKBs, openDatabase, updateKBCounts, updateKBStatus, deleteChunksByIds, getChunkHashesByKB,
@@ -283,6 +284,11 @@ export class KnowledgeEngine {
 	clear(): void {
 		if (!this.db) return;
 		for (const kb of listKBs(this.db)) deleteKB(this.db, kb.id);
+	}
+
+	diagnose(): DiagnosticResult[] {
+		if (!this.db) return [];
+		return listKBs(this.db).map((kb) => diagnoseKB(this.db!, kb));
 	}
 
 	async dispose(): Promise<void> {
