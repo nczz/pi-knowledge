@@ -92,6 +92,17 @@ export class KnowledgeEngine {
 					.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ")
 					.replace(/\s+/g, " ").trim();
 				allChunks = await chunkFile(text, source);
+			} else if (isFile && resolvedSource.endsWith(".pdf")) {
+				onProgress?.("Extracting text from PDF...");
+				const { extractText } = await import("unpdf");
+				const buf = (await import("node:fs")).readFileSync(resolvedSource);
+				const { text } = await extractText(new Uint8Array(buf));
+				allChunks = await chunkFile(text, resolvedSource);
+			} else if (isFile && (resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc"))) {
+				onProgress?.("Extracting text from DOCX...");
+				const mammoth = await import("mammoth");
+				const result = await mammoth.extractRawText({ path: resolvedSource });
+				allChunks = await chunkFile(result.value, resolvedSource);
 			} else if (isDir) {
 				onProgress?.(`Scanning ${resolvedSource}...`);
 				const files = walkDir(resolvedSource);

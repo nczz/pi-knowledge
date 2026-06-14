@@ -56,7 +56,7 @@ pi install ./pi-knowledge
 
 | Tool | Description |
 |------|-------------|
-| `knowledge_add` | Index files, directories, URLs, or inline text into a named knowledge base |
+| `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
 | `knowledge_search` | Hybrid search across one or all knowledge bases |
 | `knowledge_remove` | Remove a knowledge base by name or ID |
 | `knowledge_update` | Incrementally re-index changed files in a knowledge base |
