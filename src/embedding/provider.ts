@@ -5,6 +5,7 @@ let pipelineInstance: any = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const IDLE_TIMEOUT_MS = 60_000;
+const EMBEDDING_CONFIG = process.env.PI_KNOWLEDGE_EMBEDDING ?? "local:multilingual-e5-small";
 
 function getModelCacheDir(): string {
 	return join(getDefaultKnowledgeDir(), "models");
@@ -28,7 +29,31 @@ export async function dispose(): Promise<void> {
 	if (pipelineInstance) { await pipelineInstance.dispose(); pipelineInstance = null; }
 }
 
+async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
+	const [provider, model] = EMBEDDING_CONFIG.split(":");
+	const prefixedTexts = texts.map((t) => `${prefix}: ${t}`);
+
+	if (provider === "openai") {
+		const apiKey = process.env.OPENAI_API_KEY;
+		if (!apiKey) throw new Error("OPENAI_API_KEY required for openai embedding");
+		const res = await fetch("https://api.openai.com/v1/embeddings", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+			body: JSON.stringify({ input: prefixedTexts, model: model || "text-embedding-3-small" }),
+		});
+		if (!res.ok) throw new Error(`OpenAI API error: ${res.status}`);
+		const data = (await res.json()) as { data: Array<{ embedding: number[] }> };
+		return data.data.map((d) => new Float32Array(d.embedding));
+	}
+
+	throw new Error(`Unsupported embedding provider: ${provider}`);
+}
+
 export async function embedTexts(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
+	if (!EMBEDDING_CONFIG.startsWith("local")) {
+		try { return await embedViaAPI(texts, prefix); }
+		catch { /* fallback to local */ }
+	}
 	const pipe = await loadPipeline();
 	resetIdleTimer();
 	const results: Float32Array[] = [];

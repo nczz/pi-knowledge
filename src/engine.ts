@@ -61,21 +61,21 @@ export class KnowledgeEngine {
 		updateKBStatus(this.db, kb.id, "indexing");
 
 		try {
-			let allChunks: ReturnType<typeof chunkFile> = [];
+			let allChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 
 			if (isDir) {
 				onProgress?.(`Scanning ${resolvedSource}...`);
 				const files = walkDir(resolvedSource);
 				onProgress?.(`Found ${files.length} files, chunking...`);
 				for (const file of files) {
-					allChunks.push(...chunkFile(file.content, file.relPath));
+					allChunks.push(...await chunkFile(file.content, file.relPath));
 				}
 			} else if (isFile) {
 				const { readFileSync } = await import("node:fs");
 				const content = readFileSync(resolvedSource, "utf-8");
-				allChunks = chunkFile(content, resolvedSource);
+				allChunks = await chunkFile(content, resolvedSource);
 			} else {
-				allChunks = chunkFile(source, "inline-text");
+				allChunks = await chunkFile(source, "inline-text");
 			}
 
 			onProgress?.(`${allChunks.length} chunks, embedding...`);
@@ -114,13 +114,13 @@ export class KnowledgeEngine {
 			// 1. Scan and chunk current source
 			onProgress?.("Scanning source...");
 			const isDir = statSync(kb.source_path).isDirectory();
-			let newChunks: ReturnType<typeof chunkFile> = [];
+			let newChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 			if (isDir) {
 				const files = walkDir(kb.source_path);
-				for (const file of files) newChunks.push(...chunkFile(file.content, file.relPath));
+				for (const file of files) newChunks.push(...await chunkFile(file.content, file.relPath));
 			} else {
 				const { readFileSync } = await import("node:fs");
-				newChunks = chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path);
+				newChunks = await chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path);
 			}
 
 			// 2. Load existing state: chunks (hash→id) + vectors (ordered)

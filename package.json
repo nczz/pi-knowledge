@@ -4,6 +4,18 @@
   "description": "Vector knowledge base extension for Pi — index files, hybrid search, local embeddings",
   "type": "module",
   "main": "index.ts",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "keywords": [
     "pi",
     "pi-extension",
@@ -22,7 +34,9 @@
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
     "better-sqlite3": "11.9.1",
-    "ignore": "7.0.5"
+    "ignore": "7.0.5",
+    "tree-sitter": "0.21.1",
+    "tree-sitter-typescript": "0.23.2"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.5",

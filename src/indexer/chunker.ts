@@ -249,8 +249,16 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 	return chunks;
 }
 
-export function chunkFile(content: string, filePath: string): Omit<ChunkInsert, "kb_id">[] {
+export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const fileType = detectFileType(filePath);
 	if (fileType === "markdown") return chunkMarkdown(content, filePath);
+	// AST chunking for TypeScript/JavaScript
+	if (fileType === "typescript" || fileType === "javascript") {
+		try {
+			const { chunkTypeScript } = await import("./chunkers/code-ast.ts");
+			const astChunks = await chunkTypeScript(content, filePath);
+			if (astChunks.length > 0) return astChunks;
+		} catch { /* fallback to text chunker */ }
+	}
 	return chunkText(content, filePath);
 }
