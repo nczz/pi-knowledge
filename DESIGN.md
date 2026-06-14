@@ -53,7 +53,7 @@ Coding agents operate within limited context windows. When working on complex pr
 │  └── Content Store (content-addressed chunk cache)   │
 ├─────────────────────────────────────────────────────┤
 │  Embedding Layer                                     │
-│  ├── Local ONNX (all-MiniLM-L6-v2, 384d) [default]  │
+│  ├── Local ONNX (multilingual-e5-small, 384d) [default]  │
 │  ├── Pi AI provider (OpenAI/Google/etc.) [optional]  │
 │  └── Custom endpoint [configurable]                  │
 └─────────────────────────────────────────────────────┘
@@ -128,7 +128,7 @@ interface SearchResult {
 
 ### Hierarchy (highest priority first):
 
-1. **AST-based** (supported languages: TypeScript, JavaScript, Python, Go, Rust, Java)
+1. **AST-based** (supported languages: TypeScript, JavaScript, Python, Go, Rust)
    - Split at function/method/class boundaries
    - Preserve full signature + body as one chunk
    - Chunk size target: 500-2000 tokens
@@ -336,7 +336,7 @@ Non-blocking, fire-and-forget. Errors reported via `knowledge_status`.
 ```
 Knowledge Engine Status
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Embedding model: all-MiniLM-L6-v2 (local ONNX, 384d)
+Embedding model: multilingual-e5-small (local ONNX, 384d)
 Storage: ~/.pi/knowledge/ (12.4 MB)
 Knowledge bases: 3
 
@@ -390,7 +390,7 @@ Environment overrides:
 | Semantic OR keyword only | Hybrid by default: BM25 + vector + RRF fusion. |
 | No reranking | Optional cross-encoder (ms-marco-MiniLM). |
 | No file watching | fs.watch + debounce + .gitignore. KBs stay fresh. |
-| No code-aware chunking | AST splitting (TS/JS/Python/Go/Rust/Java). |
+| No code-aware chunking | AST splitting (TS/JS/Python/Go/Rust). |
 | Server-dependent embedding | Local ONNX. Works offline, no API costs. |
 | Opaque progress | Real-time: files/chunks/embeddings + ETA. |
 | No quality metrics | Staleness, orphans, coverage %, drift. |
@@ -406,7 +406,7 @@ Environment overrides:
 - [ ] Project scaffold (package.json, tsconfig, biome)
 - [ ] SQLite storage (metadata + FTS5)
 - [ ] Basic chunking (paragraph + markdown-aware)
-- [ ] Local ONNX embedding (all-MiniLM-L6-v2)
+- [ ] Local ONNX embedding (multilingual-e5-small)
 - [ ] HNSW vector index
 - [ ] BM25 search via FTS5
 - [ ] Semantic search via HNSW
