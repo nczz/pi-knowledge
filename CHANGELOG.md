@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.2] - 2026-06-14
+
+### Fixed
+- Short files (<50 chars) now index correctly as a single chunk
+
+## [0.1.1] - 2026-06-14
+
+### Added
+- Java AST chunking (6 languages total: TS, JS, Python, Go, Rust, Java)
+
+## [0.1.0] - 2026-06-14
 
 ### Added
 - Project scaffold and design document

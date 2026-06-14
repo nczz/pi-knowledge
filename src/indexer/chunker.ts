@@ -70,7 +70,9 @@ export function walkDir(dirPath: string): ScannedFile[] {
 	const results: ScannedFile[] = [];
 
 	function walk(dir: string): void {
-		const entries = readdirSync(dir, { withFileTypes: true });
+		let entries;
+		try { entries = readdirSync(dir, { withFileTypes: true }); }
+		catch { return; }
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
 			const relPath = relative(dirPath, fullPath).split(sep).join("/");

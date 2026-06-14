@@ -49,7 +49,7 @@ async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promis
 	throw new Error(`Unsupported embedding provider: ${provider}`);
 }
 
-export async function embedTexts(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
+export async function embedTexts(texts: string[], prefix: "query" | "passage", signal?: AbortSignal): Promise<Float32Array[]> {
 	if (!EMBEDDING_CONFIG.startsWith("local")) {
 		try { return await embedViaAPI(texts, prefix); }
 		catch { /* fallback to local */ }
@@ -58,6 +58,7 @@ export async function embedTexts(texts: string[], prefix: "query" | "passage"): 
 	resetIdleTimer();
 	const results: Float32Array[] = [];
 	for (const text of texts) {
+		if (signal?.aborted) throw new Error("Cancelled");
 		const output = await pipe(`${prefix}: ${text}`, { pooling: "mean", normalize: true });
 		results.push(new Float32Array(output.data));
 	}
@@ -69,6 +70,6 @@ export async function embedQuery(text: string): Promise<Float32Array> {
 	return vec;
 }
 
-export async function embedDocuments(texts: string[]): Promise<Float32Array[]> {
-	return embedTexts(texts, "passage");
+export async function embedDocuments(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
+	return embedTexts(texts, "passage", signal);
 }

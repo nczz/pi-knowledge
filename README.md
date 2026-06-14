@@ -22,7 +22,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Cross-encoder reranking** | ✅ | ❌ | ❌ |
 | **Incremental re-indexing** | ✅ | ❌ | ❌ |
 | **File watcher (auto-update)** | ✅ | ❌ | ❌ |
-| **Code-aware chunking** | ✅ | ❌ | ❌ |
+| **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java) | ❌ | ❌ |
 | **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
 | **Index quality diagnostics** | ✅ | ❌ | ❌ |
 | **Metadata filters in search** | ✅ | ❌ | ❌ |

@@ -45,10 +45,24 @@ export type ProgressCallback = (msg: string) => void;
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
+	private vectorCache: Map<string, Float32Array[]> = new Map();
 
 	async initialize(knowledgeDir: string): Promise<void> {
 		this.knowledgeDir = knowledgeDir;
 		this.db = openDatabase(knowledgeDir);
+		this.vectorCache.clear();
+	}
+
+	private getVectors(kbId: string): Float32Array[] {
+		if (this.vectorCache.has(kbId)) return this.vectorCache.get(kbId)!;
+		const vectorPath = join(this.knowledgeDir, "vectors", `${kbId}.bin`);
+		const vectors = loadVectors(vectorPath);
+		this.vectorCache.set(kbId, vectors);
+		return vectors;
+	}
+
+	private invalidateVectorCache(kbId: string): void {
+		this.vectorCache.delete(kbId);
 	}
 
 	async add(source: string, name: string, onProgress?: ProgressCallback): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
@@ -88,6 +102,7 @@ export class KnowledgeEngine {
 
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 			saveVectors(vectorPath, vectors);
+			this.vectorCache.set(kb.id, vectors);
 
 			const fileCount = isDir ? getFileCount(this.db, kb.id) : 1;
 			updateKBCounts(this.db, kb.id, allChunks.length, fileCount);
@@ -165,6 +180,7 @@ export class KnowledgeEngine {
 			const finalChunks = getChunksByKB(this.db, kb.id);
 			const finalVectors = finalChunks.map((c) => vectorCache.get(c.content_hash)!).filter(Boolean);
 			saveVectors(vectorPath, finalVectors);
+			this.vectorCache.set(kb.id, finalVectors);
 
 			// 7. Update counts
 			updateKBCounts(this.db, kb.id, finalChunks.length, getFileCount(this.db, kb.id));
@@ -193,8 +209,8 @@ export class KnowledgeEngine {
 			if (mode === "fast") {
 				allResults.push(...searchBM25(this.db, query, 50, kb.id));
 			} else if (mode === "semantic") {
-				const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-				const vectors = loadVectors(vectorPath);
+				
+				const vectors = this.getVectors(kb.id);
 				if (vectors.length > 0) {
 					const queryVec = await embedQuery(query);
 					allResults.push(...searchVector(queryVec, vectors, chunkIds));
@@ -202,8 +218,8 @@ export class KnowledgeEngine {
 			} else {
 				// hybrid: BM25 + vector + RRF (both scoped to this KB)
 				const bm25Results = searchBM25(this.db, query, 50, kb.id);
-				const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-				const vectors = loadVectors(vectorPath);
+				
+				const vectors = this.getVectors(kb.id);
 				let vecResults: { chunkId: string; score: number }[] = [];
 				if (vectors.length > 0) {
 					const queryVec = await embedQuery(query);
@@ -272,6 +288,7 @@ export class KnowledgeEngine {
 		if (!this.db) return false;
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
+		this.invalidateVectorCache(kb.id);
 		deleteKB(this.db, kb.id);
 		return true;
 	}
@@ -284,6 +301,7 @@ export class KnowledgeEngine {
 	clear(): void {
 		if (!this.db) return;
 		for (const kb of listKBs(this.db)) deleteKB(this.db, kb.id);
+		this.vectorCache.clear();
 	}
 
 	diagnose(): DiagnosticResult[] {
