@@ -1,0 +1,16 @@
+{
+  "name": "pi-knowledge-spike",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "better-sqlite3": "11.9.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13"
+  }
+}

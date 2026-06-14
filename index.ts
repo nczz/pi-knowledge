@@ -1,0 +1,186 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { KnowledgeEngine } from "./src/engine.ts";
+import { getDefaultKnowledgeDir } from "./src/storage/sqlite.ts";
+import { startWatcher, stopAllWatchers, getActiveWatcherCount } from "./src/watcher/file-watcher.ts";
+
+const engine = new KnowledgeEngine();
+const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
+const AUTO_INJECT = process.env.PI_KNOWLEDGE_AUTO_INJECT === "true";
+
+export default function (pi: ExtensionAPI) {
+	pi.on("session_start", async () => {
+		await engine.initialize(getDefaultKnowledgeDir());
+		if (WATCH_ENABLED) {
+			for (const kb of engine.list()) {
+				if (kb.source_path && kb.source_type === "directory") {
+					startWatcher(kb.id, kb.source_path, (kbId) => { engine.update(kbId).catch(() => {}); });
+				}
+			}
+		}
+	});
+
+	pi.on("session_shutdown", async () => {
+		stopAllWatchers();
+		await engine.dispose();
+	});
+
+	// Auto-inject: search KB for relevant context before each LLM call (opt-in)
+	if (AUTO_INJECT) {
+		pi.on("context", async (event) => {
+			const kbs = engine.list();
+			if (kbs.length === 0) return;
+			// Find last user message
+			const lastUser = [...event.messages].reverse().find((m) => m.role === "user");
+			if (!lastUser) return;
+			const text = "content" in lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
+			if (!text || text.length < 5) return;
+			try {
+				const results = await engine.search(text, { mode: "fast", limit: 3 });
+				if (results.results.length === 0) return;
+				const context = results.results.map((r) => `[${r.file_path}]: ${r.snippet}`).join("\n\n");
+				event.messages.unshift({ role: "user", content: `[Knowledge context]\n${context}` } as any);
+			} catch { /* silent fail */ }
+		});
+	}
+
+	pi.on("before_agent_start", (event) => {
+		const kbs = engine.list();
+		if (kbs.length > 0) {
+			const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
+			event.systemPromptOptions.promptGuidelines?.push(
+				`Available knowledge bases: ${desc}. Use knowledge_search before answering domain questions.`,
+			);
+		}
+	});
+
+	pi.registerTool({
+		name: "knowledge_add",
+		label: "Knowledge Add",
+		description: "Index files, directories, or text into a named knowledge base for semantic search",
+		promptSnippet: "Index files/dirs/text into a searchable knowledge base",
+		promptGuidelines: [
+			"Use knowledge_add when the user asks to index, remember, or learn from files or documentation",
+			"Provide a descriptive name for the knowledge base",
+		],
+		parameters: Type.Object({
+			source: Type.String({ description: "File path, directory path, or inline text to index" }),
+			name: Type.String({ description: "Display name for this knowledge base" }),
+		}),
+		async execute(_id, params, _signal, onUpdate) {
+			const { source, name } = params;
+			const { kb, chunkCount } = await engine.add(source, name, (msg) => {
+				onUpdate?.({ content: [{ type: "text", text: msg }] });
+			});
+			return {
+				content: [{ type: "text", text: `Indexed "${kb.name}": ${chunkCount} chunks from ${kb.file_count} files. KB ID: ${kb.id}` }],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_search",
+		label: "Knowledge Search",
+		description: "Search indexed knowledge bases using hybrid semantic + keyword search",
+		promptSnippet: "Search knowledge bases (hybrid BM25 + semantic + RRF fusion)",
+		promptGuidelines: [
+			"Use knowledge_search to find relevant context before answering domain questions",
+			"Default mode 'hybrid' combines keyword and semantic search for best results",
+			"Use mode 'fast' for exact symbol/term lookups, 'semantic' for conceptual queries",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "Search query" }),
+			mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("semantic"), Type.Literal("hybrid"), Type.Literal("deep")])),
+			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
+			kb_id: Type.Optional(Type.String({ description: "Limit search to specific KB" })),
+			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
+			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
+		}),
+		async execute(_id, params) {
+			const { query, mode, limit, kb_id, offset, file_type } = params;
+			const filters = file_type ? { file_type } : undefined;
+			const response = await engine.search(query, { mode, limit, kb_id, offset, filters });
+			if (response.results.length === 0) {
+				return { content: [{ type: "text", text: "No results found." }] };
+			}
+			const formatted = response.results.map((r, i) =>
+				`[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}`,
+			).join("\n\n");
+			return {
+				content: [{ type: "text", text: `${response.total_count} results (showing ${response.results.length}):\n\n${formatted}` }],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_update",
+		label: "Knowledge Update",
+		description: "Incrementally re-index a knowledge base (only re-embeds changed content)",
+		promptSnippet: "Incrementally update a knowledge base (only changed files re-embedded)",
+		parameters: Type.Object({
+			target: Type.String({ description: "KB name or ID to update" }),
+		}),
+		async execute(_id, params, _signal, onUpdate) {
+			const { added, removed, unchanged } = await engine.update(params.target, (msg) => {
+				onUpdate?.({ content: [{ type: "text", text: msg }] });
+			});
+			return {
+				content: [{ type: "text", text: `Updated: +${added} added, -${removed} removed, ${unchanged} unchanged.` }],
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_status",
+		label: "Knowledge Status",
+		description: "Show knowledge engine status and all indexed knowledge bases",
+		parameters: Type.Object({}),
+		async execute() {
+			const kbs = engine.list();
+			const lines = [`Storage: ${getDefaultKnowledgeDir()}`, `Knowledge bases: ${kbs.length}`, ""];
+			for (const kb of kbs) {
+				const age = Math.round((Date.now() - kb.updated_at) / 60000);
+				lines.push(`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`);
+				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
+			}
+			return { content: [{ type: "text", text: lines.join("\n") }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_show",
+		label: "Knowledge Show",
+		description: "List all indexed knowledge bases",
+		parameters: Type.Object({}),
+		async execute() {
+			const kbs = engine.list();
+			if (kbs.length === 0) return { content: [{ type: "text", text: "No knowledge bases." }] };
+			const lines = kbs.map((kb) => `• ${kb.name} — ${kb.chunk_count} chunks, ${kb.file_count} files (${kb.status})`);
+			return { content: [{ type: "text", text: lines.join("\n") }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_remove",
+		label: "Knowledge Remove",
+		description: "Remove a knowledge base by name or ID",
+		parameters: Type.Object({
+			target: Type.String({ description: "KB name or ID to remove" }),
+		}),
+		async execute(_id, params) {
+			const ok = engine.remove(params.target);
+			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_clear",
+		label: "Knowledge Clear",
+		description: "Remove all knowledge bases",
+		parameters: Type.Object({}),
+		async execute() {
+			engine.clear();
+			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
+		},
+	});
+}
