@@ -34,10 +34,13 @@ export interface SearchResult {
 	end_line: number;
 }
 
+export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
+
 export interface SearchResponse {
 	results: SearchResult[];
 	total_count: number;
 	has_more: boolean;
+	warnings?: string[];
 }
 
 export type ProgressCallback = (msg: string) => void;
@@ -200,9 +203,13 @@ export class KnowledgeEngine {
 		const kbs = kb_id ? [getKB(this.db, kb_id)].filter(Boolean) as KnowledgeBase[] : listKBs(this.db);
 		if (kbs.length === 0) return { results: [], total_count: 0, has_more: false };
 
+		const warnings: string[] = [];
 		let allResults: { chunkId: string; score: number }[] = [];
 
 		for (const kb of kbs) {
+			if (kb.embedding_model !== CURRENT_EMBEDDING_MODEL) {
+				warnings.push(`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`);
+			}
 			const chunkIds = getChunkIdsByKB(this.db, kb.id);
 			if (chunkIds.length === 0) continue;
 
@@ -259,7 +266,7 @@ export class KnowledgeEngine {
 				const kbObj = getKB(this.db!, chunk.kb_id);
 				return { content: chunk.content, file_path: chunk.file_path, file_type: chunk.file_type, kb_name: kbObj?.name ?? "unknown", score: r.score, snippet: chunk.content.slice(0, 200), start_line: chunk.start_line, end_line: chunk.end_line };
 			});
-			return { results, total_count: results.length, has_more: false };
+			return { results, total_count: results.length, has_more: false, warnings: warnings.length > 0 ? warnings : undefined };
 		}
 
 		const total = filtered.length;
@@ -281,7 +288,7 @@ export class KnowledgeEngine {
 			};
 		}).filter(Boolean) as SearchResult[];
 
-		return { results, total_count: total, has_more: offset + limit < total };
+		return { results, total_count: total, has_more: offset + limit < total, warnings: warnings.length > 0 ? warnings : undefined };
 	}
 
 	remove(nameOrId: string): boolean {

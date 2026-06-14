@@ -107,12 +107,14 @@ export default function (pi: ExtensionAPI) {
 			if (response.results.length === 0) {
 				return { content: [{ type: "text", text: "No results found." }] };
 			}
-			const formatted = response.results.map((r, i) =>
+			let output = `${response.total_count} results (showing ${response.results.length}):\n\n`;
+			if (response.warnings?.length) {
+				output = `⚠️ ${response.warnings.join("\n⚠️ ")}\n\n${output}`;
+			}
+			output += response.results.map((r, i) =>
 				`[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}`,
 			).join("\n\n");
-			return {
-				content: [{ type: "text", text: `${response.total_count} results (showing ${response.results.length}):\n\n${formatted}` }],
-			};
+			return { content: [{ type: "text", text: output }] };
 		},
 	});
 

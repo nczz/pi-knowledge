@@ -68,6 +68,22 @@ pi install ./pi-knowledge
 
 See [DESIGN.md](DESIGN.md) for the full technical design document.
 
+## Data Storage
+
+All data is stored globally at `~/.pi/knowledge/` (never in your project directory):
+
+```
+~/.pi/knowledge/
+├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
+├── vectors/          ← Embedding vectors per KB (binary)
+└── models/           ← Downloaded ONNX models (~32MB, cached)
+```
+
+- **Backup**: copy `~/.pi/knowledge/` directory
+- **Reset**: delete `~/.pi/knowledge/` to start fresh
+- **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
+- **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
+
 ## Development
 
 ```bash

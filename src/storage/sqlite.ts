@@ -113,9 +113,26 @@ export function openDatabase(knowledgeDir?: string): Database.Database {
 	if (!hasVersion) {
 		db.exec(SCHEMA_SQL);
 		db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
+	} else {
+		const row = db.prepare("SELECT version FROM schema_version").get() as { version: number } | undefined;
+		const currentVersion = row?.version ?? 0;
+		if (currentVersion < SCHEMA_VERSION) {
+			runMigrations(db, currentVersion, SCHEMA_VERSION);
+			db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
+		}
 	}
 
 	return db;
+}
+
+function runMigrations(db: Database.Database, from: number, to: number): void {
+	const migrations: Record<number, string> = {
+		// Future migrations go here, keyed by target version number:
+		// 2: "ALTER TABLE ...",
+	};
+	for (let v = from + 1; v <= to; v++) {
+		if (migrations[v]) db.exec(migrations[v]);
+	}
 }
 
 // --- CRUD: Knowledge Bases ---
