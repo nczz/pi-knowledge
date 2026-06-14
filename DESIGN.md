@@ -403,41 +403,41 @@ Environment overrides:
 
 ### Phase 1: Core Parity (MVP)
 
-- [ ] Project scaffold (package.json, tsconfig, biome)
-- [ ] SQLite storage (metadata + FTS5)
-- [ ] Basic chunking (paragraph + markdown-aware)
-- [ ] Local ONNX embedding (multilingual-e5-small)
-- [ ] HNSW vector index
-- [ ] BM25 search via FTS5
-- [ ] Semantic search via HNSW
-- [ ] Tools: add, search, remove, show, clear
-- [ ] Persistence at `~/.pi/knowledge/`
-- [ ] Pi extension lifecycle hooks
-- [ ] Unit tests
+- [x] Project scaffold (package.json, tsconfig, biome)
+- [x] SQLite storage (metadata + FTS5)
+- [x] Basic chunking (paragraph + markdown-aware)
+- [x] Local ONNX embedding (multilingual-e5-small)
+- [x] Flat cosine vector search (pure JS, no HNSW needed)
+- [x] BM25 search via FTS5
+- [x] Semantic search via flat cosine similarity
+- [x] Tools: add, search, remove, show, clear
+- [x] Persistence at `~/.pi/knowledge/`
+- [x] Pi extension lifecycle hooks
+- [x] Unit tests
 
 ### Phase 2: Hybrid + Incremental
 
-- [ ] RRF fusion
-- [ ] Content-addressed dedup
-- [ ] Incremental re-indexing
-- [ ] `knowledge_update` + `knowledge_status`
-- [ ] Pagination
-- [ ] Metadata filters
-- [ ] TUI renderers
+- [x] RRF fusion
+- [x] Content-addressed dedup
+- [x] Incremental re-indexing
+- [x] `knowledge_update` + `knowledge_status`
+- [x] Pagination
+- [x] Metadata filters
+- [ ] TUI custom renderers (planned)
 
 ### Phase 3: Intelligence
 
-- [ ] AST chunking (TypeScript, Python, Go)
-- [ ] Cross-encoder reranking
-- [ ] File watcher
-- [ ] Index diagnostics
-- [ ] Auto-injection per turn
-- [ ] Pi AI provider embeddings
-- [ ] Benchmarks
+- [x] AST chunking (TypeScript, JavaScript, Python, Go, Rust, Java)
+- [x] Cross-encoder reranking
+- [x] File watcher
+- [x] Index diagnostics
+- [x] Auto-injection per turn
+- [x] Pi AI provider embeddings
+- [ ] Benchmarks + eval suite
 
 ### Phase 4: Ecosystem
 
-- [ ] More language AST support
+- [x] Additional language AST (Rust, Java added — 6 total)
 - [ ] PDF/DOCX parsing
 - [ ] URL indexing
 - [ ] Import/export KBs
