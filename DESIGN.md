@@ -433,16 +433,16 @@ Environment overrides:
 - [x] Index diagnostics
 - [x] Auto-injection per turn
 - [x] Pi AI provider embeddings
-- [ ] Benchmarks + eval suite
+- [x] Benchmarks (vitest bench: BM25 0.05ms, hybrid 2.1ms)
 
 ### Phase 4: Ecosystem
 
 - [x] Additional language AST (Rust, Java added — 6 total)
-- [ ] PDF/DOCX parsing
-- [ ] URL indexing
-- [ ] Import/export KBs
+- [x] PDF/DOCX parsing (unpdf + mammoth, pure JS)
+- [x] URL indexing (fetch + HTML strip)
+- [x] Import/export KBs (JSONL format)
 - [ ] KB sharing
-- [ ] Pi skills integration
+- [x] Pi skills integration (.pi/skills/search-docs.md)
 
 ---
 
