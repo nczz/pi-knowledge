@@ -3,7 +3,7 @@ import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
 
 let rerankerPipeline: any = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
-const IDLE_MS = 60_000;
+const IDLE_MS = 10_000;
 
 async function load(): Promise<any> {
 	if (rerankerPipeline) return rerankerPipeline;
