@@ -2,13 +2,13 @@
 
 ## 當前狀態
 
-**v0.2.3 已發佈** (npm + GitHub) — 2026-06-15
+**v0.3.0 已發佈** (npm + GitHub) — 2026-06-15
 
 | 指標 | 值 |
 |------|-----|
 | npm | https://www.npmjs.com/package/pi-knowledge |
 | GitHub | https://github.com/nczz/pi-knowledge |
-| Tests | 34 passing |
+| Tests | 40 passing (local unit) |
 | Tools | 9 (add, search, update, status, show, remove, clear, export, import) |
 | AST languages | 6 (TypeScript, JavaScript, Python, Go, Rust, Java) |
 | Formats | code, markdown, text, PDF, DOCX, URL |
@@ -37,7 +37,9 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 - Schema migration infrastructure
 - Model mismatch warning
 - Diagnostics: staleness, orphans, coverage %
-- 34 regression tests
+- 40 regression tests
+- Node strip-only startup smoke test
+- npm pack dry-run
 - All docs aligned with implementation
 - No overclaims in README
 
@@ -45,13 +47,16 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 
 | 優先 | 功能 | 說明 |
 |------|------|------|
-| 1 | **TUI custom rendering** | 需深入研究 Pi renderResult component API |
+| 1 | **Pi runtime dogfood** | 使用本機 `pi -e ./index.ts` 實際載入與 one-shot 工具驗證 |
+| 2 | **TUI custom rendering** | 需深入研究 Pi renderResult component API；目前為避免 root runtime import 問題，暫不依賴 `@earendil-works/pi-tui` |
+| 3 | **Format integration tests** | PDF/DOCX/URL/deep rerank/watcher 需要更完整的 integration coverage |
 已完成（本 session 最後一批）：
 - ✅ Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
 - ✅ Pi Skill (`/skill:search-docs`)
 - ✅ URL indexing (http/https → fetch → HTML strip → chunk)
 - ✅ PDF parsing (via unpdf — pure JS text extraction)
 - ✅ DOCX parsing (via mammoth — pure JS text extraction)
+- ✅ URL update / import cleanup / single-file diagnostics / BM25 score direction regression tests
 
 ## 技術文件交叉參考
 
@@ -78,7 +83,10 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 ```bash
 cd /path/to/pi-knowledge
 npm install
-npm test              # 34 tests should pass
+npm test              # 40 tests should pass
+npm run check         # Biome lint + format
+node --experimental-strip-types -e "import('./index.ts')"
+npm pack --dry-run
 pi -e ./index.ts      # Load extension for manual testing
 ```
 

@@ -1,7 +1,10 @@
 import type Database from "better-sqlite3";
 import { preTokenizeForFTS } from "../indexer/chunker.ts";
 
-export interface BM25Result { chunkId: string; score: number; }
+export interface BM25Result {
+	chunkId: string;
+	score: number;
+}
 
 function prepareFtsQuery(query: string): string {
 	let q = preTokenizeForFTS(query);
@@ -16,16 +19,22 @@ export function searchBM25(db: Database.Database, query: string, limit = 50, kbI
 	if (!ftsQuery) return [];
 	try {
 		if (kbId) {
-			return db.prepare(
-				`SELECT c.id as chunkId, bm25(chunks_fts) as score
+			return db
+				.prepare(
+					`SELECT c.id as chunkId, -bm25(chunks_fts) as score
          FROM chunks_fts JOIN chunks c ON chunks_fts.rowid = c.rowid
-         WHERE chunks_fts MATCH ? AND c.kb_id = ? ORDER BY score LIMIT ?`,
-			).all(ftsQuery, kbId, limit) as BM25Result[];
+         WHERE chunks_fts MATCH ? AND c.kb_id = ? ORDER BY bm25(chunks_fts) LIMIT ?`,
+				)
+				.all(ftsQuery, kbId, limit) as BM25Result[];
 		}
-		return db.prepare(
-			`SELECT c.id as chunkId, bm25(chunks_fts) as score
+		return db
+			.prepare(
+				`SELECT c.id as chunkId, -bm25(chunks_fts) as score
        FROM chunks_fts JOIN chunks c ON chunks_fts.rowid = c.rowid
-       WHERE chunks_fts MATCH ? ORDER BY score LIMIT ?`,
-		).all(ftsQuery, limit) as BM25Result[];
-	} catch { return []; }
+       WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?`,
+			)
+			.all(ftsQuery, limit) as BM25Result[];
+	} catch {
+		return [];
+	}
 }

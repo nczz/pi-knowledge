@@ -2,14 +2,14 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { walkDir } from "../indexer/chunker.ts";
-import { type KnowledgeBase, getChunksByKB } from "../storage/sqlite.ts";
+import { getChunksByKB, type KnowledgeBase } from "../storage/sqlite.ts";
 
 export interface DiagnosticResult {
 	kb_id: string;
 	kb_name: string;
-	stale_files: string[];      // files modified after indexing
-	orphan_files: string[];     // chunks referencing deleted files
-	coverage_percent: number;   // indexed files / total scannable files
+	stale_files: string[]; // files modified after indexing
+	orphan_files: string[]; // chunks referencing deleted files
+	coverage_percent: number; // indexed files / total scannable files
 	total_source_files: number;
 	indexed_files: number;
 }
@@ -25,16 +25,15 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 		indexed_files: kb.file_count,
 	};
 
-	if (!kb.source_path || !existsSync(kb.source_path)) {
+	if (!kb.source_path || kb.source_type === "url" || !existsSync(kb.source_path)) {
 		return result; // text KBs or missing source — no diagnostics possible
 	}
 
 	// Scan current source files
 	const currentFiles = new Set<string>();
+	const isDirectory = statSync(kb.source_path).isDirectory();
 	try {
-		const scanned = statSync(kb.source_path).isDirectory()
-			? walkDir(kb.source_path).map((f) => f.relPath)
-			: [kb.source_path];
+		const scanned = isDirectory ? walkDir(kb.source_path).map((f) => f.relPath) : [kb.source_path];
 		for (const f of scanned) currentFiles.add(f);
 	} catch {
 		return result;
@@ -56,7 +55,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 
 	// Staleness detection: source files modified after last indexing
 	for (const relPath of currentFiles) {
-		const absPath = join(kb.source_path, relPath);
+		const absPath = isDirectory ? join(kb.source_path, relPath) : relPath;
 		try {
 			const mtime = statSync(absPath).mtimeMs;
 			// Find latest indexed_at for this file's chunks
@@ -67,7 +66,9 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 					result.stale_files.push(relPath);
 				}
 			}
-		} catch { /* file unreadable — skip */ }
+		} catch {
+			/* file unreadable — skip */
+		}
 	}
 
 	return result;

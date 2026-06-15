@@ -1,6 +1,6 @@
+import { rmSync } from "node:fs";
 import { bench, describe } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
-import { rmSync } from "node:fs";
 
 const TEST_DIR = "/tmp/pk-bench";
 const engine = new KnowledgeEngine();

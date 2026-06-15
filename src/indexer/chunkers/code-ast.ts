@@ -1,5 +1,5 @@
-import { contentHash, preTokenizeForFTS } from "../chunker.ts";
 import type { ChunkInsert } from "../../storage/sqlite.ts";
+import { contentHash, preTokenizeForFTS } from "../chunker.ts";
 
 interface ASTNode {
 	type: string;
@@ -11,7 +11,7 @@ interface ASTNode {
 }
 
 type LangConfig = {
-	grammar: () => Promise<any>;
+	grammar: () => Promise<unknown>;
 	fnTypes: Set<string>;
 	classTypes: Set<string>;
 	methodContainer?: string;
@@ -21,41 +21,59 @@ type LangConfig = {
 
 const LANGS: Record<string, LangConfig> = {
 	typescript: {
-		grammar: async () => { const m = await import("tree-sitter-typescript"); return m.typescript ?? m.default?.typescript; },
+		grammar: async () => {
+			const m = await import("tree-sitter-typescript");
+			return m.typescript ?? m.default?.typescript;
+		},
 		fnTypes: new Set(["function_declaration", "arrow_function", "generator_function_declaration"]),
 		classTypes: new Set(["class_declaration", "interface_declaration"]),
 		classBody: "class_body",
 		fileType: "typescript",
 	},
 	javascript: {
-		grammar: async () => { const m = await import("tree-sitter-typescript"); return m.typescript ?? m.default?.typescript; },
+		grammar: async () => {
+			const m = await import("tree-sitter-typescript");
+			return m.typescript ?? m.default?.typescript;
+		},
 		fnTypes: new Set(["function_declaration", "arrow_function", "generator_function_declaration"]),
 		classTypes: new Set(["class_declaration"]),
 		classBody: "class_body",
 		fileType: "javascript",
 	},
 	python: {
-		grammar: async () => { const m = await import("tree-sitter-python"); return m.default ?? m; },
+		grammar: async () => {
+			const m = await import("tree-sitter-python");
+			return m.default ?? m;
+		},
 		fnTypes: new Set(["function_definition"]),
 		classTypes: new Set(["class_definition"]),
 		classBody: "block",
 		fileType: "python",
 	},
 	go: {
-		grammar: async () => { const m = await import("tree-sitter-go"); return m.default ?? m; },
+		grammar: async () => {
+			const m = await import("tree-sitter-go");
+			return m.default ?? m;
+		},
 		fnTypes: new Set(["function_declaration", "method_declaration"]),
 		classTypes: new Set(["type_declaration"]),
 		fileType: "go",
 	},
 	rust: {
-		grammar: async () => { const m = await import("tree-sitter-rust"); return m.default ?? m; },
+		grammar: async () => {
+			const m = await import("tree-sitter-rust");
+			return m.default ?? m;
+		},
 		fnTypes: new Set(["function_item"]),
 		classTypes: new Set(["struct_item", "enum_item"]),
 		methodContainer: "impl_item",
 		fileType: "rust",
 	},
 	java: {
-		grammar: async () => { const m = await import("tree-sitter-java"); return m.default ?? m; },
+		grammar: async () => {
+			const m = await import("tree-sitter-java");
+			return m.default ?? m;
+		},
 		fnTypes: new Set(["method_declaration", "constructor_declaration"]),
 		classTypes: new Set(["class_declaration", "interface_declaration", "enum_declaration"]),
 		classBody: "class_body",
@@ -67,25 +85,51 @@ function getName(node: ASTNode): string {
 	return node.childForFieldName("name")?.text ?? node.childForFieldName("type")?.text ?? "anonymous";
 }
 
-function collectChunks(root: ASTNode, config: LangConfig): Array<{ name: string; text: string; start: number; end: number }> {
+function collectChunks(
+	root: ASTNode,
+	config: LangConfig,
+): Array<{ name: string; text: string; start: number; end: number }> {
 	const chunks: Array<{ name: string; text: string; start: number; end: number }> = [];
 
 	function walk(node: ASTNode) {
 		if (node.type === "export_statement") {
 			for (const child of node.children) {
-				if (config.fnTypes.has(child.type)) { chunks.push({ name: getName(child), text: node.text, start: node.startPosition.row + 1, end: node.endPosition.row + 1 }); return; }
-				if (config.classTypes.has(child.type)) { walk(child); return; }
+				if (config.fnTypes.has(child.type)) {
+					chunks.push({
+						name: getName(child),
+						text: node.text,
+						start: node.startPosition.row + 1,
+						end: node.endPosition.row + 1,
+					});
+					return;
+				}
+				if (config.classTypes.has(child.type)) {
+					walk(child);
+					return;
+				}
 			}
 		}
 		if (node.type === "decorated_definition") {
 			for (const child of node.children) {
 				if (config.fnTypes.has(child.type) || config.classTypes.has(child.type)) {
-					chunks.push({ name: getName(child), text: node.text, start: node.startPosition.row + 1, end: node.endPosition.row + 1 }); return;
+					chunks.push({
+						name: getName(child),
+						text: node.text,
+						start: node.startPosition.row + 1,
+						end: node.endPosition.row + 1,
+					});
+					return;
 				}
 			}
 		}
 		if (config.fnTypes.has(node.type)) {
-			chunks.push({ name: getName(node), text: node.text, start: node.startPosition.row + 1, end: node.endPosition.row + 1 }); return;
+			chunks.push({
+				name: getName(node),
+				text: node.text,
+				start: node.startPosition.row + 1,
+				end: node.endPosition.row + 1,
+			});
+			return;
 		}
 		if (config.classTypes.has(node.type)) {
 			const name = getName(node);
@@ -95,12 +139,18 @@ function collectChunks(root: ASTNode, config: LangConfig): Array<{ name: string;
 					for (const m of child.children) {
 						if (config.fnTypes.has(m.type) || m.type === "method_definition") {
 							hasChildren = true;
-							chunks.push({ name: `${name}.${getName(m)}`, text: m.text, start: m.startPosition.row + 1, end: m.endPosition.row + 1 });
+							chunks.push({
+								name: `${name}.${getName(m)}`,
+								text: m.text,
+								start: m.startPosition.row + 1,
+								end: m.endPosition.row + 1,
+							});
 						}
 					}
 				}
 			}
-			if (!hasChildren) chunks.push({ name, text: node.text, start: node.startPosition.row + 1, end: node.endPosition.row + 1 });
+			if (!hasChildren)
+				chunks.push({ name, text: node.text, start: node.startPosition.row + 1, end: node.endPosition.row + 1 });
 			return;
 		}
 		if (config.methodContainer && node.type === config.methodContainer) {
@@ -108,7 +158,13 @@ function collectChunks(root: ASTNode, config: LangConfig): Array<{ name: string;
 			for (const child of node.children) {
 				if (child.type === "declaration_list") {
 					for (const m of child.children) {
-						if (config.fnTypes.has(m.type)) chunks.push({ name: `${typeName}.${getName(m)}`, text: m.text, start: m.startPosition.row + 1, end: m.endPosition.row + 1 });
+						if (config.fnTypes.has(m.type))
+							chunks.push({
+								name: `${typeName}.${getName(m)}`,
+								text: m.text,
+								start: m.startPosition.row + 1,
+								end: m.endPosition.row + 1,
+							});
 					}
 				}
 			}
@@ -121,7 +177,11 @@ function collectChunks(root: ASTNode, config: LangConfig): Array<{ name: string;
 	return chunks;
 }
 
-export async function chunkWithAST(content: string, filePath: string, language: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
+export async function chunkWithAST(
+	content: string,
+	filePath: string,
+	language: string,
+): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const config = LANGS[language];
 	if (!config) return [];
 	const Parser = (await import("tree-sitter")).default;

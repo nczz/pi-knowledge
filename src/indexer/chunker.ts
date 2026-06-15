@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 import ignore from "ignore";
 import type { ChunkInsert } from "../storage/sqlite.ts";
@@ -7,25 +7,74 @@ import type { ChunkInsert } from "../storage/sqlite.ts";
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 const BINARY_EXTENSIONS = new Set([
-	".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".svg",
-	".woff", ".woff2", ".ttf", ".eot", ".otf",
-	".zip", ".gz", ".tar", ".bz2", ".7z", ".rar",
-	".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
-	".exe", ".dll", ".so", ".dylib", ".node",
-	".db", ".sqlite", ".bin", ".dat", ".lock",
-	".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm",
-	".wasm", ".o", ".a", ".lib",
+	".png",
+	".jpg",
+	".jpeg",
+	".gif",
+	".ico",
+	".bmp",
+	".webp",
+	".svg",
+	".woff",
+	".woff2",
+	".ttf",
+	".eot",
+	".otf",
+	".zip",
+	".gz",
+	".tar",
+	".bz2",
+	".7z",
+	".rar",
+	".pdf",
+	".doc",
+	".docx",
+	".xls",
+	".xlsx",
+	".ppt",
+	".exe",
+	".dll",
+	".so",
+	".dylib",
+	".node",
+	".db",
+	".sqlite",
+	".bin",
+	".dat",
+	".lock",
+	".mp3",
+	".mp4",
+	".wav",
+	".avi",
+	".mov",
+	".webm",
+	".wasm",
+	".o",
+	".a",
+	".lib",
 ]);
 
 const DEFAULT_IGNORE = [
-	"node_modules", ".git", "dist", "build", ".next", "__pycache__",
-	"*.min.js", "*.min.css", "*.map", "*.lock", "package-lock.json",
-	".DS_Store", "Thumbs.db", "*.pyc", "*.class",
+	"node_modules",
+	".git",
+	"dist",
+	"build",
+	".next",
+	"__pycache__",
+	"*.min.js",
+	"*.min.css",
+	"*.map",
+	"*.lock",
+	"package-lock.json",
+	".DS_Store",
+	"Thumbs.db",
+	"*.pyc",
+	"*.class",
 ];
 
 export interface ScannedFile {
-	path: string;       // absolute path
-	relPath: string;    // relative to root
+	path: string; // absolute path
+	relPath: string; // relative to root
 	content: string;
 	fileType: string;
 }
@@ -33,16 +82,36 @@ export interface ScannedFile {
 function detectFileType(filePath: string): string {
 	const ext = extname(filePath).toLowerCase();
 	const map: Record<string, string> = {
-		".ts": "typescript", ".tsx": "typescript",
-		".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-		".py": "python", ".go": "go", ".rs": "rust", ".java": "java",
-		".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
-		".md": "markdown", ".mdx": "markdown",
-		".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
-		".html": "html", ".css": "css", ".scss": "css",
-		".sh": "shell", ".bash": "shell", ".zsh": "shell",
-		".sql": "sql", ".graphql": "graphql",
-		".txt": "text", ".csv": "text", ".log": "text",
+		".ts": "typescript",
+		".tsx": "typescript",
+		".js": "javascript",
+		".jsx": "javascript",
+		".mjs": "javascript",
+		".py": "python",
+		".go": "go",
+		".rs": "rust",
+		".java": "java",
+		".c": "c",
+		".cpp": "cpp",
+		".h": "c",
+		".hpp": "cpp",
+		".md": "markdown",
+		".mdx": "markdown",
+		".json": "json",
+		".yaml": "yaml",
+		".yml": "yaml",
+		".toml": "toml",
+		".html": "html",
+		".css": "css",
+		".scss": "css",
+		".sh": "shell",
+		".bash": "shell",
+		".zsh": "shell",
+		".sql": "sql",
+		".graphql": "graphql",
+		".txt": "text",
+		".csv": "text",
+		".log": "text",
 	};
 	return map[ext] ?? "text";
 }
@@ -70,9 +139,12 @@ export function walkDir(dirPath: string): ScannedFile[] {
 	const results: ScannedFile[] = [];
 
 	function walk(dir: string): void {
-		let entries;
-		try { entries = readdirSync(dir, { withFileTypes: true }); }
-		catch { return; }
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
 			const relPath = relative(dirPath, fullPath).split(sep).join("/");
@@ -80,7 +152,7 @@ export function walkDir(dirPath: string): ScannedFile[] {
 			if (ig.ignores(relPath)) continue;
 
 			if (entry.isDirectory()) {
-				if (ig.ignores(relPath + "/")) continue;
+				if (ig.ignores(`${relPath}/`)) continue;
 				walk(fullPath);
 			} else if (entry.isFile()) {
 				const stat = statSync(fullPath);
@@ -261,23 +333,27 @@ export async function chunkFile(content: string, filePath: string): Promise<Omit
 		try {
 			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
 			chunks = await chunkWithAST(content, filePath, fileType);
-		} catch { /* fallback below */ }
+		} catch {
+			/* fallback below */
+		}
 	}
 
 	if (chunks.length === 0) chunks = chunkText(content, filePath);
 
 	// Fallback: if file has content but no chunks (too short for splitting), keep as single chunk
 	if (chunks.length === 0 && content.trim().length > 10) {
-		chunks = [{
-			content_hash: contentHash(content),
-			content: content.trim(),
-			content_tokenized: preTokenizeForFTS(content),
-			file_path: filePath,
-			file_type: fileType,
-			start_line: 1,
-			end_line: content.split("\n").length,
-			metadata_json: "{}",
-		}];
+		chunks = [
+			{
+				content_hash: contentHash(content),
+				content: content.trim(),
+				content_tokenized: preTokenizeForFTS(content),
+				file_path: filePath,
+				file_type: fileType,
+				start_line: 1,
+				end_line: content.split("\n").length,
+				metadata_json: "{}",
+			},
+		];
 	}
 
 	return chunks;

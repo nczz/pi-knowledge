@@ -1,7 +1,12 @@
 import { join } from "node:path";
 import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
 
-let pipelineInstance: any = null;
+type FeatureExtractionPipeline = {
+	(input: string, options: { pooling: "mean"; normalize: true }): Promise<{ data: ArrayLike<number> }>;
+	dispose(): Promise<void> | void;
+};
+
+let pipelineInstance: FeatureExtractionPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const IDLE_TIMEOUT_MS = 30_000;
@@ -11,11 +16,14 @@ function getModelCacheDir(): string {
 	return join(getDefaultKnowledgeDir(), "models");
 }
 
-async function loadPipeline(): Promise<any> {
+async function loadPipeline(): Promise<FeatureExtractionPipeline> {
 	if (pipelineInstance) return pipelineInstance;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = getModelCacheDir();
-	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", { quantized: true, dtype: "fp32" });
+	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", {
+		quantized: true,
+		dtype: "fp32",
+	});
 	return pipelineInstance;
 }
 
@@ -25,8 +33,14 @@ function resetIdleTimer(): void {
 }
 
 export async function dispose(): Promise<void> {
-	if (disposeTimer) { clearTimeout(disposeTimer); disposeTimer = null; }
-	if (pipelineInstance) { await pipelineInstance.dispose(); pipelineInstance = null; }
+	if (disposeTimer) {
+		clearTimeout(disposeTimer);
+		disposeTimer = null;
+	}
+	if (pipelineInstance) {
+		await pipelineInstance.dispose();
+		pipelineInstance = null;
+	}
 }
 
 async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
@@ -49,10 +63,17 @@ async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promis
 	throw new Error(`Unsupported embedding provider: ${provider}`);
 }
 
-export async function embedTexts(texts: string[], prefix: "query" | "passage", signal?: AbortSignal): Promise<Float32Array[]> {
+export async function embedTexts(
+	texts: string[],
+	prefix: "query" | "passage",
+	signal?: AbortSignal,
+): Promise<Float32Array[]> {
 	if (!EMBEDDING_CONFIG.startsWith("local")) {
-		try { return await embedViaAPI(texts, prefix); }
-		catch { /* fallback to local */ }
+		try {
+			return await embedViaAPI(texts, prefix);
+		} catch {
+			/* fallback to local */
+		}
 	}
 	const pipe = await loadPipeline();
 	resetIdleTimer();

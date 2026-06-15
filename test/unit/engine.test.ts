@@ -1,18 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { openDatabase, createKB, insertChunks, getChunkIdsByKB } from "../../src/storage/sqlite.ts";
-import { preTokenizeForFTS, contentHash } from "../../src/indexer/chunker.ts";
-import { rmSync } from "node:fs";
-import type Database from "better-sqlite3";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
 
 const TEST_DIR = "/tmp/pk-test-engine";
-
-function makeChunks(texts: string[]) {
-	return texts.map((t) => ({
-		content_hash: contentHash(t), content: t, content_tokenized: preTokenizeForFTS(t),
-		file_path: "test.md", file_type: "markdown", start_line: 1, end_line: 1, metadata_json: "{}",
-	}));
-}
 
 describe("KnowledgeEngine", () => {
 	let engine: KnowledgeEngine;
@@ -24,6 +15,7 @@ describe("KnowledgeEngine", () => {
 	});
 
 	afterEach(async () => {
+		vi.unstubAllGlobals();
 		await engine.dispose();
 		rmSync(TEST_DIR, { recursive: true, force: true });
 	});
@@ -79,6 +71,75 @@ describe("KnowledgeEngine", () => {
 		it("indexes short content as single chunk", async () => {
 			const { chunkCount } = await engine.add("Short but valid content.", "Short");
 			expect(chunkCount).toBe(1);
+		});
+	});
+
+	describe("update", () => {
+		it("updates URL knowledge bases by re-fetching the source", async () => {
+			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(body, { status: 200 })),
+			);
+
+			await engine.add("https://example.test/docs", "URL");
+			body = "<html><body>Changed URL content about billing invoices and payments.</body></html>";
+
+			const result = await engine.update("URL");
+			expect(result.added).toBeGreaterThan(0);
+			expect(engine.list()[0].source_type).toBe("url");
+		});
+
+		it("honors cancellation before embedding changed chunks", async () => {
+			const filePath = join(TEST_DIR, "source.txt");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(filePath, "Initial content about authentication tokens and sessions.");
+			await engine.add(filePath, "Cancellable");
+			writeFileSync(filePath, "Changed content about billing invoices and payments.");
+
+			const controller = new AbortController();
+			controller.abort();
+
+			await expect(engine.update("Cancellable", undefined, controller.signal)).rejects.toThrow("Cancelled");
+		});
+	});
+
+	describe("diagnostics", () => {
+		it("detects stale single-file knowledge bases", async () => {
+			const filePath = join(TEST_DIR, "single.txt");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(filePath, "Single file content about authentication tokens and sessions.");
+			await engine.add(filePath, "SingleFile");
+
+			writeFileSync(filePath, "Updated single file content about authentication tokens and sessions.");
+			const future = new Date(Date.now() + 5_000);
+			utimesSync(filePath, future, future);
+
+			const [diagnostic] = engine.diagnose();
+			expect(diagnostic.stale_files).toContain(filePath);
+			expect(diagnostic.orphan_files).toEqual([]);
+		});
+	});
+
+	describe("import/export", () => {
+		it("removes partially created KBs when import fails", async () => {
+			const inputPath = join(TEST_DIR, "bad.jsonl");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(inputPath, `${JSON.stringify({ name: "Bad Import" })}\n{not json}\n`);
+
+			await expect(engine.importKB(inputPath)).rejects.toThrow();
+			expect(engine.list()).toEqual([]);
+		});
+
+		it("imports exported KBs as portable text sources", async () => {
+			await engine.add("Portable import export content about authentication tokens and sessions.", "Portable");
+			const outputPath = join(TEST_DIR, "portable.jsonl");
+			await engine.exportKB("Portable", outputPath);
+			engine.clear();
+
+			const { kb } = await engine.importKB(outputPath);
+			expect(kb.source_type).toBe("text");
+			expect(kb.source_path).toBeNull();
 		});
 	});
 });

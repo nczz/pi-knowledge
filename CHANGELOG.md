@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] - 2026-06-15
+
+### Fixed
+- Corrected BM25 fast-mode score semantics so higher scores are consistently better after search fusion/sorting.
+- Made URL knowledge bases a first-class source type and allowed `knowledge_update` to re-fetch URL sources.
+- Threaded `AbortSignal` into incremental update embedding.
+- Fixed stale diagnostics for single-file knowledge bases.
+- Made JSONL import cleanup partial KBs on failure and import exported KBs as portable text sources.
+- Removed root extension runtime dependency on Pi virtual modules so Node strip-only startup smoke tests can run outside Pi.
+- Updated Biome 2 configuration so `npm run check` is a working quality gate.
+
+### Added
+- Regression coverage for BM25 score direction, URL update, update cancellation, single-file diagnostics, import failure cleanup, and portable import/export behavior.
+- Development contract notes for Pi runtime imports, source-type update behavior, portable exports, and release gates.
+
 ## [0.2.2] - 2026-06-15
 
 ### Fixed

@@ -1,11 +1,16 @@
 import { join } from "node:path";
 import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
 
-let rerankerPipeline: any = null;
+type RerankerPipeline = {
+	(input: { text: string; text_pair: string }): Promise<{ score?: number } | Array<{ score?: number }>>;
+	dispose(): Promise<void> | void;
+};
+
+let rerankerPipeline: RerankerPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 const IDLE_MS = 30_000;
 
-async function load(): Promise<any> {
+async function load(): Promise<RerankerPipeline> {
 	if (rerankerPipeline) return rerankerPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = join(getDefaultKnowledgeDir(), "models");
@@ -19,13 +24,26 @@ function resetTimer(): void {
 }
 
 export async function disposeReranker(): Promise<void> {
-	if (disposeTimer) { clearTimeout(disposeTimer); disposeTimer = null; }
-	if (rerankerPipeline) { await rerankerPipeline.dispose(); rerankerPipeline = null; }
+	if (disposeTimer) {
+		clearTimeout(disposeTimer);
+		disposeTimer = null;
+	}
+	if (rerankerPipeline) {
+		await rerankerPipeline.dispose();
+		rerankerPipeline = null;
+	}
 }
 
-export interface RerankCandidate { chunkId: string; content: string; }
+export interface RerankCandidate {
+	chunkId: string;
+	content: string;
+}
 
-export async function rerank(query: string, candidates: RerankCandidate[], topK: number): Promise<Array<{ chunkId: string; score: number }>> {
+export async function rerank(
+	query: string,
+	candidates: RerankCandidate[],
+	topK: number,
+): Promise<Array<{ chunkId: string; score: number }>> {
 	if (candidates.length === 0) return [];
 	const pipe = await load();
 	resetTimer();

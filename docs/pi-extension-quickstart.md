@@ -59,10 +59,13 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
+> pi-knowledge 的根 `index.ts` 目前避免 runtime import `typebox` / `@earendil-works/pi-tui`，以便裸 Node strip-only import 也能驗證 startup。新 extension 若依賴 Pi virtual modules，請至少同時用 `pi -e ./index.ts` 和裸 Node import 檢查載入行為。
+
 ### 測試
 
 ```bash
 npm install
+node --experimental-strip-types -e "import('./index.ts')"  # startup dependency smoke test
 pi -e ./index.ts            # 直接載入測試
 pi -e ./index.ts -p "use my_tool with input hello"  # one-shot 測試
 ```
@@ -154,7 +157,8 @@ pi.on("context", async (event) => {
   const lastUser = [...event.messages].reverse().find(m => m.role === "user");
   if (!lastUser) return;
   // 搜尋相關資訊...
-  event.messages.unshift({ role: "user", content: "[Context]\n..." } as any);
+  const messages = event.messages as Array<{ role: string; content: string }>;
+  messages.unshift({ role: "user", content: "[Context]\n..." });
 });
 ```
 
@@ -186,6 +190,23 @@ Do this for: $ARGUMENTS
   core 0.22.x + grammars 0.23.x ✅
   core 0.25.x gyp build failure ❌
 ```
+
+### Runtime imports and virtual modules
+
+Pi binary 會提供 virtual modules：
+
+- `@earendil-works/pi-coding-agent`
+- `@earendil-works/pi-agent-core`
+- `@earendil-works/pi-tui`
+- `@earendil-works/pi-ai`
+- `typebox`
+
+但這些不會自動出現在一般 Node / CI module resolution 中。商用品質要求：
+
+- 根 `index.ts` 應能被 `node --experimental-strip-types -e "import('./index.ts')"` 載入，除非文件明確說明只能在 Pi runtime 載入。
+- Runtime import Pi virtual modules 時，要用 `pi -e ./index.ts` dogfood 驗證。
+- Type-only imports from Pi packages are acceptable when they are erased by Node strip-only TypeScript.
+- Heavy/optional dependencies 可用 dynamic import 延遲載入，但要在 AGENTS.md 記錄為例外。
 
 ### Memory 管理 (Lazy Load + Idle Dispose)
 
@@ -273,6 +294,9 @@ npm publish
 每次 commit 前確認:
 
 - [ ] `npm test` 通過
+- [ ] `npm run check` 通過（包含 Biome config 本身）
+- [ ] `node --experimental-strip-types -e "import('./index.ts')"` 通過
+- [ ] `npm pack --dry-run` package contents 正確
 - [ ] `pi -e ./index.ts -p "use my_tool"` dogfood 通過
 - [ ] README 描述和實作對齊（不 overclaim）
 - [ ] CHANGELOG 更新
@@ -280,6 +304,8 @@ npm publish
 - [ ] 長操作支援 AbortSignal
 - [ ] onUpdate 回報進度
 - [ ] 資源有 dispose (session_shutdown)
+- [ ] 新 source type 覆蓋 add + update + status/diagnostics
+- [ ] import/export 保持跨機器 portable，不依賴本機 absolute source path
 
 ---
 

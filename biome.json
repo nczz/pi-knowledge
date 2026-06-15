@@ -1,14 +1,20 @@
 {
-  "linter": {
-    "enabled": true,
-    "rules": { "recommended": true }
-  },
-  "formatter": {
-    "indentStyle": "tab",
-    "lineWidth": 120
-  },
-  "organizeImports": { "enabled": true },
-  "files": {
-    "ignore": ["node_modules", "dist"]
-  }
+	"linter": {
+		"enabled": true,
+		"rules": { "recommended": true }
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"lineWidth": 120
+	},
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	},
+	"files": {
+		"includes": ["**", "!node_modules", "!dist"]
+	}
 }

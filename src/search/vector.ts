@@ -1,4 +1,7 @@
-export interface VectorResult { chunkId: string; score: number; }
+export interface VectorResult {
+	chunkId: string;
+	score: number;
+}
 
 function cosine(a: Float32Array, b: Float32Array): number {
 	let dot = 0;
@@ -6,7 +9,12 @@ function cosine(a: Float32Array, b: Float32Array): number {
 	return dot;
 }
 
-export function searchVector(queryVec: Float32Array, vectors: Float32Array[], chunkIds: string[], limit = 50): VectorResult[] {
+export function searchVector(
+	queryVec: Float32Array,
+	vectors: Float32Array[],
+	chunkIds: string[],
+	limit = 50,
+): VectorResult[] {
 	const scores = vectors.map((v, i) => ({ chunkId: chunkIds[i], score: cosine(queryVec, v) }));
 	scores.sort((a, b) => b.score - a.score);
 	return scores.slice(0, limit);

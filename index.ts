@@ -1,9 +1,40 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
 import { KnowledgeEngine } from "./src/engine.ts";
 import { getDefaultKnowledgeDir } from "./src/storage/sqlite.ts";
-import { startWatcher, stopAllWatchers, getActiveWatcherCount } from "./src/watcher/file-watcher.ts";
+import { getActiveWatcherCount, startWatcher, stopAllWatchers } from "./src/watcher/file-watcher.ts";
+
+type Schema = Record<string, unknown> & { optional?: true };
+type ContextMessage = { role: string; content: string };
+
+const Type = {
+	Object(properties: Record<string, Schema>): Schema {
+		const required = Object.entries(properties)
+			.filter(([, schema]) => !schema.optional)
+			.map(([name]) => name);
+		const normalized = Object.fromEntries(
+			Object.entries(properties).map(([name, schema]) => {
+				const { optional: _optional, ...rest } = schema;
+				return [name, rest];
+			}),
+		);
+		return { type: "object", properties: normalized, required, additionalProperties: false };
+	},
+	String(options: Record<string, unknown> = {}): Schema {
+		return { type: "string", ...options };
+	},
+	Number(options: Record<string, unknown> = {}): Schema {
+		return { type: "number", ...options };
+	},
+	Literal(value: string): Schema {
+		return { const: value };
+	},
+	Union(items: Schema[]): Schema {
+		return { anyOf: items };
+	},
+	Optional(schema: Schema): Schema {
+		return { ...schema, optional: true };
+	},
+};
 
 const engine = new KnowledgeEngine();
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
@@ -15,7 +46,9 @@ export default function (pi: ExtensionAPI) {
 		if (WATCH_ENABLED) {
 			for (const kb of engine.list()) {
 				if (kb.source_path && kb.source_type === "directory") {
-					startWatcher(kb.id, kb.source_path, (kbId) => { engine.update(kbId).catch(() => {}); });
+					startWatcher(kb.id, kb.source_path, (kbId) => {
+						engine.update(kbId).catch(() => {});
+					});
 				}
 			}
 		}
@@ -42,8 +75,11 @@ export default function (pi: ExtensionAPI) {
 				const results = await engine.search(text, { mode: "fast", limit: 3 });
 				if (results.results.length === 0) return;
 				const context = results.results.map((r) => `[${r.file_path}]: ${r.snippet}`).join("\n\n");
-				event.messages.unshift({ role: "user", content: `[Knowledge context]\n${context}` } as any);
-			} catch { /* silent fail */ }
+				const messages = event.messages as ContextMessage[];
+				messages.unshift({ role: "user", content: `[Knowledge context]\n${context}` });
+			} catch {
+				/* silent fail */
+			}
 		});
 	}
 
@@ -72,15 +108,27 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, onUpdate) {
 			const { source, name } = params;
-			const { kb, chunkCount } = await engine.add(source, name, (msg) => {
-				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			}, _signal);
+			const { kb, chunkCount } = await engine.add(
+				source,
+				name,
+				(msg) => {
+					onUpdate?.({ content: [{ type: "text", text: msg }] });
+				},
+				_signal,
+			);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
-				startWatcher(kb.id, kb.source_path, (kbId) => { engine.update(kbId).catch(() => {}); });
+				startWatcher(kb.id, kb.source_path, (kbId) => {
+					engine.update(kbId).catch(() => {});
+				});
 			}
 			return {
-				content: [{ type: "text", text: `Indexed "${kb.name}": ${chunkCount} chunks from ${kb.file_count} files. KB ID: ${kb.id}` }],
+				content: [
+					{
+						type: "text",
+						text: `Indexed "${kb.name}": ${chunkCount} chunks from ${kb.file_count} files. KB ID: ${kb.id}`,
+					},
+				],
 			};
 		},
 	});
@@ -97,21 +145,14 @@ export default function (pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),
-			mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("semantic"), Type.Literal("hybrid"), Type.Literal("deep")])),
+			mode: Type.Optional(
+				Type.Union([Type.Literal("fast"), Type.Literal("semantic"), Type.Literal("hybrid"), Type.Literal("deep")]),
+			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to specific KB" })),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 		}),
-		renderCall(args, theme) {
-			const mode = args.mode || "hybrid";
-			return new Text(`${theme.fg("accent", "Search")}: "${args.query}" ${theme.fg("muted", `(${mode})`)}`, 0, 0);
-		},
-		renderResult(result, options, theme) {
-			const text = result.content?.[0]?.text ?? "";
-			const lines = options.expanded ? text : text.split("\n").slice(0, 5).join("\n");
-			return new Text(lines, 0, 0);
-		},
 		async execute(_id, params) {
 			const { query, mode, limit, kb_id, offset, file_type } = params;
 			const filters = file_type ? { file_type } : undefined;
@@ -123,9 +164,9 @@ export default function (pi: ExtensionAPI) {
 			if (response.warnings?.length) {
 				output = `⚠️ ${response.warnings.join("\n⚠️ ")}\n\n${output}`;
 			}
-			output += response.results.map((r, i) =>
-				`[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}`,
-			).join("\n\n");
+			output += response.results
+				.map((r, i) => `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}`)
+				.join("\n\n");
 			return { content: [{ type: "text", text: output }] };
 		},
 	});
@@ -139,15 +180,18 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to update" }),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
-			const { added, removed, unchanged } = await engine.update(params.target, (msg) => {
-				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			}, _signal);
+			const { added, removed, unchanged } = await engine.update(
+				params.target,
+				(msg) => {
+					onUpdate?.({ content: [{ type: "text", text: msg }] });
+				},
+				_signal,
+			);
 			return {
 				content: [{ type: "text", text: `Updated: +${added} added, -${removed} removed, ${unchanged} unchanged.` }],
 			};
 		},
 	});
-
 
 	pi.registerTool({
 		name: "knowledge_status",
@@ -158,22 +202,34 @@ export default function (pi: ExtensionAPI) {
 			const kbs = engine.list();
 			const watchCount = getActiveWatcherCount();
 			const diagnostics = engine.diagnose();
-			const lines = [`Storage: ${getDefaultKnowledgeDir()}`, `Knowledge bases: ${kbs.length}`, `Active watchers: ${watchCount}`, ""];
+			const lines = [
+				`Storage: ${getDefaultKnowledgeDir()}`,
+				`Knowledge bases: ${kbs.length}`,
+				`Active watchers: ${watchCount}`,
+				"",
+			];
 			for (const kb of kbs) {
 				const age = Math.round((Date.now() - kb.updated_at) / 60000);
 				const diag = diagnostics.find((d) => d.kb_id === kb.id);
-				lines.push(`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`);
+				lines.push(
+					`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`,
+				);
 				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
 				if (diag) {
-					lines.push(`    coverage: ${diag.coverage_percent}% (${diag.indexed_files}/${diag.total_source_files} files)`);
-					if (diag.stale_files.length > 0) lines.push(`    ⚠️ stale: ${diag.stale_files.length} files modified since last index`);
-					if (diag.orphan_files.length > 0) lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
+					lines.push(
+						`    coverage: ${diag.coverage_percent}% (${diag.indexed_files}/${diag.total_source_files} files)`,
+					);
+					if (diag.stale_files.length > 0)
+						lines.push(`    ⚠️ stale: ${diag.stale_files.length} files modified since last index`);
+					if (diag.orphan_files.length > 0)
+						lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
 				}
 			}
 			const totalStale = diagnostics.reduce((n, d) => n + d.stale_files.length, 0);
 			const totalOrphans = diagnostics.reduce((n, d) => n + d.orphan_files.length, 0);
 			if (totalStale === 0 && totalOrphans === 0 && kbs.length > 0) lines.push("", "Health: ✓ all indexes up to date");
-			else if (totalStale > 0 || totalOrphans > 0) lines.push("", `Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans — run knowledge_update`);
+			else if (totalStale > 0 || totalOrphans > 0)
+				lines.push("", `Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans — run knowledge_update`);
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});
@@ -226,9 +282,13 @@ export default function (pi: ExtensionAPI) {
 			input: Type.String({ description: "Input JSONL file path" }),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
-			const { kb, chunkCount } = await engine.importKB(params.input, (msg) => {
-				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			}, _signal);
+			const { kb, chunkCount } = await engine.importKB(
+				params.input,
+				(msg) => {
+					onUpdate?.({ content: [{ type: "text", text: msg }] });
+				},
+				_signal,
+			);
 			return { content: [{ type: "text", text: `Imported "${kb.name}": ${chunkCount} chunks (re-embedded)` }] };
 		},
 	});

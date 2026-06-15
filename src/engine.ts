@@ -1,18 +1,31 @@
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
-import { embedDocuments, embedQuery, dispose as disposeEmbedding } from "./embedding/provider.ts";
+import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
+import { dispose as disposeEmbedding, embedDocuments, embedQuery } from "./embedding/provider.ts";
 import { loadVectors, saveVectors } from "./embedding/vectors.ts";
-import { chunkFile, walkDir, contentHash, preTokenizeForFTS } from "./indexer/chunker.ts";
+import { chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { reciprocalRankFusion } from "./search/fusion.ts";
-import { rerank, disposeReranker } from "./search/reranker.ts";
+import { disposeReranker, rerank } from "./search/reranker.ts";
 import { searchVector } from "./search/vector.ts";
-import { diagnoseKB, type DiagnosticResult } from "./diagnostics/health.ts";
 import {
-	createKB, deleteKB, getChunkById, getChunkIdsByKB, getChunksByKB, getFileCount, getKB, getKBByName,
-	insertChunks, listKBs, openDatabase, updateKBCounts, updateKBStatus, deleteChunksByIds, getChunkHashesByKB,
+	createKB,
+	deleteChunksByIds,
+	deleteKB,
+	getChunkById,
+	getChunkHashesByKB,
+	getChunkIdsByKB,
+	getChunksByKB,
+	getFileCount,
+	getKB,
+	getKBByName,
+	insertChunks,
 	type KnowledgeBase,
+	listKBs,
+	openDatabase,
+	updateKBCounts,
+	updateKBStatus,
 } from "./storage/sqlite.ts";
 
 export interface SearchOptions {
@@ -45,6 +58,29 @@ export interface SearchResponse {
 
 export type ProgressCallback = (msg: string) => void;
 
+interface ImportedChunk {
+	content: string;
+	file_path: string;
+	file_type: string;
+	start_line: number;
+	end_line: number;
+	metadata_json?: string;
+}
+
+async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
+	const res = await fetch(source, { signal });
+	if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+	const html = await res.text();
+	const text = html
+		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&[a-z]+;/gi, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return chunkFile(text, source);
+}
+
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
@@ -57,7 +93,8 @@ export class KnowledgeEngine {
 	}
 
 	private getVectors(kbId: string): Float32Array[] {
-		if (this.vectorCache.has(kbId)) return this.vectorCache.get(kbId)!;
+		const cached = this.vectorCache.get(kbId);
+		if (cached) return cached;
 		const vectorPath = join(this.knowledgeDir, "vectors", `${kbId}.bin`);
 		const vectors = loadVectors(vectorPath);
 		this.vectorCache.set(kbId, vectors);
@@ -68,15 +105,24 @@ export class KnowledgeEngine {
 		this.vectorCache.delete(kbId);
 	}
 
-	async add(source: string, name: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+	async add(
+		source: string,
+		name: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const resolvedSource = resolve(source);
 		const isUrl = source.startsWith("http://") || source.startsWith("https://");
 		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
 		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
-		const sourceType = isDir ? "directory" : isFile ? "file" : "text";
+		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
 
-		const kb = createKB(this.db, { name, source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined, source_type: sourceType });
+		const kb = createKB(this.db, {
+			name,
+			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
+			source_type: sourceType,
+		});
 		updateKBStatus(this.db, kb.id, "indexing");
 
 		try {
@@ -84,14 +130,7 @@ export class KnowledgeEngine {
 
 			if (isUrl) {
 				onProgress?.(`Fetching ${source}...`);
-				const res = await fetch(source);
-				if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-				const html = await res.text();
-				const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-					.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-					.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ")
-					.replace(/\s+/g, " ").trim();
-				allChunks = await chunkFile(text, source);
+				allChunks = await chunkUrl(source, signal);
 			} else if (isFile && resolvedSource.endsWith(".pdf")) {
 				onProgress?.("Extracting text from PDF...");
 				const { extractText } = await import("unpdf");
@@ -108,7 +147,7 @@ export class KnowledgeEngine {
 				const files = walkDir(resolvedSource);
 				onProgress?.(`Found ${files.length} files, chunking...`);
 				for (const file of files) {
-					allChunks.push(...await chunkFile(file.content, file.relPath));
+					allChunks.push(...(await chunkFile(file.content, file.relPath)));
 				}
 			} else if (isFile) {
 				const { readFileSync } = await import("node:fs");
@@ -133,7 +172,9 @@ export class KnowledgeEngine {
 			updateKBCounts(this.db, kb.id, allChunks.length, fileCount);
 			updateKBStatus(this.db, kb.id, "ready");
 
-			return { kb: getKB(this.db, kb.id)!, chunkCount: allChunks.length };
+			const savedKB = getKB(this.db, kb.id);
+			if (!savedKB) throw new Error(`Knowledge base disappeared after add: ${kb.id}`);
+			return { kb: savedKB, chunkCount: allChunks.length };
 		} catch (e) {
 			// Clean up partial state on failure
 			deleteKB(this.db, kb.id);
@@ -141,11 +182,15 @@ export class KnowledgeEngine {
 		}
 	}
 
-	async update(nameOrId: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ added: number; removed: number; unchanged: number }> {
+	async update(
+		nameOrId: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
-		if (!kb.source_path || !existsSync(kb.source_path)) {
+		if (!kb.source_path || (kb.source_type !== "url" && !existsSync(kb.source_path))) {
 			throw new Error(`Source path not available or missing: ${kb.source_path}`);
 		}
 
@@ -154,11 +199,13 @@ export class KnowledgeEngine {
 		try {
 			// 1. Scan and chunk current source
 			onProgress?.("Scanning source...");
-			const isDir = statSync(kb.source_path).isDirectory();
 			let newChunks: Awaited<ReturnType<typeof chunkFile>> = [];
-			if (isDir) {
+			if (kb.source_type === "url") {
+				onProgress?.(`Fetching ${kb.source_path}...`);
+				newChunks = await chunkUrl(kb.source_path, signal);
+			} else if (statSync(kb.source_path).isDirectory()) {
 				const files = walkDir(kb.source_path);
-				for (const file of files) newChunks.push(...await chunkFile(file.content, file.relPath));
+				for (const file of files) newChunks.push(...(await chunkFile(file.content, file.relPath)));
 			} else {
 				const { readFileSync } = await import("node:fs");
 				newChunks = await chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path);
@@ -166,7 +213,6 @@ export class KnowledgeEngine {
 
 			// 2. Load existing state: chunks (hash→id) + vectors (ordered)
 			const existingHashes = getChunkHashesByKB(this.db, kb.id);
-			const existingChunkIds = getChunkIdsByKB(this.db, kb.id);
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 			const existingVectors = loadVectors(vectorPath);
 
@@ -192,7 +238,10 @@ export class KnowledgeEngine {
 			let newVectors: Float32Array[] = [];
 			if (chunksToAdd.length > 0) {
 				onProgress?.(`Embedding ${chunksToAdd.length} new chunks...`);
-				newVectors = await embedDocuments(chunksToAdd.map((c) => c.content));
+				newVectors = await embedDocuments(
+					chunksToAdd.map((c) => c.content),
+					signal,
+				);
 				insertChunks(this.db, kb.id, chunksToAdd);
 			}
 
@@ -203,7 +252,11 @@ export class KnowledgeEngine {
 
 			// 6. Rebuild vector file in DB chunk order (reusing cached vectors)
 			const finalChunks = getChunksByKB(this.db, kb.id);
-			const finalVectors = finalChunks.map((c) => vectorCache.get(c.content_hash)!).filter(Boolean);
+			const finalVectors: Float32Array[] = [];
+			for (const chunk of finalChunks) {
+				const vector = vectorCache.get(chunk.content_hash);
+				if (vector) finalVectors.push(vector);
+			}
 			saveVectors(vectorPath, finalVectors);
 			this.vectorCache.set(kb.id, finalVectors);
 
@@ -220,25 +273,27 @@ export class KnowledgeEngine {
 
 	async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
 		if (!this.db) throw new Error("Engine not initialized");
+		const db = this.db;
 		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters } = options;
 
-		const kbs = kb_id ? [getKB(this.db, kb_id)].filter(Boolean) as KnowledgeBase[] : listKBs(this.db);
+		const kbs = kb_id ? ([getKB(db, kb_id)].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
 		if (kbs.length === 0) return { results: [], total_count: 0, has_more: false };
 
 		const warnings: string[] = [];
-		let allResults: { chunkId: string; score: number }[] = [];
+		const allResults: { chunkId: string; score: number }[] = [];
 
 		for (const kb of kbs) {
 			if (kb.embedding_model !== CURRENT_EMBEDDING_MODEL) {
-				warnings.push(`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`);
+				warnings.push(
+					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`,
+				);
 			}
-			const chunkIds = getChunkIdsByKB(this.db, kb.id);
+			const chunkIds = getChunkIdsByKB(db, kb.id);
 			if (chunkIds.length === 0) continue;
 
 			if (mode === "fast") {
-				allResults.push(...searchBM25(this.db, query, 50, kb.id));
+				allResults.push(...searchBM25(db, query, 50, kb.id));
 			} else if (mode === "semantic") {
-				
 				const vectors = this.getVectors(kb.id);
 				if (vectors.length > 0) {
 					const queryVec = await embedQuery(query);
@@ -246,8 +301,8 @@ export class KnowledgeEngine {
 				}
 			} else {
 				// hybrid: BM25 + vector + RRF (both scoped to this KB)
-				const bm25Results = searchBM25(this.db, query, 50, kb.id);
-				
+				const bm25Results = searchBM25(db, query, 50, kb.id);
+
 				const vectors = this.getVectors(kb.id);
 				let vecResults: { chunkId: string; score: number }[] = [];
 				if (vectors.length > 0) {
@@ -261,14 +316,18 @@ export class KnowledgeEngine {
 
 		// Deduplicate and sort
 		const seen = new Set<string>();
-		const unique = allResults.filter((r) => { if (seen.has(r.chunkId)) return false; seen.add(r.chunkId); return true; });
+		const unique = allResults.filter((r) => {
+			if (seen.has(r.chunkId)) return false;
+			seen.add(r.chunkId);
+			return true;
+		});
 		unique.sort((a, b) => b.score - a.score);
 
 		// Apply metadata filters post-retrieval
 		let filtered = unique;
 		if (filters?.file_type || filters?.path_pattern) {
 			filtered = unique.filter((r) => {
-				const chunk = getChunkById(this.db!, r.chunkId);
+				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) return false;
 				if (filters.file_type && chunk.file_type !== filters.file_type) return false;
 				if (filters.path_pattern && !chunk.file_path.includes(filters.path_pattern)) return false;
@@ -278,39 +337,65 @@ export class KnowledgeEngine {
 
 		// Deep mode: rerank top-20 with cross-encoder
 		if (mode === "deep" && filtered.length > 0) {
-			const candidates = filtered.slice(0, 20).map((r) => {
-				const chunk = getChunkById(this.db!, r.chunkId);
-				return chunk ? { chunkId: r.chunkId, content: chunk.content } : null;
-			}).filter(Boolean) as Array<{ chunkId: string; content: string }>;
+			const candidates = filtered
+				.slice(0, 20)
+				.map((r) => {
+					const chunk = getChunkById(db, r.chunkId);
+					return chunk ? { chunkId: r.chunkId, content: chunk.content } : null;
+				})
+				.filter(Boolean) as Array<{ chunkId: string; content: string }>;
 			const reranked = await rerank(query, candidates, limit);
-			const results: SearchResult[] = reranked.map((r) => {
-				const chunk = getChunkById(this.db!, r.chunkId)!;
-				const kbObj = getKB(this.db!, chunk.kb_id);
-				return { content: chunk.content, file_path: chunk.file_path, file_type: chunk.file_type, kb_name: kbObj?.name ?? "unknown", score: r.score, snippet: chunk.content.slice(0, 200), start_line: chunk.start_line, end_line: chunk.end_line };
-			});
-			return { results, total_count: results.length, has_more: false, warnings: warnings.length > 0 ? warnings : undefined };
+			const results: SearchResult[] = [];
+			for (const r of reranked) {
+				const chunk = getChunkById(db, r.chunkId);
+				if (!chunk) continue;
+				const kbObj = getKB(db, chunk.kb_id);
+				results.push({
+					content: chunk.content,
+					file_path: chunk.file_path,
+					file_type: chunk.file_type,
+					kb_name: kbObj?.name ?? "unknown",
+					score: r.score,
+					snippet: chunk.content.slice(0, 200),
+					start_line: chunk.start_line,
+					end_line: chunk.end_line,
+				});
+			}
+			return {
+				results,
+				total_count: results.length,
+				has_more: false,
+				warnings: warnings.length > 0 ? warnings : undefined,
+			};
 		}
 
 		const total = filtered.length;
 		const page = filtered.slice(offset, offset + limit);
 
-		const results: SearchResult[] = page.map((r) => {
-			const chunk = getChunkById(this.db!, r.chunkId);
-			if (!chunk) return null;
-			const kb = getKB(this.db!, chunk.kb_id);
-			return {
-				content: chunk.content,
-				file_path: chunk.file_path,
-				file_type: chunk.file_type,
-				kb_name: kb?.name ?? "unknown",
-				score: r.score,
-				snippet: chunk.content.slice(0, 200),
-				start_line: chunk.start_line,
-				end_line: chunk.end_line,
-			};
-		}).filter(Boolean) as SearchResult[];
+		const results: SearchResult[] = page
+			.map((r) => {
+				const chunk = getChunkById(db, r.chunkId);
+				if (!chunk) return null;
+				const kb = getKB(db, chunk.kb_id);
+				return {
+					content: chunk.content,
+					file_path: chunk.file_path,
+					file_type: chunk.file_type,
+					kb_name: kb?.name ?? "unknown",
+					score: r.score,
+					snippet: chunk.content.slice(0, 200),
+					start_line: chunk.start_line,
+					end_line: chunk.end_line,
+				};
+			})
+			.filter(Boolean) as SearchResult[];
 
-		return { results, total_count: total, has_more: offset + limit < total, warnings: warnings.length > 0 ? warnings : undefined };
+		return {
+			results,
+			total_count: total,
+			has_more: offset + limit < total,
+			warnings: warnings.length > 0 ? warnings : undefined,
+		};
 	}
 
 	remove(nameOrId: string): boolean {
@@ -335,7 +420,8 @@ export class KnowledgeEngine {
 
 	diagnose(): DiagnosticResult[] {
 		if (!this.db) return [];
-		return listKBs(this.db).map((kb) => diagnoseKB(this.db!, kb));
+		const db = this.db;
+		return listKBs(db).map((kb) => diagnoseKB(db, kb));
 	}
 
 	async exportKB(nameOrId: string, outputPath: string): Promise<number> {
@@ -344,32 +430,69 @@ export class KnowledgeEngine {
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
 		const chunks = getChunksByKB(this.db, kb.id);
 		const { writeFileSync } = await import("node:fs");
-		const header = JSON.stringify({ name: kb.name, description: kb.description, source_path: kb.source_path, source_type: kb.source_type, chunk_count: chunks.length });
-		const lines = [header, ...chunks.map((c) => JSON.stringify({ content: c.content, file_path: c.file_path, file_type: c.file_type, start_line: c.start_line, end_line: c.end_line, metadata_json: c.metadata_json }))];
-		writeFileSync(outputPath, lines.join("\n") + "\n");
+		const header = JSON.stringify({
+			name: kb.name,
+			description: kb.description,
+			source_type: "text",
+			chunk_count: chunks.length,
+		});
+		const lines = [
+			header,
+			...chunks.map((c) =>
+				JSON.stringify({
+					content: c.content,
+					file_path: c.file_path,
+					file_type: c.file_type,
+					start_line: c.start_line,
+					end_line: c.end_line,
+					metadata_json: c.metadata_json,
+				}),
+			),
+		];
+		writeFileSync(outputPath, `${lines.join("\n")}\n`);
 		return chunks.length;
 	}
 
-	async importKB(inputPath: string, onProgress?: ProgressCallback, signal?: AbortSignal): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+	async importKB(
+		inputPath: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const { readFileSync } = await import("node:fs");
 		const lines = readFileSync(inputPath, "utf-8").trim().split("\n");
 		if (lines.length < 1) throw new Error("Empty import file");
-		const header = JSON.parse(lines[0]);
-		const kb = createKB(this.db, { name: header.name, description: header.description, source_path: header.source_path, source_type: header.source_type || "text" });
+		const header = JSON.parse(lines[0]) as { name: string; description?: string };
+		const kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
 		updateKBStatus(this.db, kb.id, "indexing");
-		const chunkData = lines.slice(1).map((l) => JSON.parse(l));
-		onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
-		const texts = chunkData.map((c: any) => c.content);
-		const vectors = await embedDocuments(texts, signal);
-		const chunks = chunkData.map((c: any) => ({ content_hash: contentHash(c.content), content: c.content, content_tokenized: preTokenizeForFTS(c.content), file_path: c.file_path, file_type: c.file_type, start_line: c.start_line, end_line: c.end_line, metadata_json: c.metadata_json || "{}" }));
-		insertChunks(this.db, kb.id, chunks);
-		const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-		saveVectors(vectorPath, vectors);
-		this.vectorCache.set(kb.id, vectors);
-		updateKBCounts(this.db, kb.id, chunks.length, new Set(chunks.map((c: any) => c.file_path)).size);
-		updateKBStatus(this.db, kb.id, "ready");
-		return { kb: getKB(this.db, kb.id)!, chunkCount: chunks.length };
+		try {
+			const chunkData = lines.slice(1).map((l) => JSON.parse(l) as ImportedChunk);
+			onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
+			const texts = chunkData.map((c) => c.content);
+			const vectors = await embedDocuments(texts, signal);
+			const chunks = chunkData.map((c) => ({
+				content_hash: contentHash(c.content),
+				content: c.content,
+				content_tokenized: preTokenizeForFTS(c.content),
+				file_path: c.file_path,
+				file_type: c.file_type,
+				start_line: c.start_line,
+				end_line: c.end_line,
+				metadata_json: c.metadata_json || "{}",
+			}));
+			insertChunks(this.db, kb.id, chunks);
+			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			saveVectors(vectorPath, vectors);
+			this.vectorCache.set(kb.id, vectors);
+			updateKBCounts(this.db, kb.id, chunks.length, new Set(chunks.map((c) => c.file_path)).size);
+			updateKBStatus(this.db, kb.id, "ready");
+			const savedKB = getKB(this.db, kb.id);
+			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);
+			return { kb: savedKB, chunkCount: chunks.length };
+		} catch (e) {
+			deleteKB(this.db, kb.id);
+			throw e;
+		}
 	}
 
 	async dispose(): Promise<void> {

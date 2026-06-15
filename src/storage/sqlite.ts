@@ -1,15 +1,15 @@
-import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 
 export interface KnowledgeBase {
 	id: string;
 	name: string;
 	description: string | null;
 	source_path: string | null;
-	source_type: "file" | "directory" | "text";
+	source_type: "file" | "directory" | "text" | "url";
 	created_at: number;
 	updated_at: number;
 	chunk_count: number;
@@ -147,7 +147,9 @@ export function createKB(
 		`INSERT INTO knowledge_bases (id, name, description, source_path, source_type, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	).run(id, opts.name, opts.description ?? null, opts.source_path ?? null, opts.source_type, now, now);
-	return getKB(db, id)!;
+	const kb = getKB(db, id);
+	if (!kb) throw new Error(`Failed to create knowledge base: ${id}`);
+	return kb;
 }
 
 export function getKB(db: Database.Database, id: string): KnowledgeBase | undefined {
@@ -190,7 +192,19 @@ export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkI
 	const now = Date.now();
 	const insertMany = db.transaction((items: ChunkInsert[]) => {
 		for (const c of items) {
-			stmt.run(randomUUID(), kbId, c.content_hash, c.content, c.content_tokenized, c.file_path, c.file_type, c.start_line, c.end_line, c.metadata_json, now);
+			stmt.run(
+				randomUUID(),
+				kbId,
+				c.content_hash,
+				c.content,
+				c.content_tokenized,
+				c.file_path,
+				c.file_type,
+				c.start_line,
+				c.end_line,
+				c.metadata_json,
+				now,
+			);
 		}
 	});
 	insertMany(chunks);
@@ -224,7 +238,10 @@ export function deleteChunksByIds(db: Database.Database, ids: string[]): void {
 }
 
 export function getChunkHashesByKB(db: Database.Database, kbId: string): Map<string, string> {
-	const rows = db.prepare("SELECT id, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as { id: string; content_hash: string }[];
+	const rows = db.prepare("SELECT id, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as {
+		id: string;
+		content_hash: string;
+	}[];
 	return new Map(rows.map((r) => [r.content_hash, r.id]));
 }
 
@@ -234,6 +251,8 @@ export function getChunkCount(db: Database.Database, kbId: string): number {
 }
 
 export function getFileCount(db: Database.Database, kbId: string): number {
-	const row = db.prepare("SELECT COUNT(DISTINCT file_path) as count FROM chunks WHERE kb_id = ?").get(kbId) as { count: number };
+	const row = db.prepare("SELECT COUNT(DISTINCT file_path) as count FROM chunks WHERE kb_id = ?").get(kbId) as {
+		count: number;
+	};
 	return row.count;
 }

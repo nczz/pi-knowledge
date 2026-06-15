@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { chunkMarkdown, chunkText, preTokenizeForFTS, contentHash, walkDir } from "../../src/indexer/chunker.ts";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { chunkMarkdown, chunkText, contentHash, preTokenizeForFTS, walkDir } from "../../src/indexer/chunker.ts";
 
 describe("preTokenizeForFTS", () => {
 	it("splits camelCase", () => expect(preTokenizeForFTS("getElementById")).toBe("get Element By Id"));
@@ -21,7 +21,8 @@ describe("contentHash", () => {
 
 describe("chunkMarkdown", () => {
 	it("splits on headings", () => {
-		const md = "## S1\n\nContent for section one that is long enough to pass threshold.\n\n## S2\n\nContent for section two that is also long enough to pass.";
+		const md =
+			"## S1\n\nContent for section one that is long enough to pass threshold.\n\n## S2\n\nContent for section two that is also long enough to pass.";
 		expect(chunkMarkdown(md, "t.md").length).toBe(2);
 	});
 	it("keeps heading in chunk", () => {
@@ -39,7 +40,10 @@ describe("chunkMarkdown", () => {
 
 describe("chunkText", () => {
 	it("chunks long content", () => {
-		const para = "This is a substantial paragraph with enough words to contribute meaningful token count towards the chunk size target. ".repeat(5);
+		const para =
+			"This is a substantial paragraph with enough words to contribute meaningful token count towards the chunk size target. ".repeat(
+				5,
+			);
 		const text = Array(10).fill(para).join("\n\n");
 		expect(chunkText(text, "t.txt").length).toBeGreaterThan(1);
 	});
@@ -65,12 +69,14 @@ describe("walkDir", () => {
 	});
 });
 
-
 import { chunkFile } from "../../src/indexer/chunker.ts";
 
 describe("chunkFile (async)", () => {
 	it("dispatches .md to markdown chunker", async () => {
-		const chunks = await chunkFile("## Test\n\nContent that is long enough to pass the minimum character threshold.", "test.md");
+		const chunks = await chunkFile(
+			"## Test\n\nContent that is long enough to pass the minimum character threshold.",
+			"test.md",
+		);
 		expect(chunks.length).toBeGreaterThan(0);
 		expect(chunks[0].file_type).toBe("markdown");
 	});
