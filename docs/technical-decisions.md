@@ -97,3 +97,73 @@
 **方案**: index 前 `replace(/([a-z])([A-Z])/g, '$1 $2')`。
 
 **備案**: trigram tokenizer。
+
+
+---
+
+## ADR-009: tree-sitter for multi-language AST
+
+**狀態**: 已決定
+
+**選 tree-sitter 而非**:
+- TypeScript Compiler API → 只支援 TS/JS
+- Babel → 只支援 JS/TS
+- ast-grep → 較新、社群小
+- 各語言 native parser → 需要 N 個不同 API
+
+**理由**: 唯一能用一套 API 支援 6+ 語言的 AST parser。C binding 但有 Node prebuilt。
+
+---
+
+## ADR-010: unpdf for PDF text extraction
+
+**狀態**: 已決定
+
+**選 unpdf 而非**:
+- pdf-parse v2 → API 完全重寫(class-based)、bundle 巨大、測試失敗
+- pdfjs-dist → unpdf 內部就是 wrap 它，但 API 更簡潔
+- pdf2json → 輸出 JSON 不是 plain text
+
+**理由**: Pure JS、API 簡單 (`extractText(Uint8Array) → {text}`)、中文實測通過。
+
+---
+
+## ADR-011: mammoth for DOCX
+
+**狀態**: 已決定
+
+**選 mammoth 而非**:
+- docx-parser → 維護較少
+- officeparser → 較新、未經大規模驗證
+- textract → 需要系統工具(antiword)
+
+**理由**: Pure JS、15K+ stars、活躍維護、`extractRawText({path}) → {value}` 一行完成。
+
+---
+
+## ADR-012: Regex HTML stripping for URL indexing
+
+**狀態**: 已決定（可改進）
+
+**當前**: `html.replace(/<script>...</script>/).replace(/<[^>]+>/g, " ")`
+
+**替代**: cheerio (~200KB), @mozilla/readability, htmlparser2
+
+**理由**: 零額外依賴。對文檔類頁面（API docs、blog、wiki）夠用。
+
+**已知限制**: 不處理 nested `>`、HTML entities、SPA 動態內容。
+
+**未來升級條件**: 如果使用者回報 URL indexing 品質差，加 cheerio。
+
+---
+
+## ADR-013: JSONL for import/export
+
+**狀態**: 已決定
+
+**選 JSONL 而非**:
+- Single JSON → 大檔案不 git-friendly（一行改動 = 整檔 diff）
+- SQLite dump → 需要 SQLite 工具解讀
+- Custom binary → 不可讀
+
+**理由**: Line-diffable（git-friendly）、streaming 讀寫、人類可讀、可用 jq 查詢。
