@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3] - 2026-06-15
+
+### Changed
+- Added a mandatory async lifecycle review contract for timers, event handlers, dispose, and shutdown paths.
+- Clarified review requirements for overlap analysis, guard-state updates before await points, idempotent cleanup, and recreate-after-dispose behavior.
+
 ## [0.3.2] - 2026-06-15
 
 ### Fixed

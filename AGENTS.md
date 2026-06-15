@@ -37,6 +37,14 @@
 - Each conclusion must identify its verification level: static read, unit test, e2e smoke, release-grade e2e with external fixtures, Pi dogfood, or external dependency not verified.
 - Do not call skipped tests a full pass. If a gate succeeds with skipped cases, say exactly which coverage did not run.
 - Comments and docs must describe verified behavior. Compatibility shims should document the minimum contract they implement, not unverified host internals.
+- Async lifecycle review (mandatory for any code with timers, event handlers, or dispose/shutdown):
+  1. List every independent caller of the async function.
+  2. Determine whether callers can overlap (timer + shutdown event, repeated tool calls, failed retries, same tick, etc.).
+  3. Identify the guard state that prevents re-entry, double-dispose, duplicate timers, or stale callback work.
+  4. Verify guard state is updated before any `await` that could yield to another lifecycle caller.
+  5. Verify dispose/cleanup is idempotent: concurrent or repeated calls must not double-free resources or close already-closed handles.
+  6. Verify reload/recreate paths wait for in-flight cleanup before constructing replacement resources.
+  7. Treat lifecycle-only format diffs as behavior-sensitive; they still require this analysis before approval.
 
 ## Documentation Alignment
 
