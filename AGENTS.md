@@ -20,6 +20,7 @@
   - `node --experimental-strip-types -e "import('./index.ts')"`
   - `npm pack --dry-run`
   - `pi -e ./index.ts` or a one-shot `pi -e ./index.ts -p ...` dogfood
+- PDF/DOCX e2e fixtures must be supplied via `PI_KNOWLEDGE_E2E_PDF` and `PI_KNOWLEDGE_E2E_DOCX`. Do not commit private fixture files or extracted fixture content.
 
 ## Commit Convention
 
@@ -52,6 +53,7 @@
 - Import/export must remain portable across machines. Do not export local absolute source paths as active update sources.
 - `knowledge_search` score semantics are "higher is better" after leaving search modules, including BM25 fast mode.
 - `knowledge_status` diagnostics must handle directory, single-file, text, and URL KBs without false stale/orphan reports.
+- File watching must keep the polling fallback; native `fs.watch` can fail or stop under local resource limits.
 
 ## File Organization
 

@@ -8,7 +8,7 @@
 |------|-----|
 | npm | https://www.npmjs.com/package/pi-knowledge |
 | GitHub | https://github.com/nczz/pi-knowledge |
-| Tests | 40 passing (local unit) |
+| Tests | 40 unit + 4 e2e passing locally |
 | Tools | 9 (add, search, update, status, show, remove, clear, export, import) |
 | AST languages | 6 (TypeScript, JavaScript, Python, Go, Rust, Java) |
 | Formats | code, markdown, text, PDF, DOCX, URL |
@@ -38,8 +38,12 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 - Model mismatch warning
 - Diagnostics: staleness, orphans, coverage %
 - 40 regression tests
+- 4 e2e tests (deep rerank, external PDF/DOCX fixtures, watcher)
 - Node strip-only startup smoke test
 - npm pack dry-run
+- Pi runtime dogfood (`pi -e ./index.ts`) and tool execution
+- Startup-safe TUI rendering for `knowledge_search`
+- File watcher polling fallback when native watch fails
 - All docs aligned with implementation
 - No overclaims in README
 
@@ -47,9 +51,9 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 
 | 優先 | 功能 | 說明 |
 |------|------|------|
-| 1 | **Pi runtime dogfood** | 使用本機 `pi -e ./index.ts` 實際載入與 one-shot 工具驗證 |
-| 2 | **TUI custom rendering** | 需深入研究 Pi renderResult component API；目前為避免 root runtime import 問題，暫不依賴 `@earendil-works/pi-tui` |
-| 3 | **Format integration tests** | PDF/DOCX/URL/deep rerank/watcher 需要更完整的 integration coverage |
+| 1 | **Release candidate install check** | 發佈前用乾淨 Pi profile 驗證 `pi install npm:pi-knowledge` |
+| 2 | **More format fixtures** | 增加多頁/掃描型 PDF、含表格 DOCX、失敗 fixture 的非私有測試案例 |
+| 3 | **Watcher scale test** | 大型 repo 下 polling fallback 的 CPU/IO 成本需要 bench |
 已完成（本 session 最後一批）：
 - ✅ Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
 - ✅ Pi Skill (`/skill:search-docs`)
@@ -57,6 +61,8 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 - ✅ PDF parsing (via unpdf — pure JS text extraction)
 - ✅ DOCX parsing (via mammoth — pure JS text extraction)
 - ✅ URL update / import cleanup / single-file diagnostics / BM25 score direction regression tests
+- ✅ Deep rerank / PDF / DOCX / watcher e2e tests using temp dirs and external fixtures
+- ✅ Pi runtime dogfood: startup, `knowledge_show`, temporary add/search/remove
 
 ## 技術文件交叉參考
 
@@ -84,6 +90,7 @@ AST chunking (6 languages via tree-sitter), OpenAI API embedding (optional), npm
 cd /path/to/pi-knowledge
 npm install
 npm test              # 40 tests should pass
+PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
 npm run check         # Biome lint + format
 node --experimental-strip-types -e "import('./index.ts')"
 npm pack --dry-run

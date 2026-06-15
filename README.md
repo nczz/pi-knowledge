@@ -91,7 +91,7 @@ All data is stored globally at `~/.pi/knowledge/` (never in your project directo
 ```bash
 npm install
 npm test          # Unit tests
-npm run test:e2e  # Integration tests (requires pi + API key)
+PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
 npm run bench     # Indexing/search benchmarks
 ```
 

@@ -7,12 +7,16 @@
 - Made URL knowledge bases a first-class source type and allowed `knowledge_update` to re-fetch URL sources.
 - Threaded `AbortSignal` into incremental update embedding.
 - Fixed stale diagnostics for single-file knowledge bases.
+- Normalized `unpdf` page-array output before chunking PDF text.
 - Made JSONL import cleanup partial KBs on failure and import exported KBs as portable text sources.
 - Removed root extension runtime dependency on Pi virtual modules so Node strip-only startup smoke tests can run outside Pi.
+- Restored `knowledge_search` custom rendering with a startup-safe local TUI component shim.
+- Added polling fallback for file watching when native `fs.watch` is unavailable or fails with resource limits.
 - Updated Biome 2 configuration so `npm run check` is a working quality gate.
 
 ### Added
 - Regression coverage for BM25 score direction, URL update, update cancellation, single-file diagnostics, import failure cleanup, and portable import/export behavior.
+- E2E coverage for deep rerank, external PDF/DOCX fixtures, and watcher updates without committing private fixture data.
 - Development contract notes for Pi runtime imports, source-type update behavior, portable exports, and release gates.
 
 ## [0.2.2] - 2026-06-15

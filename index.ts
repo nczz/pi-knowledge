@@ -5,6 +5,36 @@ import { getActiveWatcherCount, startWatcher, stopAllWatchers } from "./src/watc
 
 type Schema = Record<string, unknown> & { optional?: true };
 type ContextMessage = { role: string; content: string };
+type ThemeLike = {
+	fg?: (name: string, text: string) => string;
+};
+type RenderContextLike = {
+	lastComponent?: RenderableText;
+};
+type RenderOptionsLike = {
+	expanded?: boolean;
+};
+type ToolResultLike = {
+	content?: Array<{ type: string; text?: string }>;
+};
+
+class RenderableText {
+	private text: string;
+
+	constructor(text = "") {
+		this.text = text;
+	}
+
+	setText(text: string): void {
+		this.text = text;
+	}
+
+	invalidate(): void {}
+
+	render(): string[] {
+		return this.text.split("\n");
+	}
+}
 
 const Type = {
 	Object(properties: Record<string, Schema>): Schema {
@@ -35,6 +65,16 @@ const Type = {
 		return { ...schema, optional: true };
 	},
 };
+
+function themed(theme: ThemeLike, name: string, text: string): string {
+	return theme.fg ? theme.fg(name, text) : text;
+}
+
+function renderText(context: RenderContextLike, text: string): RenderableText {
+	const component = context.lastComponent ?? new RenderableText();
+	component.setText(text);
+	return component;
+}
 
 const engine = new KnowledgeEngine();
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
@@ -153,6 +193,19 @@ export default function (pi: ExtensionAPI) {
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 		}),
+		renderCall(args, theme: ThemeLike, context: RenderContextLike) {
+			const query = typeof args.query === "string" ? args.query : "";
+			const mode = typeof args.mode === "string" ? args.mode : "hybrid";
+			return renderText(
+				context,
+				`${themed(theme, "accent", "Search")}: "${query}" ${themed(theme, "muted", `(${mode})`)}`,
+			);
+		},
+		renderResult(result: ToolResultLike, options: RenderOptionsLike, _theme: ThemeLike, context: RenderContextLike) {
+			const text = result.content?.find((item) => item.type === "text")?.text ?? "";
+			const lines = options.expanded ? text : text.split("\n").slice(0, 5).join("\n");
+			return renderText(context, lines);
+		},
 		async execute(_id, params) {
 			const { query, mode, limit, kb_id, offset, file_type } = params;
 			const filters = file_type ? { file_type } : undefined;

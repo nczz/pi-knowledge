@@ -48,6 +48,10 @@ Directory KB 的 chunk `file_path` 是相對路徑；single-file KB 的 chunk `f
 
 JSONL export 是分享格式，不是原機器 source manifest。不要把本機 absolute `source_path` 匯出後再匯入成 active source，否則另一台機器會出現不可更新或錯誤 diagnostics。Imported KB 應當視為 portable text source，必要時重新 add 原始資料來源。
 
+## File watcher fallback
+
+`fs.watch(dir, { recursive: true })` 在 macOS/Node 環境中仍可能因 `EMFILE: too many open files` 或平台限制失效。`startWatcher` 必須保留 polling fallback；狀態顯示的 active watcher count 應計入 native watcher 或 poller。測試 watcher 時至少等待 `POLL_MS + DEBOUNCE_MS`。
+
 ## Pi virtual modules vs Node import
 
 Pi binary 會以 virtual modules 提供 `@earendil-works/pi-*` 和 `typebox`，但裸 Node / CI 不會。根 `index.ts` 應避免 runtime import 這些 module，或把它們列入 dependency。至少要通過：

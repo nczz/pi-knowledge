@@ -81,6 +81,10 @@ async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<R
 	return chunkFile(text, source);
 }
 
+function normalizeExtractedText(text: string | string[]): string {
+	return Array.isArray(text) ? text.join("\n\n") : text;
+}
+
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
@@ -136,7 +140,7 @@ export class KnowledgeEngine {
 				const { extractText } = await import("unpdf");
 				const buf = (await import("node:fs")).readFileSync(resolvedSource);
 				const { text } = await extractText(new Uint8Array(buf));
-				allChunks = await chunkFile(text, resolvedSource);
+				allChunks = await chunkFile(normalizeExtractedText(text), resolvedSource);
 			} else if (isFile && (resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc"))) {
 				onProgress?.("Extracting text from DOCX...");
 				const mammoth = await import("mammoth");
