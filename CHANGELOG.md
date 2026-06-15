@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.5] - 2026-06-15
+
+### Fixed
+- Prevented idle model disposal from running during active embedding or reranking batches, fixing `Session already disposed` during large `knowledge_add` operations.
+- Avoided ONNX native disposal during Pi `session_shutdown`, preventing macOS onnxruntime mutex crashes on session exit.
+- Allowed `knowledge_search` `kb_id` to accept either a KB UUID or exact KB name.
+- Truncated custom TUI render lines to prevent Pi crashes when search result snippets exceed terminal width.
+
+### Changed
+- Added `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` for lifecycle stress testing of embedding idle disposal.
+
 ## [0.3.4] - 2026-06-15
 
 ### Fixed

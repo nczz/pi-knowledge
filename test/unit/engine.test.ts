@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
@@ -83,6 +84,23 @@ describe("KnowledgeEngine", () => {
 			);
 		});
 
+		it("does not idle-dispose the embedding model during large add batches", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-large-add-"));
+			try {
+				for (let i = 0; i < 150; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Large batch document ${i} about AlphaBatchToken authentication and indexing reliability. `.repeat(3),
+					);
+				}
+
+				const { chunkCount } = await engine.add(projectDir, "Large Batch");
+				expect(chunkCount).toBe(150);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("directory indexing skips common build output and secret config files", async () => {
 			const projectDir = join(TEST_DIR, "project");
 			mkdirSync(join(projectDir, "src"), { recursive: true });
@@ -132,6 +150,21 @@ describe("KnowledgeEngine", () => {
 			controller.abort();
 
 			await expect(engine.update("Cancellable", undefined, controller.signal)).rejects.toThrow("Cancelled");
+		});
+	});
+
+	describe("search", () => {
+		it("accepts a knowledge base name in kb_id", async () => {
+			const { kb } = await engine.add(
+				"Scoped search content about SearchByNameToken and exact knowledge base names.",
+				"Search Scope",
+			);
+
+			const byName = await engine.search("SearchByNameToken", { mode: "fast", kb_id: "Search Scope" });
+			expect(byName.total_count).toBeGreaterThan(0);
+
+			const byId = await engine.search("SearchByNameToken", { mode: "fast", kb_id: kb.id });
+			expect(byId.total_count).toBe(byName.total_count);
 		});
 	});
 

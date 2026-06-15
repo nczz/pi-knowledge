@@ -9,6 +9,9 @@ type RerankerPipeline = {
 let rerankerPipeline: RerankerPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 let disposePromise: Promise<void> | null = null;
+let activeRuns = 0;
+let disposeRequested = false;
+const idleWaiters: Array<() => void> = [];
 const IDLE_MS = 30_000;
 
 async function load(): Promise<RerankerPipeline> {
@@ -20,24 +23,55 @@ async function load(): Promise<RerankerPipeline> {
 	return rerankerPipeline;
 }
 
-function resetTimer(): void {
+function clearTimer(): void {
 	if (disposeTimer) clearTimeout(disposeTimer);
+	disposeTimer = null;
+}
+
+function scheduleDispose(): void {
+	if (activeRuns > 0 || disposeRequested) return;
+	clearTimer();
 	disposeTimer = setTimeout(() => disposeReranker(), IDLE_MS);
 }
 
+function beginRun(): void {
+	activeRuns++;
+	clearTimer();
+}
+
+function endRun(): void {
+	activeRuns--;
+	if (activeRuns > 0) return;
+	for (const resolve of idleWaiters.splice(0)) resolve();
+	if (!disposeRequested) scheduleDispose();
+}
+
+function waitForNoActiveRuns(): Promise<void> {
+	if (activeRuns === 0) return Promise.resolve();
+	return new Promise((resolve) => idleWaiters.push(resolve));
+}
+
 export async function disposeReranker(): Promise<void> {
-	if (disposeTimer) {
-		clearTimeout(disposeTimer);
-		disposeTimer = null;
-	}
+	clearTimer();
 	if (disposePromise) return disposePromise;
+	disposeRequested = true;
+	await waitForNoActiveRuns();
 	const instance = rerankerPipeline;
 	rerankerPipeline = null;
-	if (!instance) return;
+	if (!instance) {
+		disposeRequested = false;
+		return;
+	}
 	disposePromise = Promise.resolve(instance.dispose()).finally(() => {
 		disposePromise = null;
+		disposeRequested = false;
 	});
 	return disposePromise;
+}
+
+export async function prepareRerankerForShutdown(): Promise<void> {
+	clearTimer();
+	await waitForNoActiveRuns();
 }
 
 export interface RerankCandidate {
@@ -52,13 +86,17 @@ export async function rerank(
 ): Promise<Array<{ chunkId: string; score: number }>> {
 	if (candidates.length === 0) return [];
 	const pipe = await load();
-	resetTimer();
+	beginRun();
 
 	const results: Array<{ chunkId: string; score: number }> = [];
-	for (const c of candidates) {
-		const output = await pipe({ text: query, text_pair: c.content });
-		const score = Array.isArray(output) ? (output[0]?.score ?? 0) : (output?.score ?? 0);
-		results.push({ chunkId: c.chunkId, score });
+	try {
+		for (const c of candidates) {
+			const output = await pipe({ text: query, text_pair: c.content });
+			const score = Array.isArray(output) ? (output[0]?.score ?? 0) : (output?.score ?? 0);
+			results.push({ chunkId: c.chunkId, score });
+		}
+	} finally {
+		endRun();
 	}
 
 	results.sort((a, b) => b.score - a.score);

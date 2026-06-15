@@ -1,6 +1,6 @@
 {
 	"name": "pi-knowledge",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"description": "Vector knowledge base extension for Pi — index files, hybrid search, local embeddings",
 	"type": "module",
 	"main": "index.ts",

@@ -2,12 +2,17 @@ import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
-import { dispose as disposeEmbedding, embedDocuments, embedQuery } from "./embedding/provider.ts";
+import {
+	dispose as disposeEmbedding,
+	embedDocuments,
+	embedQuery,
+	prepareForShutdown as prepareEmbeddingForShutdown,
+} from "./embedding/provider.ts";
 import { loadVectors, saveVectors } from "./embedding/vectors.ts";
 import { chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { reciprocalRankFusion } from "./search/fusion.ts";
-import { disposeReranker, rerank } from "./search/reranker.ts";
+import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
 import { searchVector } from "./search/vector.ts";
 import {
 	createKB,
@@ -287,7 +292,8 @@ export class KnowledgeEngine {
 		const db = this.db;
 		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters } = options;
 
-		const kbs = kb_id ? ([getKB(db, kb_id)].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
+		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
+		const kbs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
 		if (kbs.length === 0) return { results: [], total_count: 0, has_more: false };
 
 		const warnings: string[] = [];
@@ -506,9 +512,15 @@ export class KnowledgeEngine {
 		}
 	}
 
-	async dispose(): Promise<void> {
-		await disposeEmbedding();
-		await disposeReranker();
+	async dispose(options: { disposeModels?: boolean } = {}): Promise<void> {
+		const disposeModels = options.disposeModels ?? true;
+		if (disposeModels) {
+			await disposeEmbedding();
+			await disposeReranker();
+		} else {
+			await prepareEmbeddingForShutdown();
+			await prepareRerankerForShutdown();
+		}
 		this.db?.close();
 		this.db = null;
 	}

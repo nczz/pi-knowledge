@@ -18,6 +18,58 @@ type ToolResultLike = {
 	content?: Array<{ type: string; text?: string }>;
 };
 
+const MAX_RENDER_LINE_WIDTH = 80;
+const ESCAPE = "\u001B";
+
+function ansiSequenceLength(line: string, offset: number): number {
+	if (line[offset] !== ESCAPE || line[offset + 1] !== "[") return 0;
+	for (let i = offset + 2; i < line.length; i++) {
+		const codePoint = line.charCodeAt(i);
+		if (codePoint >= 0x40 && codePoint <= 0x7e) return i - offset + 1;
+	}
+	return 0;
+}
+
+function charRenderWidth(char: string): number {
+	const codePoint = char.codePointAt(0);
+	if (codePoint === undefined) return 0;
+	if (
+		(codePoint >= 0x1100 && codePoint <= 0x115f) ||
+		(codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+		(codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+		(codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+		(codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+		(codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
+		(codePoint >= 0xffe0 && codePoint <= 0xffe6)
+	) {
+		return 2;
+	}
+	return 1;
+}
+
+function truncateRenderLine(line: string): string {
+	let visibleWidth = 0;
+	let output = "";
+	for (let i = 0; i < line.length; ) {
+		const ansiLength = ansiSequenceLength(line, i);
+		if (ansiLength > 0) {
+			output += line.slice(i, i + ansiLength);
+			i += ansiLength;
+			continue;
+		}
+		const codePoint = line.codePointAt(i);
+		if (codePoint === undefined) break;
+		const char = String.fromCodePoint(codePoint);
+		const width = charRenderWidth(char);
+		if (visibleWidth + width > MAX_RENDER_LINE_WIDTH - 1) return `${output}…`;
+		output += char;
+		visibleWidth += width;
+		i += char.length;
+	}
+	return output;
+}
+
 /**
  * Minimal duck-type shim for @earendil-works/pi-tui Text component.
  * Allows startup without Pi virtual module while implementing the render host methods this extension needs.
@@ -36,7 +88,7 @@ class RenderableText {
 	invalidate(): void {}
 
 	render(): string[] {
-		return this.text.split("\n");
+		return this.text.split("\n").map(truncateRenderLine);
 	}
 }
 
@@ -100,9 +152,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		stopAllWatchers();
-		await engine.dispose();
-		// Brief delay to let native onnxruntime threads complete cleanup before process exit
-		await new Promise((r) => setTimeout(r, 500));
+		await engine.dispose({ disposeModels: false });
 	});
 
 	// Auto-inject: search KB for relevant context before each LLM call (opt-in)
@@ -196,7 +246,7 @@ export default function (pi: ExtensionAPI) {
 				Type.Union([Type.Literal("fast"), Type.Literal("semantic"), Type.Literal("hybrid"), Type.Literal("deep")]),
 			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
-			kb_id: Type.Optional(Type.String({ description: "Limit search to specific KB" })),
+			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 		}),
