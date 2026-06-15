@@ -8,10 +8,12 @@ type RerankerPipeline = {
 
 let rerankerPipeline: RerankerPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
+let disposePromise: Promise<void> | null = null;
 const IDLE_MS = 30_000;
 
 async function load(): Promise<RerankerPipeline> {
 	if (rerankerPipeline) return rerankerPipeline;
+	if (disposePromise) await disposePromise;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = join(getDefaultKnowledgeDir(), "models");
 	rerankerPipeline = await pipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2");
@@ -28,10 +30,14 @@ export async function disposeReranker(): Promise<void> {
 		clearTimeout(disposeTimer);
 		disposeTimer = null;
 	}
-	if (rerankerPipeline) {
-		await rerankerPipeline.dispose();
-		rerankerPipeline = null;
-	}
+	if (disposePromise) return disposePromise;
+	const instance = rerankerPipeline;
+	rerankerPipeline = null;
+	if (!instance) return;
+	disposePromise = Promise.resolve(instance.dispose()).finally(() => {
+		disposePromise = null;
+	});
+	return disposePromise;
 }
 
 export interface RerankCandidate {

@@ -8,6 +8,7 @@ type FeatureExtractionPipeline = {
 
 let pipelineInstance: FeatureExtractionPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
+let disposePromise: Promise<void> | null = null;
 
 const IDLE_TIMEOUT_MS = 30_000;
 const EMBEDDING_CONFIG = process.env.PI_KNOWLEDGE_EMBEDDING ?? "local:multilingual-e5-small";
@@ -18,6 +19,7 @@ function getModelCacheDir(): string {
 
 async function loadPipeline(): Promise<FeatureExtractionPipeline> {
 	if (pipelineInstance) return pipelineInstance;
+	if (disposePromise) await disposePromise;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = getModelCacheDir();
 	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", {
@@ -37,10 +39,14 @@ export async function dispose(): Promise<void> {
 		clearTimeout(disposeTimer);
 		disposeTimer = null;
 	}
-	if (pipelineInstance) {
-		await pipelineInstance.dispose();
-		pipelineInstance = null;
-	}
+	if (disposePromise) return disposePromise;
+	const instance = pipelineInstance;
+	pipelineInstance = null;
+	if (!instance) return;
+	disposePromise = Promise.resolve(instance.dispose()).finally(() => {
+		disposePromise = null;
+	});
+	return disposePromise;
 }
 
 async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {

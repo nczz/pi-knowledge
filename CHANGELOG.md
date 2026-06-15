@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2] - 2026-06-15
+
+### Fixed
+- Made local embedding and deep reranker model disposal idempotent to avoid concurrent native ONNX session teardown from idle timers and Pi `session_shutdown`.
+
+### Changed
+- Updated the onnxruntime exit-crash pitfall notes with the double-dispose race mitigation.
+
 ## [0.3.1] - 2026-06-15
 
 ### Fixed
