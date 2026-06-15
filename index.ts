@@ -24,6 +24,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		stopAllWatchers();
 		await engine.dispose();
+		// Brief delay to let native onnxruntime threads complete cleanup before process exit
+		await new Promise((r) => setTimeout(r, 500));
 	});
 
 	// Auto-inject: search KB for relevant context before each LLM call (opt-in)

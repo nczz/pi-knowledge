@@ -4,7 +4,7 @@ import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
 let pipelineInstance: any = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 
-const IDLE_TIMEOUT_MS = 10_000;
+const IDLE_TIMEOUT_MS = 30_000;
 const EMBEDDING_CONFIG = process.env.PI_KNOWLEDGE_EMBEDDING ?? "local:multilingual-e5-small";
 
 function getModelCacheDir(): string {
