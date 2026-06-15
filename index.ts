@@ -18,6 +18,10 @@ type ToolResultLike = {
 	content?: Array<{ type: string; text?: string }>;
 };
 
+/**
+ * Minimal duck-type shim for @earendil-works/pi-tui Text component.
+ * Allows startup without Pi virtual module while implementing the render host methods this extension needs.
+ */
 class RenderableText {
 	private text: string;
 

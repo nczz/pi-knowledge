@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-06-15
+
+### Fixed
+- Made watcher shutdown cover both native watchers and polling fallbacks without mutating the collection being iterated.
+- Clarified the startup-safe render component shim contract without overclaiming Pi internals.
+
+### Changed
+- Documented the difference between e2e smoke runs and release-grade PDF/DOCX fixture coverage.
+- Added agent/contributor contracts for verification-level reporting, private fixture handling, documentation alignment, and the release/publish flow.
+
 ## [0.3.0] - 2026-06-15
 
 ### Fixed

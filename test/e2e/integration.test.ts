@@ -51,13 +51,8 @@ describe("integration coverage", () => {
 		}
 	});
 
-	it("indexes a real PDF fixture supplied outside the repo", async () => {
-		const pdfPath = process.env.PI_KNOWLEDGE_E2E_PDF;
-		if (!pdfPath) {
-			expect.soft(pdfPath, "Set PI_KNOWLEDGE_E2E_PDF to run PDF extraction dogfood").toBeDefined();
-			return;
-		}
-
+	it.skipIf(!process.env.PI_KNOWLEDGE_E2E_PDF)("indexes a real PDF fixture supplied outside the repo", async () => {
+		const pdfPath = process.env.PI_KNOWLEDGE_E2E_PDF as string;
 		const engine = await makeEngine("pk-e2e-pdf-");
 		try {
 			const { chunkCount, kb } = await engine.add(pdfPath, "PDF Fixture");
@@ -68,13 +63,8 @@ describe("integration coverage", () => {
 		}
 	});
 
-	it("indexes a real DOCX fixture supplied outside the repo", async () => {
-		const docxPath = process.env.PI_KNOWLEDGE_E2E_DOCX;
-		if (!docxPath) {
-			expect.soft(docxPath, "Set PI_KNOWLEDGE_E2E_DOCX to run DOCX extraction dogfood").toBeDefined();
-			return;
-		}
-
+	it.skipIf(!process.env.PI_KNOWLEDGE_E2E_DOCX)("indexes a real DOCX fixture supplied outside the repo", async () => {
+		const docxPath = process.env.PI_KNOWLEDGE_E2E_DOCX as string;
 		const engine = await makeEngine("pk-e2e-docx-");
 		try {
 			const { chunkCount, kb } = await engine.add(docxPath, "DOCX Fixture");

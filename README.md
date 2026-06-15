@@ -91,9 +91,31 @@ All data is stored globally at `~/.pi/knowledge/` (never in your project directo
 ```bash
 npm install
 npm test          # Unit tests
+npm run test:e2e # Smoke integration tests; PDF/DOCX cases skip unless fixture env vars are set
 PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
 npm run bench     # Indexing/search benchmarks
 ```
+
+PDF/DOCX fixtures should be real local files outside the repository. Do not commit private fixture files, extracted fixture text, snapshots, or machine-specific fixture paths. A release-grade e2e pass requires both fixture env vars; a run with skipped PDF/DOCX cases is only a smoke pass.
+
+## Release
+
+Before publishing, update `package.json`, `package-lock.json`, and `CHANGELOG.md`, then run:
+
+```bash
+npm run check
+npm test
+npm run test:e2e
+PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
+node --experimental-strip-types -e "import('./index.ts')"
+npm pack --dry-run
+pi -e ./index.ts
+git push origin main
+gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /path/to/release-notes.md
+npm publish
+```
+
+Report any skipped or unverified gate explicitly. Do not describe smoke e2e as complete release-grade coverage.
 
 ## License
 

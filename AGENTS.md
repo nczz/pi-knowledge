@@ -21,12 +21,31 @@
   - `npm pack --dry-run`
   - `pi -e ./index.ts` or a one-shot `pi -e ./index.ts -p ...` dogfood
 - PDF/DOCX e2e fixtures must be supplied via `PI_KNOWLEDGE_E2E_PDF` and `PI_KNOWLEDGE_E2E_DOCX`. Do not commit private fixture files or extracted fixture content.
+- Treat plain `npm run test:e2e` as a smoke gate only when PDF/DOCX fixture env vars are unset. Release-grade e2e must run with both fixture env vars and report whether tests were skipped.
+- External fixtures may live outside the repo, such as `~/Downloads`, but never persist fixture paths, extracted text, or private document content in tests, snapshots, docs, or commits. Report only non-sensitive summaries such as pass/fail and chunk counts.
 
 ## Commit Convention
 
 - Format: `feat|fix|docs|refactor|test: <description>`
 - One logical change per commit
 - Stage only files changed in this session
+- Commit readiness requires a clean explanation of which gates were run, which were skipped, and why.
+
+## Review Contract
+
+- Findings must distinguish blocking bugs, non-blocking risks, and documentation-only issues.
+- Each conclusion must identify its verification level: static read, unit test, e2e smoke, release-grade e2e with external fixtures, Pi dogfood, or external dependency not verified.
+- Do not call skipped tests a full pass. If a gate succeeds with skipped cases, say exactly which coverage did not run.
+- Comments and docs must describe verified behavior. Compatibility shims should document the minimum contract they implement, not unverified host internals.
+
+## Documentation Alignment
+
+- Behavior contract changes belong in `AGENTS.md`.
+- Contributor workflow changes belong in `CONTRIBUTING.md`.
+- User-visible capability or install/development changes belong in `README.md`.
+- Repeated bugs, runtime traps, or review learnings belong in `docs/known-pitfalls.md`.
+- Architecture or dependency decisions belong in `docs/technical-decisions.md` or the relevant spec under `docs/`.
+- Release or publish process changes must be reflected in the release checklist before the release commit.
 
 ## Testing
 

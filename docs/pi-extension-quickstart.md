@@ -298,6 +298,8 @@ npm publish
 - [ ] `node --experimental-strip-types -e "import('./index.ts')"` 通過
 - [ ] `npm pack --dry-run` package contents 正確
 - [ ] `pi -e ./index.ts -p "use my_tool"` dogfood 通過
+- [ ] `npm run test:e2e` smoke 通過，且明確記錄 skipped cases
+- [ ] 帶外部 `PI_KNOWLEDGE_E2E_PDF` / `PI_KNOWLEDGE_E2E_DOCX` 的 release-grade e2e 通過（若 extension 支援 PDF/DOCX）
 - [ ] README 描述和實作對齊（不 overclaim）
 - [ ] CHANGELOG 更新
 - [ ] 新 tool 有 promptSnippet + promptGuidelines
@@ -306,6 +308,17 @@ npm publish
 - [ ] 資源有 dispose (session_shutdown)
 - [ ] 新 source type 覆蓋 add + update + status/diagnostics
 - [ ] import/export 保持跨機器 portable，不依賴本機 absolute source path
+
+### Release flow
+
+1. Bump `package.json` and `package-lock.json`.
+2. Update `CHANGELOG.md` with the release date and user-visible changes.
+3. Run the full quality checklist above.
+4. Commit with the project convention.
+5. Push `main`.
+6. Create the GitHub release tag with release notes, preferably via `gh release create vX.Y.Z --notes-file ...`.
+7. Run `npm publish`.
+8. Report commit SHA, tag, npm version, and every gate result. If PDF/DOCX fixture env vars were missing, call the e2e result smoke-only.
 
 ---
 

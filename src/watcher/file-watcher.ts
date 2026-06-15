@@ -107,8 +107,8 @@ export function stopWatcher(kbId: string): void {
 }
 
 export function stopAllWatchers(): void {
-	for (const [id] of watchers) stopWatcher(id);
-	for (const [id] of pollers) stopWatcher(id);
+	const ids = new Set([...watchers.keys(), ...pollers.keys()]);
+	for (const id of ids) stopWatcher(id);
 }
 
 export function getActiveWatcherCount(): number {
