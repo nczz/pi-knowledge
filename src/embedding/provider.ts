@@ -15,7 +15,7 @@ async function loadPipeline(): Promise<any> {
 	if (pipelineInstance) return pipelineInstance;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = getModelCacheDir();
-	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", { quantized: true });
+	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", { quantized: true, dtype: "fp32" });
 	return pipelineInstance;
 }
 
