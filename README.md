@@ -20,6 +20,8 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | BM25 keyword search | ✅ | ✅ | ✅ (via qmd) |
 | **Hybrid search + RRF fusion** | ✅ | ❌ | partial |
 | **Cross-encoder reranking** | ✅ | ❌ | ❌ |
+| **Adaptive contextual search** | ✅ | ❌ | ❌ |
+| **Diversity reranking** | ✅ | ❌ | ❌ |
 | **Incremental re-indexing** | ✅ | ❌ | ❌ |
 | **File watcher (auto-update)** | ✅ | ❌ | ❌ |
 | **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java) | ❌ | ❌ |
@@ -57,7 +59,7 @@ pi install ./pi-knowledge
 | Tool | Description |
 |------|-------------|
 | `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
-| `knowledge_search` | Hybrid search across one or all knowledge bases |
+| `knowledge_search` | Hybrid, deep, or adaptive search across one or all knowledge bases |
 | `knowledge_remove` | Remove a knowledge base by name or ID |
 | `knowledge_update` | Incrementally re-index changed files in a knowledge base |
 | `knowledge_show` | List all knowledge bases with stats |
@@ -65,6 +67,18 @@ pi install ./pi-knowledge
 | `knowledge_clear` | Remove all knowledge bases |
 | `knowledge_export` | Export a KB to shareable JSONL file |
 | `knowledge_import` | Import a KB from JSONL (re-embeds content) |
+
+### Search Modes
+
+- `fast`: BM25 keyword search for exact symbols, commands, and identifiers.
+- `semantic`: vector search for conceptual matches.
+- `hybrid`: BM25 + vector search with normalized weighted score fusion.
+- `deep`: hybrid retrieval followed by cross-encoder reranking.
+- `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
+
+Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics.
+
+For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
 
 ## Architecture
 

@@ -1,7 +1,14 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { chunkMarkdown, chunkText, contentHash, preTokenizeForFTS, walkDir } from "../../src/indexer/chunker.ts";
+import {
+	buildChunkEmbeddingText,
+	chunkMarkdown,
+	chunkText,
+	contentHash,
+	preTokenizeForFTS,
+	walkDir,
+} from "../../src/indexer/chunker.ts";
 
 describe("preTokenizeForFTS", () => {
 	it("splits camelCase", () => expect(preTokenizeForFTS("getElementById")).toBe("get Element By Id"));
@@ -29,6 +36,25 @@ describe("chunkMarkdown", () => {
 		const md = "## Title\n\nContent that is definitely long enough to pass the minimum char threshold.";
 		expect(chunkMarkdown(md, "t.md")[0].content).toContain("## Title");
 	});
+	it("adds heading breadcrumb and file context to indexed text", () => {
+		const md = [
+			"# Product",
+			"## Billing",
+			"### Refunds",
+			"RefundPolicyToken content that is definitely long enough to pass the minimum char threshold.",
+		].join("\n\n");
+		const [chunk] = chunkMarkdown(md, "docs/billing.md");
+		expect(chunk.metadata_json).toContain("Product > Billing > Refunds");
+		expect(chunk.content_tokenized).toContain("docs/billing.md");
+		expect(buildChunkEmbeddingText(chunk)).toContain("Section: Product > Billing > Refunds");
+	});
+	it("splits large sections into focused contextual chunks", () => {
+		const para = "FocusedMarkdownToken paragraph with enough detail about one specific retrieval subject. ".repeat(20);
+		const md = `## Big Section\n\n${Array(8).fill(para).join("\n\n")}`;
+		const chunks = chunkMarkdown(md, "big.md");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.every((chunk) => chunk.metadata_json.includes("Big Section"))).toBe(true);
+	});
 	it("skips short sections", () => {
 		const md = "## A\n\nHi\n\n## B\n\nThis section passes the fifty character minimum threshold for valid chunks.";
 		const chunks = chunkMarkdown(md, "t.md");
@@ -46,6 +72,15 @@ describe("chunkText", () => {
 			);
 		const text = Array(10).fill(para).join("\n\n");
 		expect(chunkText(text, "t.txt").length).toBeGreaterThan(1);
+	});
+	it("does not overlap paragraphs between adjacent text chunks", () => {
+		const paragraphs = Array.from({ length: 8 }, (_, i) =>
+			`UniqueTextParagraph${i} has enough meaningful detail for contextual retrieval without overlap. `.repeat(8),
+		);
+		const chunks = chunkText(paragraphs.join("\n\n"), "t.txt");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks[0].content).not.toContain("UniqueTextParagraph7");
+		expect(chunks[1].content).not.toContain("UniqueTextParagraph0");
 	});
 	it("empty → no chunks", () => expect(chunkText("", "t.txt")).toEqual([]));
 });

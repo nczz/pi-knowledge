@@ -243,12 +243,19 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),
 			mode: Type.Optional(
-				Type.Union([Type.Literal("fast"), Type.Literal("semantic"), Type.Literal("hybrid"), Type.Literal("deep")]),
+				Type.Union([
+					Type.Literal("fast"),
+					Type.Literal("semantic"),
+					Type.Literal("hybrid"),
+					Type.Literal("deep"),
+					Type.Literal("adaptive"),
+				]),
 			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
+			diversity: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("balanced"), Type.Literal("strong")])),
 		}),
 		renderCall(args, theme: ThemeLike, context: RenderContextLike) {
 			const query = typeof args.query === "string" ? args.query : "";

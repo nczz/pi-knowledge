@@ -223,6 +223,22 @@ export function getChunkById(db: Database.Database, id: string): Chunk | undefin
 	return db.prepare("SELECT * FROM chunks WHERE id = ?").get(id) as Chunk | undefined;
 }
 
+export function getChunksByFile(
+	db: Database.Database,
+	kbId: string,
+	filePath: string,
+	startLine: number,
+	endLine: number,
+): Chunk[] {
+	return db
+		.prepare(
+			`SELECT * FROM chunks
+       WHERE kb_id = ? AND file_path = ? AND end_line >= ? AND start_line <= ?
+       ORDER BY start_line, end_line`,
+		)
+		.all(kbId, filePath, startLine, endLine) as Chunk[];
+}
+
 export function getChunkByRowid(db: Database.Database, rowid: number): Chunk | undefined {
 	return db.prepare("SELECT * FROM chunks WHERE rowid = ?").get(rowid) as Chunk | undefined;
 }

@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { contentHash, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { searchBM25 } from "../../src/search/bm25.ts";
-import { reciprocalRankFusion } from "../../src/search/fusion.ts";
+import { reciprocalRankFusion, weightedScoreFusion } from "../../src/search/fusion.ts";
 import { searchVector } from "../../src/search/vector.ts";
 import { createKB, getChunkIdsByKB, insertChunks, openDatabase } from "../../src/storage/sqlite.ts";
 
@@ -87,5 +87,25 @@ describe("search pipeline", () => {
 			expect(f[0].chunkId).toBe("b"); // in both → highest
 		});
 		it("empty → empty", () => expect(reciprocalRankFusion([[], []])).toEqual([]));
+	});
+
+	describe("weighted fusion", () => {
+		it("preserves score spread from lexical and vector channels", () => {
+			const fused = weightedScoreFusion(
+				[
+					{ chunkId: "a", score: 100 },
+					{ chunkId: "b", score: 20 },
+					{ chunkId: "c", score: 1 },
+				],
+				[
+					{ chunkId: "a", score: 0.95 },
+					{ chunkId: "b", score: 0.7 },
+					{ chunkId: "c", score: 0.2 },
+				],
+			);
+
+			expect(fused[0].chunkId).toBe("a");
+			expect(fused[0].score - fused[2].score).toBeGreaterThan(0.5);
+		});
 	});
 });

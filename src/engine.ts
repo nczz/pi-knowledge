@@ -9,18 +9,20 @@ import {
 	prepareForShutdown as prepareEmbeddingForShutdown,
 } from "./embedding/provider.ts";
 import { loadVectors, saveVectors } from "./embedding/vectors.ts";
-import { chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
+import { buildChunkEmbeddingText, chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
-import { reciprocalRankFusion } from "./search/fusion.ts";
+import { weightedScoreFusion } from "./search/fusion.ts";
 import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
 import { searchVector } from "./search/vector.ts";
 import {
+	type Chunk,
 	createKB,
 	deleteChunksByIds,
 	deleteKB,
 	getChunkById,
 	getChunkHashesByKB,
 	getChunkIdsByKB,
+	getChunksByFile,
 	getChunksByKB,
 	getFileCount,
 	getKB,
@@ -34,11 +36,12 @@ import {
 } from "./storage/sqlite.ts";
 
 export interface SearchOptions {
-	mode?: "fast" | "semantic" | "hybrid" | "deep";
+	mode?: "fast" | "semantic" | "hybrid" | "deep" | "adaptive";
 	limit?: number;
 	offset?: number;
 	kb_id?: string;
 	filters?: { file_type?: string; path_pattern?: string };
+	diversity?: "off" | "balanced" | "strong";
 }
 
 export interface SearchResult {
@@ -70,6 +73,288 @@ interface ImportedChunk {
 	start_line: number;
 	end_line: number;
 	metadata_json?: string;
+}
+
+interface RankedChunk {
+	chunk: Chunk;
+	kbName: string;
+	score: number;
+	content: string;
+	snippet: string;
+	startLine: number;
+	endLine: number;
+	sourceChunkIds: string[];
+}
+
+const ADAPTIVE_CONTEXT_LINES = 80;
+const ADAPTIVE_MAX_CONTEXT_CHARS = 6_000;
+const ADAPTIVE_NEIGHBOR_TARGET = 5;
+const VECTOR_REDUNDANCY_WEIGHT = 0.35;
+const FILE_TYPE_ALIASES: Record<string, string> = {
+	md: "markdown",
+	mdx: "markdown",
+	ts: "typescript",
+	tsx: "typescript",
+	js: "javascript",
+	jsx: "javascript",
+	py: "python",
+	sh: "shell",
+	yml: "yaml",
+};
+
+function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefined): number {
+	if (!a || !b || a.length !== b.length) return 0;
+	let dot = 0;
+	for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+	return dot;
+}
+
+function tokenizeForSimilarity(text: string): Set<string> {
+	const tokens = preTokenizeForFTS(text.toLowerCase())
+		.split(/\s+/)
+		.filter((token) => token.length > 1);
+	return new Set(tokens);
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+	if (a.size === 0 || b.size === 0) return 0;
+	let intersection = 0;
+	for (const token of a) {
+		if (b.has(token)) intersection++;
+	}
+	return intersection / (a.size + b.size - intersection);
+}
+
+function queryCoverage(text: string, queryTokens: Set<string>): number {
+	if (queryTokens.size === 0) return 0;
+	const textTokens = tokenizeForSimilarity(text);
+	let matched = 0;
+	for (const token of queryTokens) {
+		if (textTokens.has(token)) matched++;
+	}
+	return matched / queryTokens.size;
+}
+
+function normalizeFileTypeFilter(fileType: string | undefined): string | undefined {
+	if (!fileType) return undefined;
+	const normalized = fileType.trim().toLowerCase();
+	return FILE_TYPE_ALIASES[normalized] ?? normalized;
+}
+
+function isTestPath(filePath: string): boolean {
+	const lower = filePath.toLowerCase();
+	return (
+		lower.includes("_test.") ||
+		lower.includes(".test.") ||
+		lower.includes(".spec.") ||
+		lower.includes("/test/") ||
+		lower.includes("/tests/")
+	);
+}
+
+function queryAsksForTests(queryTokens: Set<string>): boolean {
+	return ["test", "tests", "testing", "spec", "fixture", "assert"].some((token) => queryTokens.has(token));
+}
+
+function pathTokenBoost(filePath: string, queryTokens: Set<string>): number {
+	const pathTokens = tokenizeForSimilarity(filePath.replace(/[./_-]/g, " "));
+	let matched = 0;
+	for (const token of queryTokens) {
+		if (pathTokens.has(token)) matched++;
+	}
+	if (matched === 0) return 0;
+	return Math.min(0.35, 0.12 * matched);
+}
+
+function adjustedRetrievalScore(score: number, chunk: Chunk, queryTokens: Set<string>): number {
+	let adjusted = score + pathTokenBoost(chunk.file_path, queryTokens);
+	const asksForTests = queryAsksForTests(queryTokens);
+	if (isTestPath(chunk.file_path) && !asksForTests) adjusted *= 0.72;
+	if (!isTestPath(chunk.file_path) && asksForTests) adjusted *= 0.88;
+	return adjusted;
+}
+
+function lineProximity(a: RankedChunk, b: RankedChunk): number {
+	if (a.chunk.file_path !== b.chunk.file_path || a.chunk.kb_id !== b.chunk.kb_id) return 0;
+	if (a.sourceChunkIds.some((id) => b.sourceChunkIds.includes(id))) return 1;
+	const overlap = Math.max(0, Math.min(a.endLine, b.endLine) - Math.max(a.startLine, b.startLine) + 1);
+	if (overlap > 0) return 1;
+	const gap = Math.max(a.startLine, b.startLine) - Math.min(a.endLine, b.endLine);
+	if (gap <= 20) return 0.8;
+	if (gap <= 80) return 0.45;
+	return 0.2;
+}
+
+function normalizeScores(candidates: RankedChunk[]): Map<string, number> {
+	const scores = candidates.map((candidate) => candidate.score);
+	const min = Math.min(...scores);
+	const max = Math.max(...scores);
+	const normalized = new Map<string, number>();
+	for (const candidate of candidates) {
+		const value = max === min ? 1 : (candidate.score - min) / (max - min);
+		normalized.set(candidate.chunk.id, value);
+	}
+	return normalized;
+}
+
+function diversifyRankedChunks(
+	candidates: RankedChunk[],
+	diversity: SearchOptions["diversity"],
+	vectorsByChunkId: Map<string, Float32Array> = new Map(),
+): RankedChunk[] {
+	if (diversity === "off" || candidates.length <= 2) return candidates;
+	const lambda = diversity === "strong" ? 0.62 : 0.76;
+	const normalized = normalizeScores(candidates);
+	const tokenSets = new Map(
+		candidates.map((candidate) => [candidate.chunk.id, tokenizeForSimilarity(candidate.content)]),
+	);
+	const selected: RankedChunk[] = [];
+	const remaining = [...candidates];
+
+	while (remaining.length > 0) {
+		let bestIndex = 0;
+		let bestScore = Number.NEGATIVE_INFINITY;
+		for (let i = 0; i < remaining.length; i++) {
+			const candidate = remaining[i];
+			let redundancy = 0;
+			for (const chosen of selected) {
+				const lexical = jaccardSimilarity(
+					tokenSets.get(candidate.chunk.id) ?? new Set<string>(),
+					tokenSets.get(chosen.chunk.id) ?? new Set<string>(),
+				);
+				const vector = Math.max(
+					0,
+					cosineSimilarity(vectorsByChunkId.get(candidate.chunk.id), vectorsByChunkId.get(chosen.chunk.id)),
+				);
+				redundancy = Math.max(
+					redundancy,
+					Math.max(lexical, lineProximity(candidate, chosen), vector * VECTOR_REDUNDANCY_WEIGHT),
+				);
+			}
+			const relevance = normalized.get(candidate.chunk.id) ?? 0;
+			const mmrScore = lambda * relevance - (1 - lambda) * redundancy;
+			if (mmrScore > bestScore) {
+				bestScore = mmrScore;
+				bestIndex = i;
+			}
+		}
+		selected.push(remaining.splice(bestIndex, 1)[0]);
+	}
+
+	return selected;
+}
+
+function interleaveByFile(candidates: RankedChunk[], diversity: SearchOptions["diversity"]): RankedChunk[] {
+	if (diversity === "off" || candidates.length <= 2) return candidates;
+	const buckets = new Map<string, RankedChunk[]>();
+	const fileOrder: string[] = [];
+	for (const candidate of candidates) {
+		const key = `${candidate.chunk.kb_id}:${candidate.chunk.file_path}`;
+		if (!buckets.has(key)) {
+			buckets.set(key, []);
+			fileOrder.push(key);
+		}
+		buckets.get(key)?.push(candidate);
+	}
+	if (fileOrder.length <= 1) return candidates;
+
+	const result: RankedChunk[] = [];
+	let round = 0;
+	while (result.length < candidates.length) {
+		let added = false;
+		for (const key of fileOrder) {
+			const bucket = buckets.get(key);
+			const item = bucket?.[round];
+			if (!item) continue;
+			result.push(item);
+			added = true;
+		}
+		if (!added) break;
+		round++;
+	}
+	return result;
+}
+
+function buildQuerySnippet(content: string, query: string, maxLength = 240): string {
+	const terms = [...tokenizeForSimilarity(query)].sort((a, b) => b.length - a.length);
+	const lower = content.toLowerCase();
+	let matchIndex = -1;
+	for (const term of terms) {
+		matchIndex = lower.indexOf(term.toLowerCase());
+		if (matchIndex >= 0) break;
+	}
+	if (matchIndex < 0) return content.slice(0, maxLength);
+	const half = Math.floor(maxLength / 2);
+	const start = Math.max(0, matchIndex - half);
+	const end = Math.min(content.length, start + maxLength);
+	const prefix = start > 0 ? "..." : "";
+	const suffix = end < content.length ? "..." : "";
+	return `${prefix}${content.slice(start, end)}${suffix}`;
+}
+
+function buildAdaptiveContext(
+	seed: Chunk,
+	chunks: Chunk[],
+	queryTokens: Set<string>,
+): {
+	content: string;
+	startLine: number;
+	endLine: number;
+	sourceChunkIds: string[];
+} {
+	const scored = chunks
+		.map((chunk) => {
+			const distance =
+				chunk.id === seed.id
+					? 0
+					: Math.min(Math.abs(chunk.start_line - seed.start_line), Math.abs(chunk.end_line - seed.end_line));
+			const proximity = 1 / (1 + distance / 20);
+			const coverage = queryCoverage(chunk.content, queryTokens);
+			const seedBoost = chunk.id === seed.id ? 2 : 0;
+			return { chunk, score: seedBoost + proximity + coverage };
+		})
+		.sort((a, b) => b.score - a.score)
+		.slice(0, ADAPTIVE_NEIGHBOR_TARGET);
+	if (!scored.some((item) => item.chunk.id === seed.id)) scored.push({ chunk: seed, score: Number.MAX_SAFE_INTEGER });
+
+	const selectedIds = new Set(scored.map((item) => item.chunk.id));
+	const ordered = chunks
+		.filter((chunk) => selectedIds.has(chunk.id))
+		.sort((a, b) => a.start_line - b.start_line || a.end_line - b.end_line);
+	const parts: string[] = [];
+	const sourceChunkIds: string[] = [];
+	let totalLength = 0;
+	for (const chunk of ordered) {
+		if (totalLength >= ADAPTIVE_MAX_CONTEXT_CHARS) break;
+		const remaining = ADAPTIVE_MAX_CONTEXT_CHARS - totalLength;
+		const text = chunk.content.slice(0, remaining);
+		parts.push(text);
+		sourceChunkIds.push(chunk.id);
+		totalLength += text.length + 2;
+	}
+	return {
+		content: parts.join("\n\n"),
+		startLine: Math.min(...ordered.map((chunk) => chunk.start_line)),
+		endLine: Math.max(...ordered.map((chunk) => chunk.end_line)),
+		sourceChunkIds,
+	};
+}
+
+function pushAdaptiveCandidate(candidates: RankedChunk[], candidate: RankedChunk): void {
+	const overlappingIndex = candidates.findIndex(
+		(existing) =>
+			existing.chunk.kb_id === candidate.chunk.kb_id &&
+			existing.chunk.file_path === candidate.chunk.file_path &&
+			existing.sourceChunkIds.some((id) => candidate.sourceChunkIds.includes(id)),
+	);
+	if (overlappingIndex < 0) {
+		candidates.push(candidate);
+		return;
+	}
+	const existing = candidates[overlappingIndex];
+	if (candidate.score > existing.score || candidate.sourceChunkIds.length > existing.sourceChunkIds.length) {
+		candidates[overlappingIndex] = candidate;
+	}
 }
 
 async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
@@ -112,6 +397,15 @@ export class KnowledgeEngine {
 
 	private invalidateVectorCache(kbId: string): void {
 		this.vectorCache.delete(kbId);
+	}
+
+	private getVectorsByChunkId(kbId: string, chunkIds: string[]): Map<string, Float32Array> {
+		const vectors = this.getVectors(kbId);
+		const mapped = new Map<string, Float32Array>();
+		for (let i = 0; i < chunkIds.length; i++) {
+			if (vectors[i]) mapped.set(chunkIds[i], vectors[i]);
+		}
+		return mapped;
 	}
 
 	async add(
@@ -174,7 +468,7 @@ export class KnowledgeEngine {
 			}
 
 			onProgress?.(`${allChunks.length} chunks, embedding...`);
-			const texts = allChunks.map((c) => c.content);
+			const texts = allChunks.map((c) => buildChunkEmbeddingText(c));
 			const vectors = await embedDocuments(texts, signal);
 
 			onProgress?.(`Storing...`);
@@ -255,7 +549,7 @@ export class KnowledgeEngine {
 			if (chunksToAdd.length > 0) {
 				onProgress?.(`Embedding ${chunksToAdd.length} new chunks...`);
 				newVectors = await embedDocuments(
-					chunksToAdd.map((c) => c.content),
+					chunksToAdd.map((c) => buildChunkEmbeddingText(c)),
 					signal,
 				);
 				insertChunks(this.db, kb.id, chunksToAdd);
@@ -290,7 +584,11 @@ export class KnowledgeEngine {
 	async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const db = this.db;
-		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters } = options;
+		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters, diversity = "balanced" } = options;
+		const retrievalMode = mode === "adaptive" ? "hybrid" : mode;
+		const candidateLimit = Math.max(50, offset + limit * 12);
+		const queryTokens = tokenizeForSimilarity(query);
+		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
 
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
 		const kbs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
@@ -298,6 +596,7 @@ export class KnowledgeEngine {
 
 		const warnings: string[] = [];
 		const allResults: { chunkId: string; score: number }[] = [];
+		const vectorsByChunkId = new Map<string, Float32Array>();
 
 		for (const kb of kbs) {
 			if (kb.embedding_model !== CURRENT_EMBEDDING_MODEL) {
@@ -307,26 +606,30 @@ export class KnowledgeEngine {
 			}
 			const chunkIds = getChunkIdsByKB(db, kb.id);
 			if (chunkIds.length === 0) continue;
+			for (const [chunkId, vector] of this.getVectorsByChunkId(kb.id, chunkIds)) {
+				vectorsByChunkId.set(chunkId, vector);
+			}
 
-			if (mode === "fast") {
-				allResults.push(...searchBM25(db, query, 50, kb.id));
-			} else if (mode === "semantic") {
-				const vectors = this.getVectors(kb.id);
+			if (retrievalMode === "fast") {
+				allResults.push(...searchBM25(db, query, candidateLimit, kb.id));
+			} else if (retrievalMode === "semantic") {
+				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
 				if (vectors.length > 0) {
 					const queryVec = await embedQuery(query);
-					allResults.push(...searchVector(queryVec, vectors, chunkIds));
+					allResults.push(...searchVector(queryVec, vectors, chunkIds, candidateLimit));
 				}
 			} else {
 				// hybrid: BM25 + vector + RRF (both scoped to this KB)
-				const bm25Results = searchBM25(db, query, 50, kb.id);
+				const bm25Results = searchBM25(db, query, candidateLimit, kb.id);
 
-				const vectors = this.getVectors(kb.id);
+				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
 				let vecResults: { chunkId: string; score: number }[] = [];
 				if (vectors.length > 0) {
 					const queryVec = await embedQuery(query);
-					vecResults = searchVector(queryVec, vectors, chunkIds);
+					vecResults = searchVector(queryVec, vectors, chunkIds, candidateLimit);
 				}
-				const fused = reciprocalRankFusion([bm25Results, vecResults]);
+				if (bm25Results.length === 0) continue;
+				const fused = weightedScoreFusion(bm25Results, vecResults);
 				allResults.push(...fused);
 			}
 		}
@@ -338,74 +641,121 @@ export class KnowledgeEngine {
 			seen.add(r.chunkId);
 			return true;
 		});
+		for (const result of unique) {
+			const chunk = getChunkById(db, result.chunkId);
+			if (chunk) result.score = adjustedRetrievalScore(result.score, chunk, queryTokens);
+		}
 		unique.sort((a, b) => b.score - a.score);
 
 		// Apply metadata filters post-retrieval
 		let filtered = unique;
-		if (filters?.file_type || filters?.path_pattern) {
+		if (normalizedFileType || filters?.path_pattern) {
 			filtered = unique.filter((r) => {
 				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) return false;
-				if (filters.file_type && chunk.file_type !== filters.file_type) return false;
-				if (filters.path_pattern && !chunk.file_path.includes(filters.path_pattern)) return false;
+				if (normalizedFileType && chunk.file_type !== normalizedFileType) return false;
+				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) return false;
 				return true;
 			});
 		}
 
-		// Deep mode: rerank top-20 with cross-encoder
 		if (mode === "deep" && filtered.length > 0) {
 			const candidates = filtered
-				.slice(0, 20)
+				.slice(0, 30)
 				.map((r) => {
 					const chunk = getChunkById(db, r.chunkId);
 					return chunk ? { chunkId: r.chunkId, content: chunk.content } : null;
 				})
 				.filter(Boolean) as Array<{ chunkId: string; content: string }>;
-			const reranked = await rerank(query, candidates, limit);
-			const results: SearchResult[] = [];
+			const reranked = await rerank(query, candidates, Math.max(limit * 3, limit));
+			const ranked: RankedChunk[] = [];
 			for (const r of reranked) {
 				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) continue;
 				const kbObj = getKB(db, chunk.kb_id);
-				results.push({
-					content: chunk.content,
-					file_path: chunk.file_path,
-					file_type: chunk.file_type,
-					kb_name: kbObj?.name ?? "unknown",
+				ranked.push({
+					chunk,
+					kbName: kbObj?.name ?? "unknown",
 					score: r.score,
-					snippet: chunk.content.slice(0, 200),
-					start_line: chunk.start_line,
-					end_line: chunk.end_line,
+					content: chunk.content,
+					snippet: buildQuerySnippet(chunk.content, query),
+					startLine: chunk.start_line,
+					endLine: chunk.end_line,
+					sourceChunkIds: [chunk.id],
 				});
 			}
+			const diversified = interleaveByFile(diversifyRankedChunks(ranked, diversity, vectorsByChunkId), diversity);
+			const page = diversified.slice(offset, offset + limit);
+			const results = page.map((r) => ({
+				content: r.content,
+				file_path: r.chunk.file_path,
+				file_type: r.chunk.file_type,
+				kb_name: r.kbName,
+				score: r.score,
+				snippet: r.snippet,
+				start_line: r.startLine,
+				end_line: r.endLine,
+			}));
 			return {
 				results,
-				total_count: results.length,
-				has_more: false,
+				total_count: diversified.length,
+				has_more: offset + limit < diversified.length,
 				warnings: warnings.length > 0 ? warnings : undefined,
 			};
 		}
 
-		const total = filtered.length;
-		const page = filtered.slice(offset, offset + limit);
+		const ranked: RankedChunk[] = [];
+		for (const r of filtered) {
+			const chunk = getChunkById(db, r.chunkId);
+			if (!chunk) continue;
+			const kb = getKB(db, chunk.kb_id);
 
-		const results: SearchResult[] = page
-			.map((r) => {
-				const chunk = getChunkById(db, r.chunkId);
-				if (!chunk) return null;
-				const kb = getKB(db, chunk.kb_id);
-				return {
-					content: chunk.content,
-					file_path: chunk.file_path,
-					file_type: chunk.file_type,
-					kb_name: kb?.name ?? "unknown",
+			if (mode === "adaptive") {
+				const contextChunks = getChunksByFile(
+					db,
+					chunk.kb_id,
+					chunk.file_path,
+					Math.max(1, chunk.start_line - ADAPTIVE_CONTEXT_LINES),
+					chunk.end_line + ADAPTIVE_CONTEXT_LINES,
+				);
+				const context = buildAdaptiveContext(chunk, contextChunks.length > 0 ? contextChunks : [chunk], queryTokens);
+				pushAdaptiveCandidate(ranked, {
+					chunk,
+					kbName: kb?.name ?? "unknown",
 					score: r.score,
-					snippet: chunk.content.slice(0, 200),
-					start_line: chunk.start_line,
-					end_line: chunk.end_line,
-				};
-			})
-			.filter(Boolean) as SearchResult[];
+					content: context.content,
+					snippet: buildQuerySnippet(context.content, query),
+					startLine: context.startLine,
+					endLine: context.endLine,
+					sourceChunkIds: context.sourceChunkIds,
+				});
+			} else {
+				ranked.push({
+					chunk,
+					kbName: kb?.name ?? "unknown",
+					score: r.score,
+					content: chunk.content,
+					snippet: buildQuerySnippet(chunk.content, query),
+					startLine: chunk.start_line,
+					endLine: chunk.end_line,
+					sourceChunkIds: [chunk.id],
+				});
+			}
+		}
+
+		const diversified = interleaveByFile(diversifyRankedChunks(ranked, diversity, vectorsByChunkId), diversity);
+		const total = diversified.length;
+		const page = diversified.slice(offset, offset + limit);
+		const results: SearchResult[] = page.map((r) => ({
+			content: r.content,
+			file_path: r.chunk.file_path,
+			file_type: r.chunk.file_type,
+			kb_name: r.kbName,
+			score: r.score,
+			snippet: r.snippet,
+			start_line: r.startLine,
+			end_line: r.endLine,
+		}));
 
 		return {
 			results,
@@ -485,23 +835,29 @@ export class KnowledgeEngine {
 		try {
 			const chunkData = lines.slice(1).map((l) => JSON.parse(l) as ImportedChunk);
 			onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
-			const texts = chunkData.map((c) => c.content);
-			const vectors = await embedDocuments(texts, signal);
 			const chunks = chunkData.map((c) => ({
 				content_hash: contentHash(c.content),
 				content: c.content,
-				content_tokenized: preTokenizeForFTS(c.content),
+				content_tokenized: "",
 				file_path: c.file_path,
 				file_type: c.file_type,
 				start_line: c.start_line,
 				end_line: c.end_line,
 				metadata_json: c.metadata_json || "{}",
 			}));
-			insertChunks(this.db, kb.id, chunks);
+			const indexedChunks = chunks.map((chunk) => ({
+				...chunk,
+				content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)),
+			}));
+			const vectors = await embedDocuments(
+				indexedChunks.map((c) => buildChunkEmbeddingText(c)),
+				signal,
+			);
+			insertChunks(this.db, kb.id, indexedChunks);
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 			saveVectors(vectorPath, vectors);
 			this.vectorCache.set(kb.id, vectors);
-			updateKBCounts(this.db, kb.id, chunks.length, new Set(chunks.map((c) => c.file_path)).size);
+			updateKBCounts(this.db, kb.id, indexedChunks.length, new Set(indexedChunks.map((c) => c.file_path)).size);
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);

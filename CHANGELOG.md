@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Added contextual indexing for rebuilds: embeddings and FTS now include file path, file type, heading breadcrumbs, and code symbols while keeping returned chunk content readable.
+- Added more focused rebuild-time chunking for Markdown and plain text, with reduced overlap to avoid near-duplicate retrieval units.
+- Added adaptive search mode with query-time contextual window expansion around relevant seed chunks.
+- Added balanced/strong/off diversity controls for search result reranking to reduce near-duplicate chunk clusters.
+- Added query-aware snippets so search results show the matched context instead of always showing the chunk prefix.
+- Added vector-aware redundancy scoring and overlapping adaptive window collapse for higher-diversity top results.
+- Replaced hybrid RRF scoring with normalized weighted score fusion to preserve meaningful score spread.
+- Added file-level result interleaving so README-style overview files cannot dominate top results with repeated chunks.
+
 ## [0.3.5] - 2026-06-15
 
 ### Fixed

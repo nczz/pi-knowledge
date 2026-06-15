@@ -166,6 +166,270 @@ describe("KnowledgeEngine", () => {
 			const byId = await engine.search("SearchByNameToken", { mode: "fast", kb_id: kb.id });
 			expect(byId.total_count).toBe(byName.total_count);
 		});
+
+		it("diversifies repeated hits from the same file", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-diversity-"));
+			try {
+				writeFileSync(
+					join(projectDir, "dominant.md"),
+					[
+						"# Dominant One",
+						"AlphaDiversityToken repeated material about billing workflows and permission policy.",
+						"# Dominant Two",
+						"AlphaDiversityToken repeated material about billing workflows and permission policy.",
+						"# Dominant Three",
+						"AlphaDiversityToken repeated material about billing workflows and permission policy.",
+					].join("\n\n"),
+				);
+				writeFileSync(
+					join(projectDir, "secondary.md"),
+					"# Secondary\n\nAlphaDiversityToken independent material about audit workflows and command visibility.",
+				);
+
+				await engine.add(projectDir, "Diversity");
+				const result = await engine.search("AlphaDiversityToken workflows", {
+					mode: "fast",
+					limit: 3,
+					diversity: "strong",
+				});
+
+				expect(result.results.map((r) => r.file_path)).toContain("secondary.md");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("adaptive mode expands a relevant seed with neighboring context", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-adaptive-"));
+			try {
+				writeFileSync(
+					join(projectDir, "guide.md"),
+					[
+						"# Search Setup",
+						"AdaptiveSeedToken explains the searchable setup flow and retrieval trigger.",
+						"# Operational Context",
+						"NeighborContextToken explains the operational caveat that should travel with nearby search setup.",
+					].join("\n\n"),
+				);
+
+				await engine.add(projectDir, "Adaptive");
+				const result = await engine.search("AdaptiveSeedToken", { mode: "adaptive", limit: 1 });
+
+				expect(result.results[0].content).toContain("AdaptiveSeedToken");
+				expect(result.results[0].content).toContain("NeighborContextToken");
+				expect(result.results[0].snippet).toContain("AdaptiveSeedToken");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("adaptive mode collapses overlapping seed windows", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-adaptive-overlap-"));
+			try {
+				writeFileSync(
+					join(projectDir, "cluster.md"),
+					[
+						"# Cluster One",
+						"OverlapSeedToken explains permissions and visibility in the first nearby section.",
+						"# Cluster Two",
+						"OverlapSeedToken explains permissions and visibility in the second nearby section.",
+						"# Cluster Three",
+						"OverlapSeedToken explains permissions and visibility in the third nearby section.",
+						"# Cluster Four",
+						"OverlapSeedToken explains permissions and visibility in the fourth nearby section.",
+					].join("\n\n"),
+				);
+
+				await engine.add(projectDir, "Adaptive Overlap");
+				const result = await engine.search("OverlapSeedToken permissions visibility", {
+					mode: "adaptive",
+					limit: 5,
+					diversity: "off",
+				});
+
+				expect(result.total_count).toBe(1);
+				expect(result.results[0].content).toContain("Cluster One");
+				expect(result.results[0].content).toContain("Cluster Four");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("search can use indexed file context after rebuild", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-contextual-index-"));
+			try {
+				mkdirSync(join(projectDir, "docs"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "docs", "billing-refunds.md"),
+					"## Policy\n\nContextualIndexToken explains the approval workflow and operational guardrails.",
+				);
+
+				await engine.add(projectDir, "Contextual Index");
+				const result = await engine.search("billing refunds approval workflow", {
+					mode: "fast",
+					limit: 1,
+					diversity: "off",
+				});
+
+				expect(result.results[0].content).toContain("ContextualIndexToken");
+				expect(result.results[0].file_path).toBe("docs/billing-refunds.md");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("accepts common file type aliases in filters", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-file-type-alias-"));
+			try {
+				writeFileSync(
+					join(projectDir, "README.md"),
+					"## Alias\n\nFileTypeAliasToken explains markdown filter aliases and retrieval behavior.",
+				);
+
+				await engine.add(projectDir, "File Type Alias");
+				const result = await engine.search("FileTypeAliasToken", {
+					mode: "fast",
+					filters: { file_type: "md" },
+				});
+
+				expect(result.total_count).toBeGreaterThan(0);
+				expect(result.results.every((r) => r.file_type === "markdown")).toBe(true);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("hybrid mode returns no results when there is no lexical anchor", async () => {
+			await engine.add("Relevant content about authentication tokens and command permissions.", "No Garbage");
+
+			const result = await engine.search("zzzxqv blorfwump qqqqnonexistent", {
+				mode: "hybrid",
+				limit: 5,
+			});
+
+			expect(result.total_count).toBe(0);
+			expect(result.results).toEqual([]);
+		});
+
+		it("boosts small modules when the query names their path", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-small-module-"));
+			try {
+				mkdirSync(join(projectDir, "stt"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "stt", "stt.go"),
+					[
+						"package stt",
+						"func TranscribeAudio() string {",
+						'  return "SmallModuleToken speech transcription command pipeline"',
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "README.md"),
+					"## Speech\n\nSmallModuleToken speech transcription command pipeline overview.",
+				);
+
+				await engine.add(projectDir, "Small Module");
+				const result = await engine.search("stt speech transcription command", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+
+				expect(result.results[0].file_path).toBe("stt/stt.go");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("prefers implementation files over tests unless the query asks for tests", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-impl-before-test-"));
+			try {
+				writeFileSync(
+					join(projectDir, "error.go"),
+					[
+						"package app",
+						"func HandleError() error {",
+						'  _ = "ErrorHandlingToken error handling retry classification"',
+						"  return nil",
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "error_test.go"),
+					[
+						"package app",
+						"func TestHandleError() {",
+						'  _ = "ErrorHandlingToken error handling retry classification"',
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "Implementation Priority");
+				const implementation = await engine.search("ErrorHandlingToken error handling", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+				expect(implementation.results[0].file_path).toBe("error.go");
+
+				const tests = await engine.search("ErrorHandlingToken error handling test", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+				expect(tests.results[0].file_path).toBe("error_test.go");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("interleaves files so README-like documents do not dominate hybrid results", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-file-interleave-"));
+			try {
+				writeFileSync(
+					join(projectDir, "README.md"),
+					[
+						"# Commands",
+						"InterleaveToken default member permissions command visibility manage channels.",
+						"## Usage",
+						"InterleaveToken default member permissions command visibility manage channels.",
+						"## Notes",
+						"InterleaveToken default member permissions command visibility manage channels.",
+					].join("\n\n"),
+				);
+				mkdirSync(join(projectDir, "bot"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "bot", "interaction_policy.go"),
+					[
+						"package bot",
+						"func commandDefaultMemberPermissions() {",
+						'  _ = "InterleaveToken default member permissions command visibility manage channels"',
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "bot", "handler_test.go"),
+					[
+						"package bot",
+						"func TestSlashCommandsApplyVisibilityAndPermissionPolicy() {",
+						'  _ = "InterleaveToken default member permissions command visibility manage channels"',
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "File Interleave");
+				const result = await engine.search("InterleaveToken default member permissions command visibility", {
+					mode: "hybrid",
+					limit: 3,
+					diversity: "strong",
+				});
+
+				expect(new Set(result.results.map((r) => r.file_path)).size).toBeGreaterThan(1);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	describe("diagnostics", () => {

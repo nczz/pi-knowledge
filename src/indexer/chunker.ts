@@ -200,6 +200,9 @@ function estimateTokens(text: string): number {
 	return Math.ceil(text.length / 3);
 }
 
+const MARKDOWN_TARGET_TOKENS = 450;
+const TEXT_TARGET_TOKENS = 550;
+
 export function preTokenizeForFTS(content: string): string {
 	return content
 		.replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -215,74 +218,108 @@ export function contentHash(content: string): string {
 	return createHash("sha256").update(content).digest("hex");
 }
 
+function normalizeHeading(heading: string): string {
+	return heading.replace(/^#{1,6}\s+/, "").trim();
+}
+
+function buildContextPrefix(
+	filePath: string,
+	fileType: string,
+	metadata: Record<string, string | number | null | undefined>,
+): string {
+	const parts = [`File: ${filePath}`, `Type: ${fileType}`];
+	const heading = typeof metadata.heading === "string" ? metadata.heading : "";
+	const breadcrumb = typeof metadata.breadcrumb === "string" ? metadata.breadcrumb : "";
+	const symbol = typeof metadata.function_name === "string" ? metadata.function_name : "";
+	if (breadcrumb) parts.push(`Section: ${breadcrumb}`);
+	else if (heading) parts.push(`Section: ${normalizeHeading(heading)}`);
+	if (symbol) parts.push(`Symbol: ${symbol}`);
+	return parts.join("\n");
+}
+
+export function buildChunkEmbeddingText(
+	chunk: Pick<ChunkInsert, "content" | "file_path" | "file_type" | "metadata_json">,
+): string {
+	let metadata: Record<string, string | number | null | undefined> = {};
+	try {
+		metadata = JSON.parse(chunk.metadata_json) as Record<string, string | number | null | undefined>;
+	} catch {
+		metadata = {};
+	}
+	return `${buildContextPrefix(chunk.file_path, chunk.file_type, metadata)}\n\n${chunk.content}`;
+}
+
+function makeChunk(
+	content: string,
+	filePath: string,
+	fileType: string,
+	startLine: number,
+	endLine: number,
+	metadata: Record<string, string | number | null | undefined> = {},
+): Omit<ChunkInsert, "kb_id"> {
+	const metadata_json = JSON.stringify(metadata);
+	const chunk = {
+		content_hash: contentHash(content),
+		content,
+		content_tokenized: "",
+		file_path: filePath,
+		file_type: fileType,
+		start_line: startLine,
+		end_line: endLine,
+		metadata_json,
+	};
+	return { ...chunk, content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)) };
+}
+
 export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInsert, "kb_id">[] {
 	const lines = content.split("\n");
 	const chunks: Omit<ChunkInsert, "kb_id">[] = [];
-	let currentHeading = "";
+	const headingStack: string[] = [];
 	let sectionLines: string[] = [];
 	let startLine = 1;
+	let currentHeading = "";
+
+	function currentBreadcrumb(): string {
+		return headingStack.map(normalizeHeading).filter(Boolean).join(" > ");
+	}
+
+	function pushMarkdownChunk(text: string, start: number, end: number): void {
+		if (text.trim().length < 50) return;
+		chunks.push(
+			makeChunk(text.trim(), filePath, "markdown", start, end, {
+				heading: currentHeading,
+				breadcrumb: currentBreadcrumb(),
+			}),
+		);
+	}
 
 	function flush(endLine: number): void {
 		const text = sectionLines.join("\n").trim();
 		if (text.length < 50) return;
 
 		const fullText = currentHeading ? `${currentHeading}\n\n${text}` : text;
+		const paragraphs = fullText.split(/\n\n+/);
+		let buffer: string[] = [];
+		let bufferStart = startLine;
 
-		if (estimateTokens(fullText) > 2000) {
-			// Split large sections by paragraph
-			const paragraphs = fullText.split(/\n\n+/);
-			let buf: string[] = [];
-			let bufStart = startLine;
-			for (const para of paragraphs) {
-				buf.push(para);
-				if (estimateTokens(buf.join("\n\n")) > 1000) {
-					const chunkText = buf.join("\n\n");
-					chunks.push({
-						content_hash: contentHash(chunkText),
-						content: chunkText,
-						content_tokenized: preTokenizeForFTS(chunkText),
-						file_path: filePath,
-						file_type: "markdown",
-						start_line: bufStart,
-						end_line: endLine,
-						metadata_json: JSON.stringify({ heading: currentHeading }),
-					});
-					buf = [];
-					bufStart = endLine;
-				}
+		for (const para of paragraphs) {
+			const next = [...buffer, para].join("\n\n");
+			if (estimateTokens(next) > MARKDOWN_TARGET_TOKENS && buffer.length > 0) {
+				pushMarkdownChunk(buffer.join("\n\n"), bufferStart, endLine);
+				buffer = [];
+				bufferStart = endLine;
 			}
-			if (buf.length > 0) {
-				const chunkText = buf.join("\n\n");
-				if (chunkText.length >= 50) {
-					chunks.push({
-						content_hash: contentHash(chunkText),
-						content: chunkText,
-						content_tokenized: preTokenizeForFTS(chunkText),
-						file_path: filePath,
-						file_type: "markdown",
-						start_line: bufStart,
-						end_line: endLine,
-						metadata_json: JSON.stringify({ heading: currentHeading }),
-					});
-				}
-			}
-		} else {
-			chunks.push({
-				content_hash: contentHash(fullText),
-				content: fullText,
-				content_tokenized: preTokenizeForFTS(fullText),
-				file_path: filePath,
-				file_type: "markdown",
-				start_line: startLine,
-				end_line: endLine,
-				metadata_json: JSON.stringify({ heading: currentHeading }),
-			});
+			buffer.push(para);
+		}
+
+		if (buffer.length > 0) {
+			pushMarkdownChunk(buffer.join("\n\n"), bufferStart, endLine);
 		}
 	}
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+		const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
 
 		if (headingMatch && sectionLines.length > 0) {
 			flush(i);
@@ -291,6 +328,9 @@ export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInse
 		}
 
 		if (headingMatch) {
+			const level = headingMatch[1].length;
+			headingStack.splice(level - 1);
+			headingStack[level - 1] = line;
 			currentHeading = line;
 		} else {
 			sectionLines.push(line);
@@ -315,26 +355,16 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 	function flush(): void {
 		const text = buffer.join("\n\n").trim();
 		if (text.length < 50) return;
-		chunks.push({
-			content_hash: contentHash(text),
-			content: text,
-			content_tokenized: preTokenizeForFTS(text),
-			file_path: filePath,
-			file_type: fileType,
-			start_line: lineOffset,
-			end_line: lineOffset + text.split("\n").length,
-			metadata_json: "{}",
-		});
+		chunks.push(makeChunk(text, filePath, fileType, lineOffset, lineOffset + text.split("\n").length));
 		lineOffset += text.split("\n").length + 1;
 	}
 
 	for (const para of paragraphs) {
 		const paraTokens = estimateTokens(para);
-		if (bufferTokens + paraTokens > 1000 && buffer.length > 0) {
+		if (bufferTokens + paraTokens > TEXT_TARGET_TOKENS && buffer.length > 0) {
 			flush();
-			// overlap: keep last paragraph
-			buffer = buffer.length > 0 ? [buffer[buffer.length - 1]] : [];
-			bufferTokens = buffer.length > 0 ? estimateTokens(buffer[0]) : 0;
+			buffer = [];
+			bufferTokens = 0;
 		}
 		buffer.push(para);
 		bufferTokens += paraTokens;
@@ -363,18 +393,7 @@ export async function chunkFile(content: string, filePath: string): Promise<Omit
 
 	// Fallback: if file has content but no chunks (too short for splitting), keep as single chunk
 	if (chunks.length === 0 && content.trim().length > 10) {
-		chunks = [
-			{
-				content_hash: contentHash(content),
-				content: content.trim(),
-				content_tokenized: preTokenizeForFTS(content),
-				file_path: filePath,
-				file_type: fileType,
-				start_line: 1,
-				end_line: content.split("\n").length,
-				metadata_json: "{}",
-			},
-		];
+		chunks = [makeChunk(content.trim(), filePath, fileType, 1, content.split("\n").length)];
 	}
 
 	return chunks;

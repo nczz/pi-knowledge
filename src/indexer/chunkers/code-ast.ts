@@ -1,5 +1,5 @@
 import type { ChunkInsert } from "../../storage/sqlite.ts";
-import { contentHash, preTokenizeForFTS } from "../chunker.ts";
+import { buildChunkEmbeddingText, contentHash, preTokenizeForFTS } from "../chunker.ts";
 
 interface ASTNode {
 	type: string;
@@ -191,16 +191,19 @@ export async function chunkWithAST(
 	const tree = parser.parse(content);
 	const fns = collectChunks(tree.rootNode as unknown as ASTNode, config);
 	if (fns.length === 0) return [];
-	return fns.map((fn) => ({
-		content_hash: contentHash(fn.text),
-		content: fn.text,
-		content_tokenized: preTokenizeForFTS(fn.text),
-		file_path: filePath,
-		file_type: config.fileType,
-		start_line: fn.start,
-		end_line: fn.end,
-		metadata_json: JSON.stringify({ function_name: fn.name }),
-	}));
+	return fns.map((fn) => {
+		const chunk = {
+			content_hash: contentHash(fn.text),
+			content: fn.text,
+			content_tokenized: "",
+			file_path: filePath,
+			file_type: config.fileType,
+			start_line: fn.start,
+			end_line: fn.end,
+			metadata_json: JSON.stringify({ function_name: fn.name }),
+		};
+		return { ...chunk, content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)) };
+	});
 }
 
 export const SUPPORTED_LANGUAGES = new Set(Object.keys(LANGS));
