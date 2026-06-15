@@ -74,6 +74,37 @@ describe("KnowledgeEngine", () => {
 		});
 	});
 
+	describe("add", () => {
+		it("rejects duplicate knowledge base names", async () => {
+			await engine.add("Original content about authentication tokens and sessions.", "Duplicate");
+
+			await expect(engine.add("Replacement content about billing invoices and payments.", "Duplicate")).rejects.toThrow(
+				'Knowledge base "Duplicate" already exists',
+			);
+		});
+
+		it("directory indexing skips common build output and secret config files", async () => {
+			const projectDir = join(TEST_DIR, "project");
+			mkdirSync(join(projectDir, "src"), { recursive: true });
+			mkdirSync(join(projectDir, "bin"), { recursive: true });
+			mkdirSync(join(projectDir, "obj"), { recursive: true });
+			writeFileSync(join(projectDir, "src", "Program.cs"), 'public class Program { string topic = "AlphaSafeToken"; }');
+			writeFileSync(join(projectDir, "setting.json"), '{"ConnectionString":"SecretShouldNotIndex"}');
+			writeFileSync(join(projectDir, "bin", "runtime.json"), '{"runtime":"BuildOutputShouldNotIndex"}');
+			writeFileSync(join(projectDir, "obj", "assets.json"), '{"asset":"ObjShouldNotIndex"}');
+
+			const { kb } = await engine.add(projectDir, "Filtered Project");
+
+			expect(kb.file_count).toBe(1);
+			const safe = await engine.search("AlphaSafeToken", { mode: "fast" });
+			expect(safe.total_count).toBeGreaterThan(0);
+			const secret = await engine.search("SecretShouldNotIndex", { mode: "fast" });
+			expect(secret.total_count).toBe(0);
+			const build = await engine.search("BuildOutputShouldNotIndex", { mode: "fast" });
+			expect(build.total_count).toBe(0);
+		});
+	});
+
 	describe("update", () => {
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";

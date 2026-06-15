@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.4] - 2026-06-15
+
+### Fixed
+- Reject duplicate `knowledge_add` names with an actionable message instead of silently creating multiple same-name knowledge bases.
+- Strengthened default directory indexing ignores for build outputs and common secret/config files.
+
+### Changed
+- Updated `knowledge_add` tool guidance to prefer one directory-level indexing call and avoid per-file indexing loops.
+
 ## [0.3.3] - 2026-06-15
 
 ### Changed

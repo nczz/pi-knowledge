@@ -122,6 +122,13 @@ export class KnowledgeEngine {
 		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
 		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
 
+		const existingKB = getKBByName(this.db, name);
+		if (existingKB) {
+			throw new Error(
+				`Knowledge base "${name}" already exists. Use knowledge_update to refresh it, or knowledge_remove before adding a replacement.`,
+			);
+		}
+
 		const kb = createKB(this.db, {
 			name,
 			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,

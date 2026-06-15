@@ -144,7 +144,10 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Index files/dirs/text into a searchable knowledge base",
 		promptGuidelines: [
 			"Use knowledge_add when the user asks to index, remember, or learn from files or documentation",
-			"Provide a descriptive name for the knowledge base",
+			"Prefer one knowledge_add call for the project root or relevant directory; do not call it once per file",
+			"If a knowledge base with the same name already exists, use knowledge_update or ask before replacing it",
+			"Do not index secrets or environment-specific config files unless the user explicitly asks for that exact file",
+			"Provide a descriptive name for this single knowledge base",
 		],
 		parameters: Type.Object({
 			source: Type.String({ description: "File path, directory path, or inline text to index" }),
