@@ -141,7 +141,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 ## Large indexing must be bounded and observable
 
-大型 codebase 建立 KB 時，不能把「掃描完成、全部 chunk 放進陣列、全部 embedding、全部向量一次寫檔」當作可接受流程。這會在最糟情境產生三種問題:
+大型 codebase 建立 KB 是受支援的長任務；產品可以花時間完成，但不能因規模大而崩潰、靜默假死或留下看似健康的 partial KB。不能把「掃描完成、全部 chunk 放進陣列、全部 embedding、全部向量一次寫檔」當作可接受流程。這會在最糟情境產生三種問題:
 
 - 使用者看不到目前卡在掃描、chunking、embedding、DB write 還是 vector write。
 - V8 heap 同時持有大量 chunk text、embedding input、Float32 vectors 和最後 binary buffer。
@@ -149,7 +149,8 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 穩定性要求:
 
-- embedding 以固定 batch 執行，batch 前後都要檢查 cancellation signal。
+- embedding 以固定 hard cap batch 執行，batch 前後都要檢查 cancellation signal。單一大檔產生大量 chunks 時也不能讓 batch 超過上限。
+- directory add/update 開始前要做 metadata-only planning scan，先回報可索引檔案數、scannable bytes 與 skipped summary，讓使用者在 expensive embedding 前知道任務規模。
 - directory scan 要串流處理檔案，不能先把全部檔案內容收進 `ScannedFile[]` 再開始 chunking。保留相容 helper 可以，但 production add/update/diagnostics path 必須吃 iterator。
 - binary detection 只能讀固定大小 sample。不要用 `readFileSync` 讀完整檔案後再檢查前 512 bytes。
 - chunks 要分批寫入 SQLite，`updated_at` 和 counts 要隨 batch 更新，讓 `knowledge_status` 能判斷是否仍活著。

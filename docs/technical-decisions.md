@@ -214,12 +214,12 @@
 
 **狀態**: 已決定
 
-**背景**: 真實專案可能包含數百到數十萬個可索引 chunk。若 `knowledge_add`、`knowledge_update` 或 `knowledge_import` 一次持有全部 embedding input、全部 Float32 vectors，再用單一 `Buffer.alloc` 寫 vector file，會讓大型 codebase 建 KB 時不穩定，也讓使用者無法判斷還要等多久。
+**背景**: 真實專案可能包含數百到數十萬個可索引 chunk。大型 indexing 是產品支援的長任務，不是必須瞬間完成的背景小工作；產品責任是限制資源、持續顯示進度、避免假死與壞狀態。若 `knowledge_add`、`knowledge_update` 或 `knowledge_import` 一次持有全部 embedding input、全部 Float32 vectors，再用單一 `Buffer.alloc` 寫 vector file，會讓大型 codebase 建 KB 時不穩定，也讓使用者無法判斷目前是否仍在進展。
 
 **決策**:
 - directory scan 用 iterator/callback 型 API 串流產生檔案，production add/update path 不先收集所有 `ScannedFile.content`；diagnostics 使用 metadata-only scanner，不讀取完整檔案內容。
 - binary detection 只讀固定 sample，不用 `readFileSync` 讀完整檔案後再取前段。
-- embedding batch 固定上限，目前為 64 chunks。
+- embedding batch 是硬上限，目前為 64 chunks；單一大檔產生大量 chunks 時也不能超過此上限。
 - 每個 batch 成功後立即寫入 SQLite 並更新 KB counts，讓 `updated_at` 代表索引仍有進展。
 - vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
 - update 以 hash manifest 判斷新增/刪除/未變更，新增向量先寫入 temporary vector file，最後依 SQLite chunk iterator 重建正式 vector file。
@@ -235,6 +235,7 @@
 
 **理由**:
 - 商用品質的索引行為應先求穩定完成，再求速度。
+- 大型 indexing 可以花很久，但不能因專案規模大而讓 process 無界成長、靜默卡死、或留下看似健康的 partial KB。
 - 批次寫入讓大型專案在模型推論、SQLite 寫入、向量檔輸出三個階段都有可觀測進度。
 - persisted job state 讓使用者可以在下一個 prompt、另一個狀態查詢或 TUI 更新消失後仍知道索引目前在哪個階段，而不是只能看到 `Working...`。
 - 串流掃描讓 400 萬行等級 codebase 的主要記憶體消耗由「全部檔案內容 + 全部 chunks + 全部 vectors」降為「當前檔案 + embedding batch + hash/id metadata + top-K candidates」。
