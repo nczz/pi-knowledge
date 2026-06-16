@@ -192,3 +192,11 @@
 **重建索引邊界**:
 - Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。
 - embedding/FTS searchable text、file type 標記、chunk metadata 屬於 index-time 變更，既有 KB 必須 update/rebuild 才會完整受益。
+
+**研究依據與取捨**:
+- 採用 RAG 的基本分工: 外部知識以檢索方式進入上下文，而不是要求模型記住所有內容。參考 Lewis et al. 2020, "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks".
+- 採用 dense retrieval 作為 semantic recall 層。參考 Karpukhin et al. 2020, "Dense Passage Retrieval for Open-Domain Question Answering".
+- 採用 Contextual Retrieval 的核心洞察: chunk 本身常缺上下文，因此 searchable text 需要補上 chunk 所屬的文件/章節/符號背景。參考 Anthropic 2024, "Introducing Contextual Retrieval".
+- 保留 RRF 作為測試過的 fusion baseline，但預設改用 normalized weighted score fusion。原因是本產品需要可診斷的分數區間；RRF 在專案級 dogfood 中讓 hybrid score 過度壓縮。參考 Cormack et al. 2009, "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods".
+- 採用 MMR 類似的 diversity 思路降低同檔案、同 window、同語意 chunk 的重複佔位。參考 Goldstein and Carbonell 1998, "Using MMR for Diversity-Based Reranking".
+- 未採用 ColBERT late interaction 作為本 release 預設。ColBERT 對精細 token interaction 有價值，但需要更重的模型與索引設計；目前用 lightweight local embeddings、BM25、query-aware ranking、diversity 和 optional cross-encoder reranking 先取得較低成本的商用品質。參考 Khattab and Zaharia 2020, "ColBERT".

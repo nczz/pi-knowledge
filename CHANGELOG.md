@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.3.6] - 2026-06-16
 
 ### Added
 - Added contextual indexing for rebuilds: embeddings and FTS now include file path, file type, heading breadcrumbs, and code symbols while keeping returned chunk content readable.

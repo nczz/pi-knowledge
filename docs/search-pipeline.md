@@ -180,6 +180,23 @@ query → mode dispatch:
   adaptive: hybrid seeds → contextual window expansion → diversify → paginate
 ```
 
+---
+
+## 9. Research References and Implementation Mapping
+
+This search pipeline is based on retrieval research and production RAG guidance, but it deliberately implements the parts that fit a local Pi extension without adding paid API dependencies or large serving infrastructure.
+
+| Source | Relevant finding | pi-knowledge implementation |
+|--------|------------------|-----------------------------|
+| [Lewis et al. 2020, Retrieval-Augmented Generation](https://arxiv.org/abs/2005.11401) | Keep knowledge outside model weights and retrieve relevant passages at query time. | Persistent local KBs, chunk retrieval, source-bearing results, and no model retraining requirement. |
+| [Karpukhin et al. 2020, Dense Passage Retrieval](https://arxiv.org/abs/2004.04906) | Dense vectors improve semantic passage retrieval beyond sparse lexical matching alone. | `semantic` mode and vector side of `hybrid` mode use local embeddings. |
+| [Anthropic 2024, Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval) | Prepending chunk-specific context to embeddings and BM25 improves retrieval; combining contextual embeddings, contextual BM25, and reranking gives the largest gains. | Index-time searchable text prepends file path, file type, Markdown breadcrumbs, and code symbols to embeddings/FTS while returned content remains the original chunk. |
+| [Cormack et al. 2009, Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) | RRF is a strong zero-training rank-fusion baseline. | Retained as a tested utility, but not the default hybrid scoring because project dogfood showed excessive score compression for this product's diagnostics. |
+| [Goldstein and Carbonell 1998, MMR diversity reranking](https://aclanthology.org/X98-1025/) | Reranking can trade off relevance and novelty to reduce redundant top results. | Diversity reranking uses relevance plus lexical, same-file line proximity, adaptive-window overlap, and vector-redundancy signals. |
+| [Khattab and Zaharia 2020, ColBERT](https://arxiv.org/abs/2004.12832) | Late interaction can improve retrieval quality while precomputing document representations. | Not implemented in this release: it would add larger model/index complexity. Current approach uses lighter local embeddings plus optional cross-encoder reranking. |
+
+The current implementation intentionally does not generate LLM-written per-chunk context like Anthropic's full Contextual Retrieval recipe. Instead, it uses deterministic context available locally from the indexed artifact: path, type, heading, and symbol metadata. This keeps indexing private, repeatable, offline-capable, and suitable for commercial local development workflows.
+
 
 ---
 
