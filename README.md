@@ -88,6 +88,15 @@ pi install ./pi-knowledge
 - `deep`: hybrid retrieval followed by cross-encoder reranking.
 - `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
 
+Mode selection contract:
+
+- Start with `hybrid` for most project questions.
+- Use `fast` for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings.
+- Use `semantic` when the query is conceptual and exact terms may differ from the indexed wording.
+- Use `adaptive` when the answer needs nearby code, neighboring documentation sections, or enough context to make a safe edit.
+- Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
+- If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.
+
 Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics.
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.

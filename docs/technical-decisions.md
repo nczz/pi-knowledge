@@ -182,12 +182,14 @@
 - Hybrid 用 normalized weighted score fusion，後接 query-aware ranking，不再用 RRF 作為預設 fusion。
 - Ranking 必須同時考慮 lexical coverage、path token、source file intent、documentation/setup intent、test intent 與 low-evidence confidence gate。
 - Ranking diagnostics 必須可回傳，方便用真實專案報告檢視分數與排序原因。
+- Agent-facing mode selection 必須文件化，不能只提供 modes 讓模型自行猜測。
 
 **理由**:
 - 索引增強解決「chunk 自身缺少檔案/章節/符號語意」。
 - 查詢時擴窗保留上下文，但不污染原始 chunk 內容。
 - 意圖排序讓 `stt/stt.go`、`bot/errors.go`、`INSTALL.md` 這類目標依查詢語意勝出，而不是被長文件或測試檔覆蓋。
 - Confidence gate 讓無意義或低證據查詢可以回傳 0 結果，避免 agent 建立錯誤信心。
+- Mode contract 讓 agent 依任務型態選擇 `fast`、`semantic`、`hybrid`、`adaptive` 或 `deep`，並在空/弱結果時重試一次，降低 false negative。
 
 **重建索引邊界**:
 - Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。

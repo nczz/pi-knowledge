@@ -239,8 +239,13 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Search knowledge bases (hybrid BM25 + semantic + weighted score fusion)",
 		promptGuidelines: [
 			"Use knowledge_search to find relevant context before answering domain questions",
-			"Default mode 'hybrid' combines keyword and semantic search for best results",
-			"Use mode 'fast' for exact symbol/term lookups, 'semantic' for conceptual queries",
+			"Default to mode 'hybrid' for most project questions because it combines lexical anchors with semantic recall",
+			"Use mode 'fast' for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings",
+			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording",
+			"Use mode 'adaptive' when the user needs surrounding implementation context, related nearby sections, or enough context to make a code change",
+			"Use mode 'deep' for high-stakes answers, ambiguous top results, or final verification where slower cross-encoder reranking is acceptable",
+			"If a search returns no results or obviously weak results, retry once with a different mode before concluding the KB lacks the answer",
+			"If top results are repetitive, retry with diversity 'strong' or mode 'adaptive' instead of increasing the limit first",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),

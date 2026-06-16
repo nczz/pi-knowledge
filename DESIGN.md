@@ -20,7 +20,7 @@ Coding agents operate within limited context windows. When working on complex pr
 ## 2. Design Goals
 
 1. **Feature parity with kiro-cli knowledge** — same UX primitives: add, search, remove, update, show, status, clear
-2. **Hybrid search by default** — BM25 + semantic + Reciprocal Rank Fusion, with optional cross-encoder rerank
+2. **Hybrid search by default** — BM25 + semantic + normalized weighted score fusion, with optional cross-encoder rerank
 3. **Incremental indexing** — content-addressed chunks; only re-embed changed/new content
 4. **Code-aware chunking** — AST-based splitting for supported languages; fallback to semantic boundaries
 5. **100% local** — local ONNX embedding model, zero API keys required for core functionality
@@ -49,22 +49,18 @@ Coding agents operate within limited context windows. When working on complex pr
 ├─────────────────────────────────────────────────────┤
 │  Storage Layer                                       │
 │  ├── SQLite (metadata, BM25 FTS5, chunk registry)    │
-│  ├── Vector Store (HNSW index, float32 embeddings)   │
-│  └── Content Store (content-addressed chunk cache)   │
+│  └── Vector Store (streamed binary float32 embeddings) │
 ├─────────────────────────────────────────────────────┤
 │  Embedding Layer                                     │
 │  ├── Local ONNX (multilingual-e5-small, 384d) [default]  │
-│  ├── Pi AI provider (OpenAI/Google/etc.) [optional]  │
-│  └── Custom endpoint [configurable]                  │
+│  └── OpenAI-compatible env provider [optional]       │
 └─────────────────────────────────────────────────────┘
 
 Persistence: ~/.pi/knowledge/
 ├── knowledge.db          (SQLite: metadata + FTS5 + chunk registry)
 ├── vectors/
-│   └── <kb-id>.hnsw      (HNSW index per knowledge base)
-├── cache/
-│   └── <content-hash>    (content-addressed embedding cache)
-└── config.json           (user preferences)
+│   └── <kb-id>.bin       (streamed float32 vectors per knowledge base)
+└── models/               (cached ONNX models)
 ```
 
 ---
@@ -102,7 +98,6 @@ interface Chunk {
   start_line: number;
   end_line: number;
   metadata: Record<string, string>;  // language, function_name, class_name, heading, etc.
-  embedding?: Float32Array;  // cached embedding vector
   indexed_at: number;
 }
 ```
@@ -188,9 +183,9 @@ When user has API keys configured in Pi's model registry, offer higher-quality e
 - Google `text-embedding-004` (768d)
 - Configurable via `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small`
 
-### Embedding Cache
+### Vector Storage
 
-Content-addressed: `cache/<sha256(content)>` → `Float32Array`. Shared across KBs — identical content chunks are embedded once regardless of which KB they belong to.
+Vectors are stored per KB in a compact binary file: 8-byte header (`count`, `dim`) followed by contiguous float32 vectors in SQLite chunk row order. Indexing writes vectors through a temp file and atomic rename; search uses ranged reads and retains only top candidate vectors needed for ranking/diversity.
 
 ---
 
@@ -201,21 +196,22 @@ Query
   │
   ├─→ BM25 (SQLite FTS5)       → top-50 candidates
   │
-  ├─→ Vector search (HNSW)     → top-50 candidates
+  ├─→ Vector search (streamed exact scan) → top-50 candidates
   │
-  └─→ Reciprocal Rank Fusion   → merged top-K
+  └─→ Weighted score fusion    → merged top-K
        │
        └─→ [Optional] Cross-encoder rerank → final top-K
             │
             └─→ Metadata filter → results
 ```
 
-### RRF (Reciprocal Rank Fusion)
+### Weighted Score Fusion
 
 ```
-score(doc) = Σ 1 / (k + rank_i(doc))
+score(doc) = bm25_weight * normalized_bm25 + vector_weight * normalized_vector + overlap_bonus
 ```
-Where `k = 60` (standard constant), across BM25 and vector result lists.
+
+RRF remains a tested baseline, but the default pipeline uses normalized weighted scores because project-level dogfood showed RRF compressed hybrid scores too aggressively for diagnostics and ranking tuning.
 
 ### Metadata Filters (post-retrieval)
 
@@ -235,8 +231,9 @@ knowledge_search({
 |------|----------|---------|----------|
 | `fast` | BM25 only | ~10ms | Exact terms, filenames, symbols |
 | `semantic` | Vector only | ~50ms | Conceptual, paraphrased queries |
-| `hybrid` (default) | BM25 + Vector + RRF | ~80ms | General purpose |
-| `deep` | Hybrid + cross-encoder rerank | ~500ms | Maximum relevance |
+| `hybrid` (default) | BM25 + vector + weighted score fusion + confidence gate | variable | General purpose |
+| `adaptive` | Hybrid + query-time neighboring context expansion | variable | Implementation context and related sections |
+| `deep` | Hybrid + cross-encoder rerank | slower | Maximum relevance |
 
 ---
 
@@ -262,7 +259,7 @@ promptSnippet: "Search indexed knowledge bases (docs, code, specs) for relevant 
 promptGuidelines: [
   "Before answering questions about project architecture, APIs, or domain concepts, search the knowledge base first",
   "When the user references documentation or specs, check if they are indexed and search them",
-  "Use knowledge_search with mode 'hybrid' by default; switch to 'fast' for exact symbol lookups",
+  "Use hybrid by default, fast for exact symbols, semantic for conceptual wording, adaptive for surrounding context, and deep for high-stakes verification",
 ]
 ```
 
@@ -378,7 +375,6 @@ Environment overrides:
 | `knowledge show` | `knowledge_show {}` | + health indicators |
 | `knowledge status` | `knowledge_status {}` | + granular progress % |
 | `knowledge clear` | `knowledge_clear {}` | identical |
-| `knowledge cancel` | `knowledge_status { cancel: true }` | identical |
 
 ---
 
@@ -387,7 +383,7 @@ Environment overrides:
 | kiro weakness | pi-knowledge solution |
 |---------------|----------------------|
 | Full re-index on update | Content-addressed SHA-256 diffing. O(changed) not O(total). |
-| Semantic OR keyword only | Hybrid by default: BM25 + vector + RRF fusion. |
+| Semantic OR keyword only | Hybrid by default: BM25 + vector + weighted score fusion. |
 | No reranking | Optional cross-encoder (ms-marco-MiniLM). |
 | No file watching | fs.watch + debounce + .gitignore. KBs stay fresh. |
 | No code-aware chunking | AST splitting (TS/JS/Python/Go/Rust). |
@@ -395,7 +391,7 @@ Environment overrides:
 | Opaque progress | Real-time: files/chunks/embeddings + ETA. |
 | No quality metrics | Staleness, orphans, coverage %, drift. |
 | No metadata filters | Filter by file_type, kb_name, path, language. |
-| No dedup | Content-addressed embedding cache. |
+| No dedup | Content-addressed update diff avoids re-embedding unchanged chunks. |
 
 ---
 
@@ -417,7 +413,7 @@ Environment overrides:
 
 ### Phase 2: Hybrid + Incremental
 
-- [x] RRF fusion
+- [x] Weighted score fusion
 - [x] Content-addressed dedup
 - [x] Incremental re-indexing
 - [x] `knowledge_update` + `knowledge_status`
@@ -432,7 +428,7 @@ Environment overrides:
 - [x] File watcher
 - [x] Index diagnostics
 - [x] Auto-injection per turn
-- [x] Pi AI provider embeddings
+- [x] Optional OpenAI env provider embeddings with local fallback
 - [x] Benchmarks (vitest bench: BM25 0.05ms, hybrid 2.1ms)
 
 ### Phase 4: Ecosystem
@@ -453,19 +449,20 @@ Environment overrides:
 | Package | Purpose | Size |
 |---------|---------|------|
 | `better-sqlite3` | Metadata + FTS5 | 2.3 MB |
-| `onnxruntime-node` | Local embedding | ~15 MB |
+| `@huggingface/transformers` | Local ONNX embedding and reranking runtime | ~32 MB model cache |
+| `ignore` | Gitignore-compatible directory filtering | small |
+| `unpdf` | PDF text extraction | small |
+| `mammoth` | DOCX text extraction | small |
+| `tree-sitter*` | AST code chunking | varies |
 
-Note: Phase 1 uses pure-JS flat cosine search (no hnswlib-node needed).
-See RESEARCH.md §7 for rationale: <10K vectors → brute-force is <10ms.
+Current vector search uses exact streamed scan from the per-KB binary vector file. This is O(N) time but O(topK) vector memory, which prioritizes stable operation on large codebases. ANN/HNSW remains a future option for million-chunk low-latency search.
 
 ### Optional (Phase 3+)
 
 | Package | Purpose |
 |---------|---------|
-| `hnswlib-node` or `usearch` | HNSW vector index (if >10K vectors) |
-| `tree-sitter` + grammars | AST chunking |
-| Cross-encoder ONNX | Reranking |
-| `chokidar` | File watching |
+| `hnswlib-node` or `usearch` | ANN vector index if exact scan becomes too slow |
+| `chokidar` | File watching alternative if native watch/polling is insufficient |
 
 ---
 
@@ -488,7 +485,7 @@ pi-knowledge/
 │   │   └── ...
 │   ├── embedding/        ← Provider interface + local ONNX + pi-ai
 │   ├── search/           ← BM25, vector, fusion, reranker
-│   ├── storage/          ← SQLite + HNSW persistence
+│   ├── storage/          ← SQLite persistence
 │   ├── watcher/          ← File watching
 │   ├── diagnostics/      ← Health checks
 │   └── config.ts
@@ -524,8 +521,8 @@ pi-knowledge/
 
 ## 19. Open Questions
 
-1. **Native dep portability**: onnxruntime-node + hnswlib-node Bun binary compatibility. Fallback: pure-JS approximate NN.
+1. **Native/runtime portability**: better-sqlite3, tree-sitter, and the ONNX runtime bundled through `@huggingface/transformers` must remain compatible with supported Node/macOS/Linux environments.
 2. **Multilingual**: all-MiniLM-L6-v2 vs multilingual-e5-small for zh-TW support.
 3. **tree-sitter loading**: Lazy-load grammars per language to avoid bundle bloat.
-4. **KV cache stability**: Adopt pi-memory's snapshot pattern for auto-injection.
+4. **Auto-injection stability**: keep context injection opt-in and bounded so retrieved snippets do not crowd out the user's active task.
 5. **Scope**: Global `~/.pi/knowledge/` + project-local `.pi/knowledge/` both supported.
