@@ -143,11 +143,37 @@ describe("KnowledgeEngine", () => {
 				expect(job?.processed_files).toBe(70);
 				expect(job?.processed_chunks).toBe(70);
 				expect(job?.message).toContain("Ready: 70 chunks");
+				expect(updates.some((message) => message.includes("Planned directory scan: 70 files"))).toBe(true);
 				expect(updates.some((message) => message.includes("Scanning"))).toBe(true);
 				expect(updates.some((message) => message.includes("Scanned 70 files"))).toBe(true);
 				expect(updates.some((message) => message.includes("skipped 0"))).toBe(true);
+				expect(updates.some((message) => message.includes("chunks/s"))).toBe(true);
 				expect(updates.some((message) => message.includes("Embedding batch"))).toBe(true);
 				expect(updates.at(-1)).toContain("Ready: 70 chunks from 70 files");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("hard-caps embedding batches even when one file creates many chunks", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-batch-cap-"));
+			try {
+				const paragraphs = Array.from({ length: 90 }, (_, i) =>
+					`BatchCapToken${i} contains enough content to become a meaningful retrieval paragraph for bounded embedding batch validation. `.repeat(
+						8,
+					),
+				);
+				writeFileSync(join(projectDir, "large.md"), paragraphs.join("\n\n"));
+				const updates: string[] = [];
+
+				await engine.add(projectDir, "Batch Cap", (message) => updates.push(message));
+
+				const batchSizes = updates
+					.map((message) => message.match(/Embedding batch of (\d+)/)?.[1])
+					.filter((value): value is string => Boolean(value))
+					.map(Number);
+				expect(batchSizes.length).toBeGreaterThan(1);
+				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(64);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}

@@ -14,6 +14,7 @@ import {
 	chunkFile,
 	chunkIdentityHash,
 	createSkippedScanStats,
+	iterateScannableFiles,
 	iterateScannedFiles,
 	preTokenizeForFTS,
 	summarizeSkippedScan,
@@ -132,12 +133,44 @@ const ADAPTIVE_NEIGHBOR_TARGET = 5;
 const INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 
+interface DirectoryScanPlan {
+	files: number;
+	bytes: number;
+	skippedTotal: number;
+	skippedSummary: string;
+}
+
 function isCancellationError(error: unknown): boolean {
 	return error instanceof Error && error.message === "Cancelled";
 }
 
 function tempVectorPath(vectorPath: string): string {
 	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+}
+
+function planDirectoryScan(dirPath: string): DirectoryScanPlan {
+	const skipped = createSkippedScanStats();
+	let files = 0;
+	let bytes = 0;
+	for (const file of iterateScannableFiles(dirPath, skipped)) {
+		files++;
+		bytes += file.size;
+	}
+	return {
+		files,
+		bytes,
+		skippedTotal: skipped.total,
+		skippedSummary: summarizeSkippedScan(skipped),
+	};
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	const kb = bytes / 1024;
+	if (kb < 1024) return `${kb.toFixed(1)} KB`;
+	const mb = kb / 1024;
+	if (mb < 1024) return `${mb.toFixed(1)} MB`;
+	return `${(mb / 1024).toFixed(2)} GB`;
 }
 
 function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefined): number {
@@ -468,19 +501,20 @@ export class KnowledgeEngine {
 			vectorWriter = openVectorWriter(tempVectorFile);
 			let chunkCount = 0;
 			let fileCount = 0;
-			let pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
+			const pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 			const startedAt = Date.now();
 			let latestSkippedTotal = 0;
 
 			const reportProgress = (phase: string, processedFiles?: number, totalFiles?: number, skippedTotal = 0): void => {
 				latestSkippedTotal = skippedTotal;
 				const elapsed = Date.now() - startedAt;
-				let suffix = `${chunkCount} chunks, elapsed ${formatDuration(elapsed)}`;
+				const chunkRate = chunkCount / Math.max(1, elapsed / 1000);
+				let suffix = `${chunkCount} chunks, ${chunkRate.toFixed(1)} chunks/s, elapsed ${formatDuration(elapsed)}`;
 				if (processedFiles !== undefined && totalFiles !== undefined && totalFiles > 0) {
 					const rate = processedFiles / Math.max(1, elapsed / 1000);
 					const remainingFiles = Math.max(0, totalFiles - processedFiles);
 					const etaMs = rate > 0 ? (remainingFiles / rate) * 1000 : 0;
-					suffix = `${processedFiles}/${totalFiles} files, ${suffix}, ETA ${formatDuration(etaMs)}`;
+					suffix = `${processedFiles}/${totalFiles} files, ${suffix}, file ETA ${formatDuration(etaMs)}`;
 				} else if (processedFiles !== undefined) {
 					suffix = `${processedFiles} files scanned, ${suffix}`;
 				}
@@ -501,8 +535,7 @@ export class KnowledgeEngine {
 			const flushPending = async (processedFiles?: number, totalFiles?: number): Promise<void> => {
 				if (!this.db || pendingChunks.length === 0) return;
 				if (signal?.aborted) throw new Error("Cancelled");
-				const batch = pendingChunks;
-				pendingChunks = [];
+				const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
 				reportProgress(`Embedding batch of ${batch.length}`, processedFiles, totalFiles);
 				const vectors = await embedDocuments(
 					batch.map((chunk) => buildChunkEmbeddingText(chunk)),
@@ -550,8 +583,24 @@ export class KnowledgeEngine {
 				fileCount = 1;
 				await addChunks(await chunkFile(result.value, resolvedSource));
 			} else if (isDir) {
+				const plan = planDirectoryScan(resolvedSource);
+				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
+					plan.bytes,
+				)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "planning",
+					message: planningMessage,
+					total_files: plan.files,
+					skipped_total: plan.skippedTotal,
+				});
+				onProgress?.(planningMessage);
 				const scanningMessage = `Scanning ${resolvedSource}...`;
-				updateIndexingJob(this.db, kb.id, { phase: "scanning", message: scanningMessage });
+				updateIndexingJob(this.db, kb.id, {
+					phase: "scanning",
+					message: scanningMessage,
+					total_files: plan.files,
+					skipped_total: plan.skippedTotal,
+				});
 				onProgress?.(scanningMessage);
 				const skipped = createSkippedScanStats();
 				let processedFiles = 0;
@@ -561,8 +610,8 @@ export class KnowledgeEngine {
 					processedFiles++;
 					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
-					await addChunks(chunks, processedFiles, undefined);
-					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, undefined, skipped.total);
+					await addChunks(chunks, processedFiles, plan.files);
+					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
 				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${summarizeSkippedScan(
 					skipped,
@@ -572,6 +621,7 @@ export class KnowledgeEngine {
 					message: finalizingMessage,
 					processed_files: processedFiles,
 					processed_chunks: chunkCount,
+					total_files: plan.files,
 					skipped_total: skipped.total,
 					added_chunks: chunkCount,
 				});
@@ -663,19 +713,19 @@ export class KnowledgeEngine {
 
 			const oldVectorIndexByHash = new Map<string, number[]>();
 			const newVectorIndexByHash = new Map<string, number[]>();
-			let pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
+			const pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 			let addedVectorCount = 0;
 			let addedCount = 0;
 			let unchanged = 0;
 			let scannedFiles = 0;
 			let scannedChunks = 0;
+			let plannedTotalFiles: number | undefined;
 			const startedAt = Date.now();
 
 			const flushPending = async (): Promise<void> => {
 				if (!this.db || !addedVectorWriter || pendingChunks.length === 0) return;
 				if (signal?.aborted) throw new Error("Cancelled");
-				const batch = pendingChunks;
-				pendingChunks = [];
+				const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
 				const elapsed = Date.now() - startedAt;
 				const message = `Embedding update batch: ${addedCount} new chunks stored, ${scannedFiles} files scanned, elapsed ${formatDuration(
 					elapsed,
@@ -685,6 +735,7 @@ export class KnowledgeEngine {
 					message,
 					processed_files: scannedFiles,
 					processed_chunks: scannedChunks,
+					total_files: plannedTotalFiles,
 					added_chunks: addedCount,
 					unchanged_chunks: unchanged,
 				});
@@ -710,6 +761,7 @@ export class KnowledgeEngine {
 					message: storedMessage,
 					processed_files: scannedFiles,
 					processed_chunks: scannedChunks,
+					total_files: plannedTotalFiles,
 					added_chunks: addedCount,
 					unchanged_chunks: unchanged,
 				});
@@ -744,6 +796,18 @@ export class KnowledgeEngine {
 				scannedFiles = 1;
 				await processChunks(await chunkUrl(kb.source_path, signal));
 			} else if (statSync(kb.source_path).isDirectory()) {
+				const plan = planDirectoryScan(kb.source_path);
+				plannedTotalFiles = plan.files;
+				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
+					plan.bytes,
+				)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "planning",
+					message: planningMessage,
+					total_files: plan.files,
+					skipped_total: plan.skippedTotal,
+				});
+				onProgress?.(planningMessage);
 				const skipped = createSkippedScanStats();
 				for (const file of iterateScannedFiles(kb.source_path, skipped)) {
 					if (signal?.aborted) throw new Error("Cancelled");
@@ -756,6 +820,7 @@ export class KnowledgeEngine {
 							message,
 							processed_files: scannedFiles,
 							processed_chunks: scannedChunks,
+							total_files: plan.files,
 							skipped_total: skipped.total,
 							added_chunks: addedCount,
 							unchanged_chunks: unchanged,
@@ -771,6 +836,7 @@ export class KnowledgeEngine {
 					message,
 					processed_files: scannedFiles,
 					processed_chunks: scannedChunks,
+					total_files: plan.files,
 					skipped_total: skipped.total,
 					added_chunks: addedCount,
 					unchanged_chunks: unchanged,

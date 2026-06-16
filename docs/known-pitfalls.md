@@ -156,7 +156,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - vector file 要 streaming append，最後回寫 header；不要在索引路徑用單一巨大 `Buffer.alloc`。
 - update 不能建立 `newChunks`、`chunksToAdd`、`finalChunks` 這類大型全量陣列後才開始處理。新增向量應寫入 temporary vector file，刪除應分批，正式 vector file 應依 DB iterator 重建。
 - chunk identity 不能只看 content。大型 codebase 常有重複模板、空函式、產生器輸出或同名設定片段；若 hash 不含 path/line/metadata，update 會把不同檔案的相同內容當同一個 chunk，刪除其中一個檔案時會留下 stale/orphan chunk。
-- progress 必須包含目前 phase、已處理量、elapsed，能估 ETA 時要回報 ETA。未知總量的大型 directory scan 不應為了百分比或 ETA 先做全量內容掃描。
+- progress 必須包含目前 phase、已處理量、elapsed 與 chunks/sec，能估算檔案總量時要回報 file ETA。大型檔案會讓 file ETA 偏樂觀，所以不能只顯示 files processed；同一檔案內 chunks 持續增加時，使用者也必須看得出仍有進展。
 - progress 不能只靠 `onUpdate`。大型索引常跨越多個 prompt 或 TUI render；phase、last message、last progress time、processed counts、skipped、added/removed/unchanged 與 error/cancelled state 必須持久化，讓 `knowledge_status` 可以判斷正在進展還是真的卡死。
 - progress 與 diagnostics 必須揭露 skipped file count/reasons/samples，否則使用者無法判斷是索引器漏掉還是安全排除。
 - `knowledge_status` 必須標示超過 stale threshold 的 `indexing` KB，並提示先確認沒有 active Pi process，再 remove/rebuild。

@@ -109,7 +109,7 @@ For best search quality, rebuild or update existing knowledge bases after upgrad
 
 ## Large Project Indexing
 
-Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, skipped file counts, elapsed time, and ETA where available. Unknown-size directory scans intentionally report phase progress instead of pre-counting every file, because pre-counting requires the same memory-heavy full scan that large-project indexing is designed to avoid.
+Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, chunks/sec, skipped file counts, elapsed time, and file ETA where available. Directory indexing starts with a metadata-only planning scan so large repositories can show total scannable files and skipped counts without loading all file content.
 
 Indexing progress is persisted in SQLite, not only printed as transient tool updates. `knowledge_status` shows the current or last indexing operation, phase, last progress message, last progress age, processed file/chunk counts, skipped count, and add/remove/unchanged counts. This makes long indexing runs distinguishable from stuck jobs even if the user checks status from a later prompt.
 

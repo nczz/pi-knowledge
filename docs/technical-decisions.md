@@ -224,7 +224,8 @@
 - vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
 - update 以 hash manifest 判斷新增/刪除/未變更，新增向量先寫入 temporary vector file，最後依 SQLite chunk iterator 重建正式 vector file。
 - 刪除 chunks 必須分批執行，避免大型 KB 超過 SQLite parameter limit。
-- add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。未知總量的 directory scan 回報 phase、已掃描檔案、chunk 數、skipped 數與 elapsed，不為 ETA 先做全量內容掃描。
+- directory add/update 開始前先做 metadata-only planning scan，回報可索引檔案數、scannable bytes 與 skipped summary；這個 planning pass 不讀完整檔案內容。
+- add/update/import 都必須提供 progress；能估算時包含 elapsed、chunks/sec 與 file ETA。大型檔案可能讓 file ETA 偏樂觀，因此進度文字必須同時顯示 chunk throughput。
 - add/update/import 的 job state 必須持久化到 SQLite，包含 operation、status、phase、last message、started_at、last_progress_at、processed files/chunks、skipped、added、removed、unchanged 與 error_message。
 - `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
 - `knowledge_status` diagnostics 需用 chunk iterator 與 streaming source scan，不載入全部 chunk content 或全部來源內容，並以 persisted job state 區分「仍在進展」和「卡住」。
