@@ -167,3 +167,28 @@
 - Custom binary → 不可讀
 
 **理由**: Line-diffable（git-friendly）、streaming 讀寫、人類可讀、可用 jq 查詢。
+
+---
+
+## ADR-014: Contextual Retrieval 使用「索引增強 + 查詢時擴窗 + 意圖排序」
+
+**狀態**: 已決定
+
+**背景**: 單純 chunk-level embedding 會讓 README 或大型概覽文件反覆出現在 top results，也會讓小模組、實作檔與測試檔混排。RRF 雖然穩定，但會壓縮 hybrid score，導致結果差異變成「量的變化」而不是「質的排序」。
+
+**決策**:
+- 索引時把 file path、file type、Markdown heading breadcrumbs、code symbols 納入 embedding/FTS searchable text。
+- 查詢時保留原始 chunk 作為回傳內容，但 adaptive mode 會從 seed chunk 擴張同檔案上下文 window。
+- Hybrid 用 normalized weighted score fusion，後接 query-aware ranking，不再用 RRF 作為預設 fusion。
+- Ranking 必須同時考慮 lexical coverage、path token、source file intent、documentation/setup intent、test intent 與 low-evidence confidence gate。
+- Ranking diagnostics 必須可回傳，方便用真實專案報告檢視分數與排序原因。
+
+**理由**:
+- 索引增強解決「chunk 自身缺少檔案/章節/符號語意」。
+- 查詢時擴窗保留上下文，但不污染原始 chunk 內容。
+- 意圖排序讓 `stt/stt.go`、`bot/errors.go`、`INSTALL.md` 這類目標依查詢語意勝出，而不是被長文件或測試檔覆蓋。
+- Confidence gate 讓無意義或低證據查詢可以回傳 0 結果，避免 agent 建立錯誤信心。
+
+**重建索引邊界**:
+- Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。
+- embedding/FTS searchable text、file type 標記、chunk metadata 屬於 index-time 變更，既有 KB 必須 update/rebuild 才會完整受益。

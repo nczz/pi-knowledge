@@ -11,6 +11,8 @@
 - Added vector-aware redundancy scoring and overlapping adaptive window collapse for higher-diversity top results.
 - Replaced hybrid RRF scoring with normalized weighted score fusion to preserve meaningful score spread.
 - Added file-level result interleaving so README-style overview files cannot dominate top results with repeated chunks.
+- Added confidence gating for hybrid search so low-evidence garbage queries return no results instead of unrelated matches.
+- Strengthened source-file intent scoring so named modules and core implementation files outrank overview and test files when appropriate.
 
 ## [0.3.5] - 2026-06-15
 

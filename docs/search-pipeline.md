@@ -8,8 +8,9 @@
 |------|------|---------|
 | `fast` | BM25 only | <10ms |
 | `semantic` | Vector only | <50ms |
-| `hybrid` (default) | BM25 + Vector + RRF | <100ms |
+| `hybrid` (default) | BM25 + Vector + weighted score fusion + confidence gate + diversity | <100ms |
 | `deep` | Hybrid + Cross-encoder rerank | <500ms |
+| `adaptive` | Hybrid + query-time contextual window expansion | <150ms |
 
 ---
 
@@ -78,38 +79,50 @@ Path: ~/.pi/knowledge/vectors/<kb-id>.bin
 
 ---
 
-## 4. Reciprocal Rank Fusion (RRF)
+## 4. Hybrid Weighted Score Fusion
 
-### 公式 (Cormack et al. 2009)
+Hybrid mode does not use Reciprocal Rank Fusion anymore. RRF was robust, but it compressed scores too aggressively for project-level knowledge bases: many chunks had near-identical final scores, making natural-language ranking difficult to diagnose and tune.
+
+Current hybrid retrieval:
+
+1. Run BM25 with strict AND terms and fallback OR terms.
+2. Run vector search for semantic recall.
+3. Normalize BM25 and vector scores independently.
+4. Fuse with weighted score fusion.
+5. Apply query-aware ranking boosts and penalties.
+6. Drop low-confidence candidates that lack enough lexical evidence.
 
 ```
-RRF_score(doc) = Σ 1 / (k + rank_i(doc))    where k = 60
+hybrid_score = normalized_bm25 * bm25_weight + normalized_vector * vector_weight
 ```
 
-### 實作
+This keeps score spread meaningful while still combining exact lexical and semantic matches.
+
+### Query-aware ranking
 
 ```typescript
-function reciprocalRankFusion(resultLists: Array<{ chunkId: string }[]>, k = 60) {
-  const scores = new Map<string, number>();
-  for (const list of resultLists) {
-    for (let rank = 0; rank < list.length; rank++) {
-      const id = list[rank].chunkId;
-      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1));
-    }
-  }
-  return [...scores.entries()]
-    .map(([chunkId, rrfScore]) => ({ chunkId, rrfScore }))
-    .sort((a, b) => b.rrfScore - a.rrfScore);
+function scoreChunkForQuery(baseScore: number, chunk: Chunk, queryTokens: Set<string>) {
+  let score = baseScore;
+  score += pathTokenBoost(chunk.file_path, queryTokens);
+  score += sourceFileBoost(chunk, queryTokens);
+  score += documentationBoost(chunk, queryTokens);
+  if (isTestPath(chunk.file_path) && !queryAsksForTests(queryTokens)) score *= 0.48;
+  if (!isTestPath(chunk.file_path) && queryAsksForTests(queryTokens)) score *= 0.88;
+  return score;
 }
 ```
 
-### 為何 RRF: 不需 normalize 異質分數、零參數 tune、robust default。
+Ranking diagnostics are returned with each search result so score behavior can be inspected without guessing.
+
+### Confidence gate
+
+Hybrid/adaptive search must not always return something. Candidates must pass a minimum adjusted score and enough lexical evidence, except when the query strongly names a source module path. This prevents garbage queries or one accidental token match from returning unrelated code.
 
 ---
 
-## 5. Cross-Encoder Reranking (Phase 3)
+## 5. Cross-Encoder Reranking
 
-只在 `mode: "deep"` 觸發。對 RRF top-20 做 pair-wise scoring:
+只在 `mode: "deep"` 觸發。對 hybrid top candidates 做 pair-wise scoring:
 
 ```typescript
 async function rerank(query: string, candidates: Chunk[], topK: number, pipeline: Pipeline) {
@@ -124,9 +137,22 @@ async function rerank(query: string, candidates: Chunk[], topK: number, pipeline
 
 ---
 
-## 6. Metadata Filtering (Post-retrieval)
+## 6. Adaptive Contextual Retrieval
 
-Filtering 在 retrieval 之後（不影響 RRF rank）:
+Adaptive mode starts from hybrid seed chunks and expands context at query time. It does not blindly return every neighboring chunk:
+
+- Keep the matched seed chunk.
+- Prefer nearby chunks with stronger query coverage.
+- Collapse overlapping context windows from the same file.
+- Use lexical, line-proximity, vector-redundancy, and file-level diversity so repeated README or overview chunks do not dominate top results.
+
+Index-time contextual retrieval is also used for embeddings and FTS: file path, file type, Markdown heading breadcrumbs, and code symbols are included in the searchable representation, while returned content stays as the original chunk text.
+
+Existing KBs should be rebuilt or updated after search-quality changes that affect indexing text. Query-time ranking changes apply immediately to existing KBs.
+
+## 7. Metadata Filtering (Post-retrieval)
+
+Filtering 在 retrieval 之後:
 
 ```typescript
 function applyFilters(results: SearchResult[], filters: SearchFilters): SearchResult[] {
@@ -141,14 +167,15 @@ function applyFilters(results: SearchResult[], filters: SearchFilters): SearchRe
 
 ---
 
-## 7. 完整流程
+## 8. 完整流程
 
 ```
 query → mode dispatch:
   fast:     BM25(top-50) → filter → paginate
   semantic: embed → vectorSearch(top-50) → filter → paginate
-  hybrid:   BM25(top-50) + vectorSearch(top-50) → RRF → filter → paginate
-  deep:     hybrid → top-20 → crossEncoderRerank → filter → return
+  hybrid:   BM25(top-N) + vectorSearch(top-N) → weighted fusion → query-aware ranking → confidence gate → filter → diversify → paginate
+  deep:     hybrid candidates → crossEncoderRerank → diversify → return
+  adaptive: hybrid seeds → contextual window expansion → diversify → paginate
 ```
 
 

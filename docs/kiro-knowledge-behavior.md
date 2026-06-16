@@ -162,7 +162,7 @@ knowledge cancel {
 | kiro 行為 | pi-knowledge 改進 |
 |-----------|------------------|
 | 全量 re-index | Content-addressed incremental（SHA-256 diff，只 re-embed 變更） |
-| Semantic OR keyword | Hybrid 預設（BM25 + vector + RRF fusion） |
+| Semantic OR keyword | Hybrid 預設（BM25 + vector + weighted score fusion） |
 | 無 reranking | Optional cross-encoder rerank (mode: "deep") |
 | 無 file watching | Optional fs.watch + debounce |
 | Server-side embedding | Local ONNX（multilingual-e5-small，零 API key） |

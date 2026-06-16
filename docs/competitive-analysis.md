@@ -117,7 +117,7 @@ pi-knowledge 的 unique value proposition:
 
 1. **不是 memory** — 索引使用者的既有文件，不是 agent 自己的筆記
 2. **不是 MCP server** — 深度整合 Pi lifecycle、TUI、RPC，而非外掛協議
-3. **Hybrid search 是預設** — BM25 + vector + RRF，不需要使用者選模式
+3. **Hybrid search 是預設** — BM25 + vector + weighted score fusion，不需要使用者選模式
 4. **Incremental** — content-addressed，只 re-embed 變更的 chunk
 5. **本地 + 多語言** — multilingual-e5-small，支持 zh-TW，零 API key
 6. **Code-aware** — AST chunking 保留函數/class 邊界（Phase 3）

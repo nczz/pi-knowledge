@@ -18,7 +18,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | Multiple named knowledge bases | ✅ | ✅ | ❌ |
 | Semantic (vector) search | ✅ | ✅ | ✅ (via qmd) |
 | BM25 keyword search | ✅ | ✅ | ✅ (via qmd) |
-| **Hybrid search + RRF fusion** | ✅ | ❌ | partial |
+| **Hybrid search + weighted score fusion** | ✅ | ❌ | partial |
 | **Cross-encoder reranking** | ✅ | ❌ | ❌ |
 | **Adaptive contextual search** | ✅ | ❌ | ❌ |
 | **Diversity reranking** | ✅ | ❌ | ❌ |

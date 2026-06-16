@@ -299,12 +299,58 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("keeps broad recall for filtered source file searches", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-go-filter-recall-"));
+			try {
+				mkdirSync(join(projectDir, "bot"), { recursive: true });
+				for (let i = 0; i < 45; i++) {
+					writeFileSync(
+						join(projectDir, "bot", `handler_${i}.go`),
+						[
+							"package bot",
+							`func DiscordBotHandler${i}() string {`,
+							'  return "GoFilterRecallToken discord bot command handler manager workflow"',
+							"}",
+						].join("\n"),
+					);
+				}
+
+				await engine.add(projectDir, "Go Filter Recall");
+				const result = await engine.search("discord bot", {
+					mode: "hybrid",
+					limit: 50,
+					filters: { file_type: "go" },
+					diversity: "strong",
+				});
+
+				expect(result.total_count).toBeGreaterThanOrEqual(40);
+				expect(result.results.every((r) => r.file_type === "go")).toBe(true);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("hybrid mode returns no results when there is no lexical anchor", async () => {
 			await engine.add("Relevant content about authentication tokens and command permissions.", "No Garbage");
 
 			const result = await engine.search("zzzxqv blorfwump qqqqnonexistent", {
 				mode: "hybrid",
 				limit: 5,
+			});
+
+			expect(result.total_count).toBe(0);
+			expect(result.results).toEqual([]);
+		});
+
+		it("hybrid mode suppresses low-confidence garbage queries with one accidental token match", async () => {
+			await engine.add(
+				"Review examples mention unknown edge cases, reproducible failures, and unrelated diagnostics.",
+				"Accidental Match",
+			);
+
+			const result = await engine.search("blablabla xyz unknown nonsense", {
+				mode: "hybrid",
+				limit: 3,
 			});
 
 			expect(result.total_count).toBe(0);
@@ -331,6 +377,41 @@ describe("KnowledgeEngine", () => {
 
 				await engine.add(projectDir, "Small Module");
 				const result = await engine.search("stt speech transcription command", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+
+				expect(result.results[0].file_path).toBe("stt/stt.go");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("ranks a named small source module above overview documentation", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-stt-module-"));
+			try {
+				mkdirSync(join(projectDir, "stt"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "stt", "stt.go"),
+					[
+						"package stt",
+						"type Provider interface {",
+						"  SpeechToTextProvider() string",
+						"}",
+						"func NewProvider() Provider {",
+						'  _ = "STT speech to text provider"',
+						"  return nil",
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "README.md"),
+					"## STT Providers\n\nSTT speech to text provider setup table and feature overview.",
+				);
+
+				await engine.add(projectDir, "STT Module");
+				const result = await engine.search("STT speech to text provider", {
 					mode: "hybrid",
 					limit: 2,
 					diversity: "strong",
@@ -379,6 +460,53 @@ describe("KnowledgeEngine", () => {
 					diversity: "strong",
 				});
 				expect(tests.results[0].file_path).toBe("error_test.go");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("keeps a core errors implementation ahead of broad error-heavy files", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-error-core-"));
+			try {
+				mkdirSync(join(projectDir, "bot"), { recursive: true });
+				mkdirSync(join(projectDir, "acp"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "bot", "errors.go"),
+					[
+						"package bot",
+						"func FormatError() string {",
+						'  return "error handling logging commandError user-facing error formatting"',
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "bot", "errors_test.go"),
+					[
+						"package bot",
+						"func TestFormatError() {",
+						'  _ = "error handling logging commandError errors.New expected output"',
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "acp", "agent.go"),
+					[
+						"package acp",
+						"func wrapHandshakeError() string {",
+						'  return "handshake error wrapping error handling logging transport error"',
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "Error Core");
+				const result = await engine.search("error handling logging", {
+					mode: "hybrid",
+					limit: 3,
+					diversity: "strong",
+				});
+
+				expect(result.results[0].file_path).toBe("bot/errors.go");
+				expect(result.results.findIndex((r) => r.file_path === "bot/errors_test.go")).toBeGreaterThan(0);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}

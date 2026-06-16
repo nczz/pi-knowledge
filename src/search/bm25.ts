@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { preTokenizeForFTS } from "../indexer/chunker.ts";
+import { normalizedQueryText } from "./query.ts";
 
 export interface BM25Result {
 	chunkId: string;
@@ -7,9 +7,9 @@ export interface BM25Result {
 }
 
 function prepareFtsTerms(query: string): string[] {
-	let q = preTokenizeForFTS(query);
-	q = q.replace(/[*"(){}[\]^~:+.#@!\\/<>|&$%?]/g, " ");
-	return q.split(/\s+/).filter((t) => t.length > 0);
+	return normalizedQueryText(query)
+		.split(/\s+/)
+		.filter((t) => t.length > 0);
 }
 
 function runSearch(db: Database.Database, ftsQuery: string, limit: number, kbId?: string): BM25Result[] {

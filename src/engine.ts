@@ -12,6 +12,15 @@ import { loadVectors, saveVectors } from "./embedding/vectors.ts";
 import { buildChunkEmbeddingText, chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
+import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
+import {
+	hasEnoughLexicalEvidence,
+	MIN_HYBRID_SCORE,
+	normalizeFileTypeFilter,
+	queryCoverage,
+	type RankingDiagnostics,
+	scoreChunkForQuery,
+} from "./search/ranking.ts";
 import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
 import { searchVector } from "./search/vector.ts";
 import {
@@ -53,6 +62,7 @@ export interface SearchResult {
 	snippet: string;
 	start_line: number;
 	end_line: number;
+	ranking?: RankingDiagnostics;
 }
 
 export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
@@ -78,6 +88,7 @@ interface ImportedChunk {
 interface RankedChunk {
 	chunk: Chunk;
 	kbName: string;
+	ranking?: RankingDiagnostics;
 	score: number;
 	content: string;
 	snippet: string;
@@ -90,17 +101,6 @@ const ADAPTIVE_CONTEXT_LINES = 80;
 const ADAPTIVE_MAX_CONTEXT_CHARS = 6_000;
 const ADAPTIVE_NEIGHBOR_TARGET = 5;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
-const FILE_TYPE_ALIASES: Record<string, string> = {
-	md: "markdown",
-	mdx: "markdown",
-	ts: "typescript",
-	tsx: "typescript",
-	js: "javascript",
-	jsx: "javascript",
-	py: "python",
-	sh: "shell",
-	yml: "yaml",
-};
 
 function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefined): number {
 	if (!a || !b || a.length !== b.length) return 0;
@@ -110,10 +110,7 @@ function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefin
 }
 
 function tokenizeForSimilarity(text: string): Set<string> {
-	const tokens = preTokenizeForFTS(text.toLowerCase())
-		.split(/\s+/)
-		.filter((token) => token.length > 1);
-	return new Set(tokens);
+	return tokenizeForSearch(text);
 }
 
 function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
@@ -123,55 +120,6 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 		if (b.has(token)) intersection++;
 	}
 	return intersection / (a.size + b.size - intersection);
-}
-
-function queryCoverage(text: string, queryTokens: Set<string>): number {
-	if (queryTokens.size === 0) return 0;
-	const textTokens = tokenizeForSimilarity(text);
-	let matched = 0;
-	for (const token of queryTokens) {
-		if (textTokens.has(token)) matched++;
-	}
-	return matched / queryTokens.size;
-}
-
-function normalizeFileTypeFilter(fileType: string | undefined): string | undefined {
-	if (!fileType) return undefined;
-	const normalized = fileType.trim().toLowerCase();
-	return FILE_TYPE_ALIASES[normalized] ?? normalized;
-}
-
-function isTestPath(filePath: string): boolean {
-	const lower = filePath.toLowerCase();
-	return (
-		lower.includes("_test.") ||
-		lower.includes(".test.") ||
-		lower.includes(".spec.") ||
-		lower.includes("/test/") ||
-		lower.includes("/tests/")
-	);
-}
-
-function queryAsksForTests(queryTokens: Set<string>): boolean {
-	return ["test", "tests", "testing", "spec", "fixture", "assert"].some((token) => queryTokens.has(token));
-}
-
-function pathTokenBoost(filePath: string, queryTokens: Set<string>): number {
-	const pathTokens = tokenizeForSimilarity(filePath.replace(/[./_-]/g, " "));
-	let matched = 0;
-	for (const token of queryTokens) {
-		if (pathTokens.has(token)) matched++;
-	}
-	if (matched === 0) return 0;
-	return Math.min(0.35, 0.12 * matched);
-}
-
-function adjustedRetrievalScore(score: number, chunk: Chunk, queryTokens: Set<string>): number {
-	let adjusted = score + pathTokenBoost(chunk.file_path, queryTokens);
-	const asksForTests = queryAsksForTests(queryTokens);
-	if (isTestPath(chunk.file_path) && !asksForTests) adjusted *= 0.72;
-	if (!isTestPath(chunk.file_path) && asksForTests) adjusted *= 0.88;
-	return adjusted;
 }
 
 function lineProximity(a: RankedChunk, b: RankedChunk): number {
@@ -587,6 +535,7 @@ export class KnowledgeEngine {
 		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters, diversity = "balanced" } = options;
 		const retrievalMode = mode === "adaptive" ? "hybrid" : mode;
 		const candidateLimit = Math.max(50, offset + limit * 12);
+		const normalizedQuery = normalizedQueryText(query);
 		const queryTokens = tokenizeForSimilarity(query);
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
 
@@ -611,7 +560,7 @@ export class KnowledgeEngine {
 			}
 
 			if (retrievalMode === "fast") {
-				allResults.push(...searchBM25(db, query, candidateLimit, kb.id));
+				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id));
 			} else if (retrievalMode === "semantic") {
 				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
 				if (vectors.length > 0) {
@@ -619,8 +568,8 @@ export class KnowledgeEngine {
 					allResults.push(...searchVector(queryVec, vectors, chunkIds, candidateLimit));
 				}
 			} else {
-				// hybrid: BM25 + vector + RRF (both scoped to this KB)
-				const bm25Results = searchBM25(db, query, candidateLimit, kb.id);
+				// hybrid: BM25 + vector weighted fusion (both scoped to this KB)
+				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
 
 				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
 				let vecResults: { chunkId: string; score: number }[] = [];
@@ -641,16 +590,29 @@ export class KnowledgeEngine {
 			seen.add(r.chunkId);
 			return true;
 		});
+		const rankingByChunkId = new Map<string, RankingDiagnostics>();
 		for (const result of unique) {
 			const chunk = getChunkById(db, result.chunkId);
-			if (chunk) result.score = adjustedRetrievalScore(result.score, chunk, queryTokens);
+			if (chunk) {
+				const ranking = scoreChunkForQuery(result.score, chunk, queryTokens);
+				rankingByChunkId.set(result.chunkId, ranking);
+				result.score = ranking.adjusted_score;
+			}
 		}
-		unique.sort((a, b) => b.score - a.score);
+		let scored = unique;
+		if (retrievalMode !== "fast" && retrievalMode !== "semantic") {
+			scored = unique.filter((result) => {
+				const chunk = getChunkById(db, result.chunkId);
+				if (!chunk) return false;
+				return result.score >= MIN_HYBRID_SCORE && hasEnoughLexicalEvidence(chunk, queryTokens);
+			});
+		}
+		scored.sort((a, b) => b.score - a.score);
 
 		// Apply metadata filters post-retrieval
-		let filtered = unique;
+		let filtered = scored;
 		if (normalizedFileType || filters?.path_pattern) {
-			filtered = unique.filter((r) => {
+			filtered = scored.filter((r) => {
 				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) return false;
 				if (normalizedFileType && chunk.file_type !== normalizedFileType) return false;
@@ -676,6 +638,7 @@ export class KnowledgeEngine {
 				ranked.push({
 					chunk,
 					kbName: kbObj?.name ?? "unknown",
+					ranking: scoreChunkForQuery(r.score, chunk, queryTokens),
 					score: r.score,
 					content: chunk.content,
 					snippet: buildQuerySnippet(chunk.content, query),
@@ -692,6 +655,7 @@ export class KnowledgeEngine {
 				file_type: r.chunk.file_type,
 				kb_name: r.kbName,
 				score: r.score,
+				ranking: r.ranking,
 				snippet: r.snippet,
 				start_line: r.startLine,
 				end_line: r.endLine,
@@ -722,6 +686,7 @@ export class KnowledgeEngine {
 				pushAdaptiveCandidate(ranked, {
 					chunk,
 					kbName: kb?.name ?? "unknown",
+					ranking: rankingByChunkId.get(r.chunkId),
 					score: r.score,
 					content: context.content,
 					snippet: buildQuerySnippet(context.content, query),
@@ -733,6 +698,7 @@ export class KnowledgeEngine {
 				ranked.push({
 					chunk,
 					kbName: kb?.name ?? "unknown",
+					ranking: rankingByChunkId.get(r.chunkId),
 					score: r.score,
 					content: chunk.content,
 					snippet: buildQuerySnippet(chunk.content, query),
@@ -752,6 +718,7 @@ export class KnowledgeEngine {
 			file_type: r.chunk.file_type,
 			kb_name: r.kbName,
 			score: r.score,
+			ranking: r.ranking,
 			snippet: r.snippet,
 			start_line: r.startLine,
 			end_line: r.endLine,

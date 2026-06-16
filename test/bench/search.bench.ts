@@ -20,7 +20,7 @@ describe("pi-knowledge benchmarks", async () => {
 		await engine.search("authentication OAuth", { mode: "semantic", limit: 5 });
 	});
 
-	bench("search: mode=hybrid (BM25 + vector + RRF)", async () => {
+	bench("search: mode=hybrid (BM25 + vector + weighted fusion)", async () => {
 		await engine.search("authentication OAuth", { mode: "hybrid", limit: 5 });
 	});
 
