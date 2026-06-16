@@ -1,16 +1,33 @@
 # pi-knowledge
 
-**Vector knowledge base extension for Pi** — index any file, directory, or text into persistent, searchable knowledge bases with hybrid semantic + keyword search.
+Local-first RAG knowledge base for Pi agents.
 
-Built as a native [Pi extension](https://pi.dev/docs/latest/extensions), deeply integrated with the agent lifecycle. Designed to match and exceed what kiro-cli's built-in knowledge tool offers, while being 100% local and provider-agnostic.
+Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
 
-## Why
+Built as a native [Pi extension](https://pi.dev/docs/latest/extensions), deeply integrated with the agent lifecycle. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
 
-Coding agents forget everything outside their context window. `pi-knowledge` gives Pi persistent, searchable long-term memory over your documentation, codebases, specs, and notes — across sessions, across projects.
+## Why It Matters
+
+Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi durable, searchable project memory:
+
+- Search code and documentation by meaning, exact symbols, or both.
+- Keep private source data local by default.
+- Re-index changed files incrementally.
+- Diagnose stale, stuck, or low-quality indexes.
+- Handle large repositories with persisted progress instead of silent hangs.
 
 Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes **your existing files** and makes them semantically searchable by the agent.
 
-## Features
+## Highlights
+
+- **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
+- **Hybrid retrieval**: semantic vectors + BM25 keyword search + normalized weighted score fusion.
+- **Code-aware indexing**: AST-aware chunking for TypeScript/JavaScript, Python, Go, Rust, and Java.
+- **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
+- **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
+- **Private by default**: local embeddings run without an API key.
+
+## Feature Comparison
 
 | Feature | pi-knowledge | kiro-cli knowledge | pi-memory |
 |---------|:---:|:---:|:---:|

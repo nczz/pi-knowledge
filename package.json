@@ -1,7 +1,7 @@
 {
 	"name": "pi-knowledge",
 	"version": "0.4.1",
-	"description": "Vector knowledge base extension for Pi — index files, hybrid search, local embeddings",
+	"description": "Local-first RAG knowledge base for Pi agents with hybrid code/doc search, reranking, diagnostics, and large-project indexing",
 	"type": "module",
 	"main": "index.ts",
 	"pi": {
@@ -20,9 +20,17 @@
 	"keywords": [
 		"pi",
 		"pi-extension",
+		"ai-agent",
+		"coding-agent",
 		"knowledge-base",
+		"local-first",
+		"retrieval-augmented-generation",
+		"hybrid-search",
+		"bm25",
 		"vector-search",
 		"semantic-search",
+		"code-search",
+		"developer-tools",
 		"rag",
 		"embeddings"
 	],
