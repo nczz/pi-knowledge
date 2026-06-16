@@ -143,6 +143,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - progress 必須包含目前 phase、已處理量、elapsed，能估 ETA 時要回報 ETA。
 - `knowledge_status` 必須標示超過 stale threshold 的 `indexing` KB，並提示先確認沒有 active Pi process，再 remove/rebuild。
 - `knowledge_search` 必須跳過 `indexing` 和 `error` KB，避免中斷後的半成品被 agent 當成可靠檢索結果。
+- query-time semantic/hybrid search 不應把整個 KB vector file 載入長駐 cache。大型 KB 搜尋要用 streaming/ranged read 掃描 top-K，只保留候選向量給 MMR/diversity。
 
 
 ## onnxruntime exit crash (macOS arm64)

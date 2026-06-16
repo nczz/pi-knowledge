@@ -78,6 +78,7 @@
 - All tools must use `onUpdate` for progress reporting during long operations
 - Source types are a behavior contract: directories/files/text/URLs must remain updateable or intentionally documented as one-shot. If adding a source type, cover add + update + status/diagnostics.
 - Long-running indexing paths (`knowledge_add`, `knowledge_update`, `knowledge_import`) must prefer bounded embedding batches, incremental DB writes, streamed vector writes, cancellation checks before and after model calls, and useful progress updates over one-shot memory-heavy work.
+- Query-time vector search must not load an entire KB vector file into a long-lived cache. Prefer streaming/ranged vector reads and keep only top candidate vectors needed by ranking/diversity.
 - Directory indexing must remain guarded against generated/vendor/runtime artifacts. Playwright caches, `.app` bundles, build outputs, and package/vendor directories are safety exclusions, not just ranking preferences. Do not globally exclude browser-domain source names such as `chromium`, `chrome`, `firefox`, `webkit`, or `browsers`.
 - Agent guidance for `knowledge_add` must tell agents to index project source/docs/config at a directory level and avoid per-file indexing loops or generated browser/runtime artifacts.
 - Import/export must remain portable across machines. Do not export local absolute source paths as active update sources.

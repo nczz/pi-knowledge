@@ -96,7 +96,7 @@ For best search quality, rebuild or update existing knowledge bases after upgrad
 
 Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, elapsed time, and ETA where available. This keeps long-running project indexing observable and avoids one huge all-at-once embedding or vector-write step.
 
-`knowledge_status` reports stale files, orphaned chunks, coverage, and indexing jobs that appear stuck after an interrupted or crashed Pi process. KBs still marked `indexing` or `error` are visible in status but skipped by search until rebuilt. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
+Search also avoids loading a full KB vector file into memory. Semantic and hybrid modes scan vectors from disk and retain only the top candidate vectors needed for ranking/diversity. `knowledge_status` reports stale files, orphaned chunks, coverage, and indexing jobs that appear stuck after an interrupted or crashed Pi process. KBs still marked `indexing` or `error` are visible in status but skipped by search until rebuilt. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
 
 ## Architecture
 

@@ -1,8 +1,16 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
 export interface VectorWriter {
 	append(vectors: Float32Array[]): void;
+	close(): void;
+}
+
+export interface VectorReader {
+	count: number;
+	dim: number;
+	read(index: number): Float32Array | undefined;
+	readInto(index: number, target: Float32Array): boolean;
 	close(): void;
 }
 
@@ -40,6 +48,43 @@ export function openVectorWriter(path: string): VectorWriter {
 		close(): void {
 			if (closed) return;
 			writeHeader();
+			closeSync(fd);
+			closed = true;
+		},
+	};
+}
+
+export function openVectorReader(path: string): VectorReader | undefined {
+	if (!existsSync(path)) return undefined;
+	const fd = openSync(path, "r");
+	let closed = false;
+	const header = Buffer.alloc(8);
+	const headerBytes = readSync(fd, header, 0, header.length, 0);
+	if (headerBytes < header.length) {
+		closeSync(fd);
+		return undefined;
+	}
+	const count = header.readUInt32LE(0);
+	const dim = header.readUInt32LE(4);
+	const vectorBytes = dim * 4;
+	const readBuffer = Buffer.alloc(vectorBytes);
+
+	return {
+		count,
+		dim,
+		read(index: number): Float32Array | undefined {
+			const vector = new Float32Array(dim);
+			return this.readInto(index, vector) ? vector : undefined;
+		},
+		readInto(index: number, target: Float32Array): boolean {
+			if (closed || index < 0 || index >= count || dim === 0 || target.length !== dim) return false;
+			const bytesRead = readSync(fd, readBuffer, 0, vectorBytes, 8 + index * vectorBytes);
+			if (bytesRead < vectorBytes) return false;
+			for (let i = 0; i < dim; i++) target[i] = readBuffer.readFloatLE(i * 4);
+			return true;
+		},
+		close(): void {
+			if (closed) return;
 			closeSync(fd);
 			closed = true;
 		},

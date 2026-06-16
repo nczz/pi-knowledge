@@ -22,13 +22,12 @@ describe("KnowledgeEngine", () => {
 		rmSync(TEST_DIR, { recursive: true, force: true });
 	});
 
-	describe("vector cache", () => {
-		it("search uses cached vectors (no repeated disk reads)", async () => {
+	describe("vector storage", () => {
+		it("search reads persisted vectors consistently", async () => {
 			// Add inline text KB
 			await engine.add("This is a test document about authentication and OAuth tokens for testing.", "CacheTest");
-			// First search loads from disk into cache
+			// Repeated searches should read persisted vectors consistently.
 			const r1 = await engine.search("test", { mode: "fast" });
-			// Second search should use cache (same result, no error)
 			const r2 = await engine.search("test", { mode: "fast" });
 			expect(r1.total_count).toBe(r2.total_count);
 		});

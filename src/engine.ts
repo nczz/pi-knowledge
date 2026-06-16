@@ -8,7 +8,7 @@ import {
 	embedQuery,
 	prepareForShutdown as prepareEmbeddingForShutdown,
 } from "./embedding/provider.ts";
-import { loadVectors, openVectorWriter } from "./embedding/vectors.ts";
+import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import { buildChunkEmbeddingText, chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
@@ -22,7 +22,7 @@ import {
 	scoreChunkForQuery,
 } from "./search/ranking.ts";
 import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
-import { searchVector } from "./search/vector.ts";
+import { searchVectorFile } from "./search/vector.ts";
 import {
 	type Chunk,
 	createKB,
@@ -341,34 +341,10 @@ function normalizeExtractedText(text: string | string[]): string {
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
-	private vectorCache: Map<string, Float32Array[]> = new Map();
 
 	async initialize(knowledgeDir: string): Promise<void> {
 		this.knowledgeDir = knowledgeDir;
 		this.db = openDatabase(knowledgeDir);
-		this.vectorCache.clear();
-	}
-
-	private getVectors(kbId: string): Float32Array[] {
-		const cached = this.vectorCache.get(kbId);
-		if (cached) return cached;
-		const vectorPath = join(this.knowledgeDir, "vectors", `${kbId}.bin`);
-		const vectors = loadVectors(vectorPath);
-		this.vectorCache.set(kbId, vectors);
-		return vectors;
-	}
-
-	private invalidateVectorCache(kbId: string): void {
-		this.vectorCache.delete(kbId);
-	}
-
-	private getVectorsByChunkId(kbId: string, chunkIds: string[]): Map<string, Float32Array> {
-		const vectors = this.getVectors(kbId);
-		const mapped = new Map<string, Float32Array>();
-		for (let i = 0; i < chunkIds.length; i++) {
-			if (vectors[i]) mapped.set(chunkIds[i], vectors[i]);
-		}
-		return mapped;
 	}
 
 	async add(
@@ -496,7 +472,6 @@ export class KnowledgeEngine {
 			vectorWriter = undefined;
 			renameSync(tempVectorFile, vectorPath);
 			tempVectorFile = undefined;
-			this.invalidateVectorCache(kb.id);
 
 			const savedFileCount = isDir ? getFileCount(this.db, kb.id) : fileCount;
 			updateKBCounts(this.db, kb.id, chunkCount, savedFileCount);
@@ -550,13 +525,14 @@ export class KnowledgeEngine {
 			// 2. Load existing state: chunks (hash→id) + vectors (ordered)
 			const existingHashes = getChunkHashesByKB(this.db, kb.id);
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-			const existingVectors = loadVectors(vectorPath);
 
-			// Build hash→vector cache from existing data
-			const vectorCache = new Map<string, Float32Array>();
+			// Build hash→old vector index cache from existing DB order.
 			const existingChunks = getChunksByKB(this.db, kb.id);
+			const oldVectorIndexByHash = new Map<string, number>();
 			for (let i = 0; i < existingChunks.length; i++) {
-				if (existingVectors[i]) vectorCache.set(existingChunks[i].content_hash, existingVectors[i]);
+				if (!oldVectorIndexByHash.has(existingChunks[i].content_hash)) {
+					oldVectorIndexByHash.set(existingChunks[i].content_hash, i);
+				}
 			}
 
 			// 3. Identify changes
@@ -572,6 +548,7 @@ export class KnowledgeEngine {
 
 			// 5. Embed ONLY new chunks
 			let addedCount = 0;
+			const newVectorsByHash = new Map<string, Float32Array>();
 			if (chunksToAdd.length > 0) {
 				const startedAt = Date.now();
 				for (let offset = 0; offset < chunksToAdd.length; offset += INDEX_EMBED_BATCH_SIZE) {
@@ -596,7 +573,7 @@ export class KnowledgeEngine {
 					if (signal?.aborted) throw new Error("Cancelled");
 					insertChunks(this.db, kb.id, batch);
 					for (let i = 0; i < batch.length; i++) {
-						vectorCache.set(batch[i].content_hash, newVectors[i]);
+						newVectorsByHash.set(batch[i].content_hash, newVectors[i]);
 					}
 					addedCount += batch.length;
 					updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
@@ -608,17 +585,23 @@ export class KnowledgeEngine {
 			const finalChunks = getChunksByKB(this.db, kb.id);
 			replacementVectorPath = tempVectorPath(vectorPath);
 			const vectorWriter = openVectorWriter(replacementVectorPath);
+			const oldVectorReader = openVectorReader(vectorPath);
 			try {
 				for (const chunk of finalChunks) {
-					const vector = vectorCache.get(chunk.content_hash);
-					if (vector) vectorWriter.append([vector]);
+					const vector =
+						newVectorsByHash.get(chunk.content_hash) ??
+						(oldVectorReader && oldVectorIndexByHash.has(chunk.content_hash)
+							? oldVectorReader.read(oldVectorIndexByHash.get(chunk.content_hash) ?? -1)
+							: undefined);
+					if (!vector) throw new Error(`Missing vector while rebuilding knowledge base: ${chunk.id}`);
+					vectorWriter.append([vector]);
 				}
 			} finally {
+				oldVectorReader?.close();
 				vectorWriter.close();
 			}
 			renameSync(replacementVectorPath, vectorPath);
 			replacementVectorPath = undefined;
-			this.invalidateVectorCache(kb.id);
 
 			// 7. Update counts
 			updateKBCounts(this.db, kb.id, finalChunks.length, getFileCount(this.db, kb.id));
@@ -667,29 +650,25 @@ export class KnowledgeEngine {
 			}
 			const chunkIds = getChunkIdsByKB(db, kb.id);
 			if (chunkIds.length === 0) continue;
-			for (const [chunkId, vector] of this.getVectorsByChunkId(kb.id, chunkIds)) {
-				vectorsByChunkId.set(chunkId, vector);
-			}
+			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 
 			if (retrievalMode === "fast") {
 				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id));
 			} else if (retrievalMode === "semantic") {
-				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
-				if (vectors.length > 0) {
-					const queryVec = await embedQuery(query);
-					allResults.push(...searchVector(queryVec, vectors, chunkIds, candidateLimit));
-				}
+				const queryVec = await embedQuery(query);
+				const vectorResults = searchVectorFile(queryVec, vectorPath, chunkIds, candidateLimit);
+				allResults.push(...vectorResults.results);
+				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
 				// hybrid: BM25 + vector weighted fusion (both scoped to this KB)
 				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
-
-				const vectors = [...this.getVectorsByChunkId(kb.id, chunkIds).values()];
-				let vecResults: { chunkId: string; score: number }[] = [];
-				if (vectors.length > 0) {
-					const queryVec = await embedQuery(query);
-					vecResults = searchVector(queryVec, vectors, chunkIds, candidateLimit);
-				}
 				if (bm25Results.length === 0) continue;
+
+				let vecResults: { chunkId: string; score: number }[] = [];
+				const queryVec = await embedQuery(query);
+				const vectorResults = searchVectorFile(queryVec, vectorPath, chunkIds, candidateLimit);
+				vecResults = vectorResults.results;
+				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 				const fused = weightedScoreFusion(bm25Results, vecResults);
 				allResults.push(...fused);
 			}
@@ -848,7 +827,6 @@ export class KnowledgeEngine {
 		if (!this.db) return false;
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
-		this.invalidateVectorCache(kb.id);
 		deleteKB(this.db, kb.id);
 		return true;
 	}
@@ -861,7 +839,6 @@ export class KnowledgeEngine {
 	clear(): void {
 		if (!this.db) return;
 		for (const kb of listKBs(this.db)) deleteKB(this.db, kb.id);
-		this.vectorCache.clear();
 	}
 
 	diagnose(): DiagnosticResult[] {
@@ -961,7 +938,6 @@ export class KnowledgeEngine {
 			vectorWriter = undefined;
 			renameSync(tempVectorFile, vectorPath);
 			tempVectorFile = undefined;
-			this.invalidateVectorCache(kb.id);
 			updateKBCounts(this.db, kb.id, indexedChunks.length, new Set(indexedChunks.map((c) => c.file_path)).size);
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);

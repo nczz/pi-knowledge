@@ -216,11 +216,13 @@
 - add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。
 - `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
 - `knowledge_search` 跳過 `indexing` 和 `error` KB，只搜尋 `ready` 或 `stale` KB。
+- semantic/hybrid search 以 vector file ranged reads 掃描 top-K，不把整個 KB 的 Float32 vectors 放進長駐 cache。
 
 **理由**:
 - 商用品質的索引行為應先求穩定完成，再求速度。
 - 批次寫入讓大型專案在模型推論、SQLite 寫入、向量檔輸出三個階段都有可觀測進度。
 - 串流向量檔避免最後一次把所有向量複製到同一個巨大 buffer。
+- query-time streaming scan 的時間複雜度仍是 O(N)，但記憶體用量由 O(N vectors) 降到 O(topK vectors)，更符合本階段「再大的 codebase 先穩定可跑」的目標。
 
 **限制**:
-- 搜尋仍會載入目標 KB 的向量到記憶體，這是 query-time recall 設計的現有限制。若未來支援超大型 KB，需改成 mmap/分片向量索引或外部 ANN index。
+- 搜尋仍是 exact scan，不是 ANN。若未來需要百萬級 chunk 的低延遲搜尋，需改成 mmap/分片向量索引或外部 ANN index。

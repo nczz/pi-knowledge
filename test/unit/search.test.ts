@@ -1,10 +1,11 @@
 import { rmSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { saveVectors } from "../../src/embedding/vectors.ts";
 import { contentHash, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { searchBM25 } from "../../src/search/bm25.ts";
 import { reciprocalRankFusion, weightedScoreFusion } from "../../src/search/fusion.ts";
-import { searchVector } from "../../src/search/vector.ts";
+import { searchVector, searchVectorFile } from "../../src/search/vector.ts";
 import { createKB, getChunkIdsByKB, insertChunks, openDatabase } from "../../src/storage/sqlite.ts";
 
 const TEST_DIR = "/tmp/pk-test-search";
@@ -70,6 +71,23 @@ describe("search pipeline", () => {
 			expect(r[0].score).toBeGreaterThan(r[1].score);
 		});
 		it("empty → empty", () => expect(searchVector(new Float32Array([1]), [], [], 10)).toEqual([]));
+		it("streams top-K from a vector file without loading every vector into the result map", () => {
+			const q = new Float32Array([1, 0, 0, 0]);
+			const vectorPath = `${TEST_DIR}/vectors.bin`;
+			saveVectors(vectorPath, [
+				new Float32Array([0.9, 0.1, 0, 0]),
+				new Float32Array([0, 1, 0, 0]),
+				new Float32Array([0.5, 0.5, 0, 0]),
+				new Float32Array([0.8, 0.2, 0, 0]),
+			]);
+
+			const r = searchVectorFile(q, vectorPath, chunkIds, 2);
+
+			expect(r.results).toHaveLength(2);
+			expect(r.results[0].score).toBeGreaterThan(r.results[1].score);
+			expect(r.vectorsByChunkId.size).toBe(2);
+			expect(r.vectorsByChunkId.has(r.results[0].chunkId)).toBe(true);
+		});
 	});
 
 	describe("RRF", () => {
