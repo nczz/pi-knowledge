@@ -82,6 +82,12 @@ describe("chunkText", () => {
 		expect(chunks[0].content).not.toContain("UniqueTextParagraph7");
 		expect(chunks[1].content).not.toContain("UniqueTextParagraph0");
 	});
+	it("splits oversized single paragraphs into bounded chunks", () => {
+		const chunks = chunkText(`LongLineToken ${"x".repeat(20_000)}`, "backup.jsonl");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+		expect(chunks[0].content).toContain("LongLineToken");
+	});
 	it("empty → no chunks", () => expect(chunkText("", "t.txt")).toEqual([]));
 });
 
@@ -92,17 +98,28 @@ describe("walkDir", () => {
 		mkdirSync(join(tmp, "src"), { recursive: true });
 		mkdirSync(join(tmp, "docs"), { recursive: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
+		mkdirSync(join(tmp, "packages", "playwright-core", "src", "server", "chromium"), { recursive: true });
+		mkdirSync(join(tmp, "browsers", "Chromium.app", "Contents", "Resources", "en.lproj"), { recursive: true });
 		writeFileSync(join(tmp, "src/a.ts"), "export const a = 1;");
+		writeFileSync(
+			join(tmp, "packages", "playwright-core", "src", "server", "chromium", "crBrowser.ts"),
+			"export class BrowserSource {}",
+		);
 		writeFileSync(join(tmp, "node_modules/x.js"), "no");
 		writeFileSync(join(tmp, "b.png"), Buffer.from([0x89, 0x50, 0x00]));
 		writeFileSync(join(tmp, "c.md"), "# C\n\nContent");
 		writeFileSync(join(tmp, "docs/knowledge-base-full-evaluation-report.md"), "# Generated evaluation");
+		writeFileSync(join(tmp, "knowledge-backup.jsonl"), JSON.stringify({ exported: true }));
+		writeFileSync(join(tmp, "browsers", "Chromium.app", "Contents", "Resources", "en.lproj", "locale.pak"), "no");
 		const paths = walkDir(tmp).map((f) => f.relPath);
 		expect(paths).toContain("src/a.ts");
 		expect(paths).toContain("c.md");
+		expect(paths).toContain("packages/playwright-core/src/server/chromium/crBrowser.ts");
 		expect(paths).not.toContain("node_modules/x.js");
 		expect(paths).not.toContain("b.png");
 		expect(paths).not.toContain("docs/knowledge-base-full-evaluation-report.md");
+		expect(paths).not.toContain("knowledge-backup.jsonl");
+		expect(paths).not.toContain("browsers/Chromium.app/Contents/Resources/en.lproj/locale.pak");
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });

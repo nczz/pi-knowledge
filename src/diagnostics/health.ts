@@ -7,6 +7,9 @@ import { getChunksByKB, type KnowledgeBase } from "../storage/sqlite.ts";
 export interface DiagnosticResult {
 	kb_id: string;
 	kb_name: string;
+	status: KnowledgeBase["status"];
+	status_age_ms: number;
+	stuck_indexing: boolean;
 	stale_files: string[]; // files modified after indexing
 	orphan_files: string[]; // chunks referencing deleted files
 	coverage_percent: number; // indexed files / total scannable files
@@ -14,10 +17,21 @@ export interface DiagnosticResult {
 	indexed_files: number;
 }
 
+const DEFAULT_STALE_INDEXING_MS = 10 * 60 * 1000;
+
+function staleIndexingMs(): number {
+	const configured = Number(process.env.PI_KNOWLEDGE_STALE_INDEXING_MS);
+	return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_INDEXING_MS;
+}
+
 export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): DiagnosticResult {
+	const statusAgeMs = Date.now() - kb.updated_at;
 	const result: DiagnosticResult = {
 		kb_id: kb.id,
 		kb_name: kb.name,
+		status: kb.status,
+		status_age_ms: statusAgeMs,
+		stuck_indexing: kb.status === "indexing" && statusAgeMs > staleIndexingMs(),
 		stale_files: [],
 		orphan_files: [],
 		coverage_percent: 100,

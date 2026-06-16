@@ -28,12 +28,24 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
 | **Index quality diagnostics** | ✅ | ❌ | ❌ |
 | **Metadata filters in search** | ✅ | ❌ | ❌ |
-| **Progress reporting** | ✅ | partial | ❌ |
+| **Progress reporting + stuck indexing diagnostics** | ✅ | partial | ❌ |
 | Cross-session persistence | ✅ | ✅ | ✅ |
 | Pi extension native | ✅ | N/A | ✅ |
 | Context injection per turn | ✅ | ❌ | ✅ |
 | TUI custom rendering | planned | N/A | ❌ |
 | RPC mode support | ✅ | N/A | N/A |
+
+## Research-Backed Retrieval
+
+`pi-knowledge` applies and dogfoods retrieval techniques from RAG and information retrieval research:
+
+- **Contextual Retrieval**: searchable embeddings and FTS text include deterministic local context such as file path, file type, Markdown heading breadcrumbs, and code symbols, following the core idea from Anthropic's Contextual Retrieval work without sending chunks to an LLM to generate context.
+- **Hybrid retrieval**: BM25 and dense embeddings are fused with normalized weighted scores, preserving useful score spread for diagnostics instead of hiding relevance differences behind compressed rank-only scores.
+- **Diversity reranking**: MMR-style reranking, file interleaving, vector redundancy checks, and adaptive-window overlap collapse reduce repeated README or same-file chunks in top results.
+- **Intent-aware ranking**: source, documentation/setup, test, and localization intent are handled differently so implementation queries return implementation files, setup queries return guides, test queries can surface tests, and translation catalogs do not dominate general code searches.
+- **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks.
+
+In project-level dogfood, these changes improved a real codebase evaluation from early 3.x/5 quality to above 4.5/5 after rebuilds, with fixes for score compression, README repetition, garbage-query false positives, small-module discoverability, and source-vs-test ranking. Existing KBs should be rebuilt or updated after upgrades that change indexing text.
 
 ## Quick Start
 
@@ -79,6 +91,12 @@ pi install ./pi-knowledge
 Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics.
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
+
+## Large Project Indexing
+
+Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, elapsed time, and ETA where available. This keeps long-running project indexing observable and avoids one huge all-at-once embedding or vector-write step.
+
+`knowledge_status` reports stale files, orphaned chunks, coverage, and indexing jobs that appear stuck after an interrupted or crashed Pi process. KBs still marked `indexing` or `error` are visible in status but skipped by search until rebuilt. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
 
 ## Architecture
 

@@ -197,6 +197,8 @@ export default function (pi: ExtensionAPI) {
 			"Prefer one knowledge_add call for the project root or relevant directory; do not call it once per file",
 			"If a knowledge base with the same name already exists, use knowledge_update or ask before replacing it",
 			"Do not index secrets or environment-specific config files unless the user explicitly asks for that exact file",
+			"Index source, documentation, and configuration rather than generated browser/runtime/build/vendor artifacts",
+			"Default directory indexing skips common generated and browser runtime artifacts, while preserving browser-domain source directories such as chromium/firefox/webkit",
 			"Provide a descriptive name for this single knowledge base",
 		],
 		parameters: Type.Object({
@@ -234,7 +236,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_search",
 		label: "Knowledge Search",
 		description: "Search indexed knowledge bases using hybrid semantic + keyword search",
-		promptSnippet: "Search knowledge bases (hybrid BM25 + semantic + RRF fusion)",
+		promptSnippet: "Search knowledge bases (hybrid BM25 + semantic + weighted score fusion)",
 		promptGuidelines: [
 			"Use knowledge_search to find relevant context before answering domain questions",
 			"Default mode 'hybrid' combines keyword and semantic search for best results",
@@ -340,13 +342,22 @@ export default function (pi: ExtensionAPI) {
 						lines.push(`    ⚠️ stale: ${diag.stale_files.length} files modified since last index`);
 					if (diag.orphan_files.length > 0)
 						lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
+					if (diag.stuck_indexing)
+						lines.push(
+							`    ⚠️ indexing appears stuck for ${Math.round(diag.status_age_ms / 60000)}m; remove and rebuild if no pi process is actively indexing it`,
+						);
 				}
 			}
 			const totalStale = diagnostics.reduce((n, d) => n + d.stale_files.length, 0);
 			const totalOrphans = diagnostics.reduce((n, d) => n + d.orphan_files.length, 0);
-			if (totalStale === 0 && totalOrphans === 0 && kbs.length > 0) lines.push("", "Health: ✓ all indexes up to date");
-			else if (totalStale > 0 || totalOrphans > 0)
-				lines.push("", `Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans — run knowledge_update`);
+			const totalStuck = diagnostics.filter((d) => d.stuck_indexing).length;
+			if (totalStale === 0 && totalOrphans === 0 && totalStuck === 0 && kbs.length > 0)
+				lines.push("", "Health: ✓ all indexes up to date");
+			else if (totalStale > 0 || totalOrphans > 0 || totalStuck > 0)
+				lines.push(
+					"",
+					`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing — run knowledge_update or rebuild affected KBs`,
+				);
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});

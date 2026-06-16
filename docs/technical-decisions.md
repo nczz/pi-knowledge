@@ -200,3 +200,27 @@
 - 保留 RRF 作為測試過的 fusion baseline，但預設改用 normalized weighted score fusion。原因是本產品需要可診斷的分數區間；RRF 在專案級 dogfood 中讓 hybrid score 過度壓縮。參考 Cormack et al. 2009, "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods".
 - 採用 MMR 類似的 diversity 思路降低同檔案、同 window、同語意 chunk 的重複佔位。參考 Goldstein and Carbonell 1998, "Using MMR for Diversity-Based Reranking".
 - 未採用 ColBERT late interaction 作為本 release 預設。ColBERT 對精細 token interaction 有價值，但需要更重的模型與索引設計；目前用 lightweight local embeddings、BM25、query-aware ranking、diversity 和 optional cross-encoder reranking 先取得較低成本的商用品質。參考 Khattab and Zaharia 2020, "ColBERT".
+
+---
+
+## ADR-015: 大型索引採用 bounded batches + streamed vectors
+
+**狀態**: 已決定
+
+**背景**: 真實專案可能包含數百到數十萬個可索引 chunk。若 `knowledge_add`、`knowledge_update` 或 `knowledge_import` 一次持有全部 embedding input、全部 Float32 vectors，再用單一 `Buffer.alloc` 寫 vector file，會讓大型 codebase 建 KB 時不穩定，也讓使用者無法判斷還要等多久。
+
+**決策**:
+- embedding batch 固定上限，目前為 64 chunks。
+- 每個 batch 成功後立即寫入 SQLite 並更新 KB counts，讓 `updated_at` 代表索引仍有進展。
+- vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
+- add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。
+- `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
+- `knowledge_search` 跳過 `indexing` 和 `error` KB，只搜尋 `ready` 或 `stale` KB。
+
+**理由**:
+- 商用品質的索引行為應先求穩定完成，再求速度。
+- 批次寫入讓大型專案在模型推論、SQLite 寫入、向量檔輸出三個階段都有可觀測進度。
+- 串流向量檔避免最後一次把所有向量複製到同一個巨大 buffer。
+
+**限制**:
+- 搜尋仍會載入目標 KB 的向量到記憶體，這是 query-time recall 設計的現有限制。若未來支援超大型 KB，需改成 mmap/分片向量索引或外部 ANN index。

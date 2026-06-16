@@ -77,9 +77,12 @@
 - All tools must handle `signal?.aborted` for cancellation
 - All tools must use `onUpdate` for progress reporting during long operations
 - Source types are a behavior contract: directories/files/text/URLs must remain updateable or intentionally documented as one-shot. If adding a source type, cover add + update + status/diagnostics.
+- Long-running indexing paths (`knowledge_add`, `knowledge_update`, `knowledge_import`) must prefer bounded embedding batches, incremental DB writes, streamed vector writes, cancellation checks before and after model calls, and useful progress updates over one-shot memory-heavy work.
+- Directory indexing must remain guarded against generated/vendor/runtime artifacts. Playwright caches, `.app` bundles, build outputs, and package/vendor directories are safety exclusions, not just ranking preferences. Do not globally exclude browser-domain source names such as `chromium`, `chrome`, `firefox`, `webkit`, or `browsers`.
+- Agent guidance for `knowledge_add` must tell agents to index project source/docs/config at a directory level and avoid per-file indexing loops or generated browser/runtime artifacts.
 - Import/export must remain portable across machines. Do not export local absolute source paths as active update sources.
 - `knowledge_search` score semantics are "higher is better" after leaving search modules, including BM25 fast mode.
-- `knowledge_status` diagnostics must handle directory, single-file, text, and URL KBs without false stale/orphan reports.
+- `knowledge_status` diagnostics must handle directory, single-file, text, and URL KBs without false stale/orphan reports, and must surface stale `indexing` state left by interrupted runs. `knowledge_search` must skip non-ready/non-stale KBs rather than searching partial `indexing` or `error` data.
 - File watching must keep the polling fallback; native `fs.watch` can fail or stop under local resource limits.
 
 ## File Organization

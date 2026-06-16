@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
+import { openDatabase } from "../../src/storage/sqlite.ts";
 
 const TEST_DIR = "/tmp/pk-test-engine";
 
@@ -101,6 +102,30 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("reports indexing progress with file counts and ETA", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-progress-"));
+			try {
+				for (let i = 0; i < 70; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Progress document ${i} about ProgressToken stable indexing and observable batches. `.repeat(3),
+					);
+				}
+				const updates: string[] = [];
+
+				const { chunkCount } = await engine.add(projectDir, "Progress", (message) => updates.push(message));
+
+				expect(chunkCount).toBe(70);
+				expect(updates.some((message) => message.includes("Scanning"))).toBe(true);
+				expect(updates.some((message) => message.includes("Found 70 files"))).toBe(true);
+				expect(updates.some((message) => message.includes("Embedding batch"))).toBe(true);
+				expect(updates.some((message) => message.includes("ETA"))).toBe(true);
+				expect(updates.at(-1)).toContain("Ready: 70 chunks from 70 files");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("directory indexing skips common build output and secret config files", async () => {
 			const projectDir = join(TEST_DIR, "project");
 			mkdirSync(join(projectDir, "src"), { recursive: true });
@@ -150,6 +175,37 @@ describe("KnowledgeEngine", () => {
 			controller.abort();
 
 			await expect(engine.update("Cancellable", undefined, controller.signal)).rejects.toThrow("Cancelled");
+		});
+
+		it("reports batched progress while embedding many changed chunks", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-large-update-"));
+			try {
+				for (let i = 0; i < 70; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Initial update document ${i} about BatchUpdateToken stable indexing and observable changes. `.repeat(3),
+					);
+				}
+				await engine.add(projectDir, "Large Update");
+				for (let i = 0; i < 70; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Changed update document ${i} about BatchUpdateToken stable indexing and observable changes. `.repeat(3),
+					);
+				}
+				const updates: string[] = [];
+
+				const result = await engine.update("Large Update", (message) => updates.push(message));
+
+				expect(result.added).toBe(70);
+				expect(result.removed).toBe(70);
+				expect(updates.some((message) => message.includes("Embedding update batch"))).toBe(true);
+				expect(updates.some((message) => message.includes("Stored update batch"))).toBe(true);
+				expect(updates.some((message) => message.includes("ETA"))).toBe(true);
+				expect(updates.at(-1)).toBe("Ready: +70 -70 =0");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
 		});
 	});
 
@@ -598,6 +654,21 @@ describe("KnowledgeEngine", () => {
 				rmSync(projectDir, { recursive: true, force: true });
 			}
 		});
+
+		it("skips knowledge bases that are still indexing", async () => {
+			await engine.add("Indexing status content about SkipIndexingToken and partial rebuilds.", "Partial");
+			const [{ id }] = engine.list();
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET status = 'indexing', updated_at = ? WHERE id = ?").run(Date.now(), id);
+			} finally {
+				db.close();
+			}
+
+			const result = await engine.search("SkipIndexingToken", { mode: "hybrid" });
+			expect(result.total_count).toBe(0);
+			expect(result.warnings?.[0]).toContain('"Partial" is indexing');
+		});
 	});
 
 	describe("diagnostics", () => {
@@ -614,6 +685,24 @@ describe("KnowledgeEngine", () => {
 			const [diagnostic] = engine.diagnose();
 			expect(diagnostic.stale_files).toContain(filePath);
 			expect(diagnostic.orphan_files).toEqual([]);
+		});
+
+		it("detects stale indexing state left behind by interrupted runs", async () => {
+			await engine.add("Interrupted indexing content about status diagnostics and recovery.", "Interrupted");
+			const [{ id }] = engine.list();
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET status = 'indexing', updated_at = ? WHERE id = ?").run(
+					Date.now() - 15 * 60 * 1000,
+					id,
+				);
+			} finally {
+				db.close();
+			}
+
+			const [diagnostic] = engine.diagnose();
+			expect(diagnostic.status).toBe("indexing");
+			expect(diagnostic.stuck_indexing).toBe(true);
 		});
 	});
 

@@ -67,7 +67,13 @@ const DEFAULT_IGNORE = [
 	".next",
 	".cache",
 	".playwright",
+	".browser",
+	".browsers",
 	"__pycache__",
+	"*.app",
+	"*.asar",
+	"*.asar.unpacked",
+	"*.pak",
 	".env",
 	".env.*",
 	"*.pem",
@@ -84,6 +90,7 @@ const DEFAULT_IGNORE = [
 	"docs/*evaluation-report*.md",
 	"docs/*knowledge-base*report*.md",
 	"*knowledge-base-evaluation-report*.md",
+	"*knowledge*.jsonl",
 	"setting*.json",
 	"appsettings*.json",
 	"*.min.js",
@@ -91,6 +98,10 @@ const DEFAULT_IGNORE = [
 	"*.map",
 	"*.lock",
 	"package-lock.json",
+	"playwright-report",
+	"test-results",
+	"browser-cache",
+	"ms-playwright",
 	".DS_Store",
 	"Thumbs.db",
 	"*.pyc",
@@ -206,6 +217,7 @@ function estimateTokens(text: string): number {
 
 const MARKDOWN_TARGET_TOKENS = 450;
 const TEXT_TARGET_TOKENS = 550;
+const MAX_TEXT_CHUNK_CHARS = 6_000;
 
 export function preTokenizeForFTS(content: string): string {
 	return content
@@ -363,8 +375,29 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 		lineOffset += text.split("\n").length + 1;
 	}
 
+	function pushOversizedParagraph(para: string): void {
+		let offset = 0;
+		while (offset < para.length) {
+			const slice = para.slice(offset, offset + MAX_TEXT_CHUNK_CHARS).trim();
+			if (slice.length >= 50) {
+				chunks.push(makeChunk(slice, filePath, fileType, lineOffset, lineOffset + slice.split("\n").length));
+			}
+			lineOffset += slice.split("\n").length;
+			offset += MAX_TEXT_CHUNK_CHARS;
+		}
+	}
+
 	for (const para of paragraphs) {
 		const paraTokens = estimateTokens(para);
+		if (para.length > MAX_TEXT_CHUNK_CHARS) {
+			if (buffer.length > 0) {
+				flush();
+				buffer = [];
+				bufferTokens = 0;
+			}
+			pushOversizedParagraph(para);
+			continue;
+		}
 		if (bufferTokens + paraTokens > TEXT_TARGET_TOKENS && buffer.length > 0) {
 			flush();
 			buffer = [];

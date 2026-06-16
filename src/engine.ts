@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
@@ -8,7 +8,7 @@ import {
 	embedQuery,
 	prepareForShutdown as prepareEmbeddingForShutdown,
 } from "./embedding/provider.ts";
-import { loadVectors, saveVectors } from "./embedding/vectors.ts";
+import { loadVectors, openVectorWriter } from "./embedding/vectors.ts";
 import { buildChunkEmbeddingText, chunkFile, contentHash, preTokenizeForFTS, walkDir } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
@@ -29,6 +29,7 @@ import {
 	deleteChunksByIds,
 	deleteKB,
 	getChunkById,
+	getChunkCount,
 	getChunkHashesByKB,
 	getChunkIdsByKB,
 	getChunksByFile,
@@ -100,7 +101,12 @@ interface RankedChunk {
 const ADAPTIVE_CONTEXT_LINES = 80;
 const ADAPTIVE_MAX_CONTEXT_CHARS = 6_000;
 const ADAPTIVE_NEIGHBOR_TARGET = 5;
+const INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
+
+function tempVectorPath(vectorPath: string): string {
+	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+}
 
 function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefined): number {
 	if (!a || !b || a.length !== b.length) return 0;
@@ -305,6 +311,15 @@ function pushAdaptiveCandidate(candidates: RankedChunk[], candidate: RankedChunk
 	}
 }
 
+function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return "0s";
+	const seconds = Math.ceil(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	const rest = seconds % 60;
+	return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
+}
+
 async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
 	const res = await fetch(source, { signal });
 	if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
@@ -383,57 +398,119 @@ export class KnowledgeEngine {
 		});
 		updateKBStatus(this.db, kb.id, "indexing");
 
+		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
+		let tempVectorFile: string | undefined;
 		try {
-			let allChunks: Awaited<ReturnType<typeof chunkFile>> = [];
+			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			tempVectorFile = tempVectorPath(vectorPath);
+			vectorWriter = openVectorWriter(tempVectorFile);
+			let chunkCount = 0;
+			let fileCount = 0;
+			let pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
+			const startedAt = Date.now();
+
+			const reportProgress = (phase: string, processedFiles?: number, totalFiles?: number): void => {
+				const elapsed = Date.now() - startedAt;
+				let suffix = `${chunkCount} chunks, elapsed ${formatDuration(elapsed)}`;
+				if (processedFiles !== undefined && totalFiles !== undefined && totalFiles > 0) {
+					const rate = processedFiles / Math.max(1, elapsed / 1000);
+					const remainingFiles = Math.max(0, totalFiles - processedFiles);
+					const etaMs = rate > 0 ? (remainingFiles / rate) * 1000 : 0;
+					suffix = `${processedFiles}/${totalFiles} files, ${suffix}, ETA ${formatDuration(etaMs)}`;
+				}
+				onProgress?.(`${phase}: ${suffix}`);
+			};
+
+			const flushPending = async (processedFiles?: number, totalFiles?: number): Promise<void> => {
+				if (!this.db || pendingChunks.length === 0) return;
+				if (signal?.aborted) throw new Error("Cancelled");
+				const batch = pendingChunks;
+				pendingChunks = [];
+				reportProgress(`Embedding batch of ${batch.length}`, processedFiles, totalFiles);
+				const vectors = await embedDocuments(
+					batch.map((chunk) => buildChunkEmbeddingText(chunk)),
+					signal,
+				);
+				if (signal?.aborted) throw new Error("Cancelled");
+				insertChunks(this.db, kb.id, batch);
+				vectorWriter.append(vectors);
+				chunkCount += batch.length;
+				updateKBCounts(this.db, kb.id, chunkCount, fileCount);
+				reportProgress("Stored batch", processedFiles, totalFiles);
+			};
+
+			const addChunks = async (
+				chunks: Awaited<ReturnType<typeof chunkFile>>,
+				processedFiles?: number,
+				totalFiles?: number,
+			): Promise<void> => {
+				pendingChunks.push(...chunks);
+				while (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) {
+					await flushPending(processedFiles, totalFiles);
+				}
+			};
 
 			if (isUrl) {
 				onProgress?.(`Fetching ${source}...`);
-				allChunks = await chunkUrl(source, signal);
+				const chunks = await chunkUrl(source, signal);
+				fileCount = 1;
+				await addChunks(chunks);
 			} else if (isFile && resolvedSource.endsWith(".pdf")) {
 				onProgress?.("Extracting text from PDF...");
 				const { extractText } = await import("unpdf");
 				const buf = (await import("node:fs")).readFileSync(resolvedSource);
 				const { text } = await extractText(new Uint8Array(buf));
-				allChunks = await chunkFile(normalizeExtractedText(text), resolvedSource);
+				fileCount = 1;
+				await addChunks(await chunkFile(normalizeExtractedText(text), resolvedSource));
 			} else if (isFile && (resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc"))) {
 				onProgress?.("Extracting text from DOCX...");
 				const mammoth = await import("mammoth");
 				const result = await mammoth.extractRawText({ path: resolvedSource });
-				allChunks = await chunkFile(result.value, resolvedSource);
+				fileCount = 1;
+				await addChunks(await chunkFile(result.value, resolvedSource));
 			} else if (isDir) {
 				onProgress?.(`Scanning ${resolvedSource}...`);
 				const files = walkDir(resolvedSource);
 				onProgress?.(`Found ${files.length} files, chunking...`);
+				let processedFiles = 0;
 				for (const file of files) {
-					allChunks.push(...(await chunkFile(file.content, file.relPath)));
+					if (signal?.aborted) throw new Error("Cancelled");
+					const chunks = await chunkFile(file.content, file.relPath);
+					processedFiles++;
+					if (chunks.length > 0) fileCount++;
+					await addChunks(chunks, processedFiles, files.length);
+					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, files.length);
 				}
 			} else if (isFile) {
 				const { readFileSync } = await import("node:fs");
 				const content = readFileSync(resolvedSource, "utf-8");
-				allChunks = await chunkFile(content, resolvedSource);
+				fileCount = 1;
+				await addChunks(await chunkFile(content, resolvedSource));
 			} else {
-				allChunks = await chunkFile(source, "inline-text");
+				fileCount = 1;
+				await addChunks(await chunkFile(source, "inline-text"));
 			}
 
-			onProgress?.(`${allChunks.length} chunks, embedding...`);
-			const texts = allChunks.map((c) => buildChunkEmbeddingText(c));
-			const vectors = await embedDocuments(texts, signal);
+			await flushPending();
+			vectorWriter.close();
+			vectorWriter = undefined;
+			renameSync(tempVectorFile, vectorPath);
+			tempVectorFile = undefined;
+			this.invalidateVectorCache(kb.id);
 
-			onProgress?.(`Storing...`);
-			insertChunks(this.db, kb.id, allChunks);
-
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-			saveVectors(vectorPath, vectors);
-			this.vectorCache.set(kb.id, vectors);
-
-			const fileCount = isDir ? getFileCount(this.db, kb.id) : 1;
-			updateKBCounts(this.db, kb.id, allChunks.length, fileCount);
+			const savedFileCount = isDir ? getFileCount(this.db, kb.id) : fileCount;
+			updateKBCounts(this.db, kb.id, chunkCount, savedFileCount);
 			updateKBStatus(this.db, kb.id, "ready");
 
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after add: ${kb.id}`);
-			return { kb: savedKB, chunkCount: allChunks.length };
+			onProgress?.(
+				`Ready: ${chunkCount} chunks from ${savedFileCount} files in ${formatDuration(Date.now() - startedAt)}`,
+			);
+			return { kb: savedKB, chunkCount };
 		} catch (e) {
+			vectorWriter?.close();
+			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
 			// Clean up partial state on failure
 			deleteKB(this.db, kb.id);
 			throw e;
@@ -453,6 +530,7 @@ export class KnowledgeEngine {
 		}
 
 		updateKBStatus(this.db, kb.id, "indexing");
+		let replacementVectorPath: string | undefined;
 
 		try {
 			// 1. Scan and chunk current source
@@ -493,37 +571,63 @@ export class KnowledgeEngine {
 			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
 
 			// 5. Embed ONLY new chunks
-			let newVectors: Float32Array[] = [];
+			let addedCount = 0;
 			if (chunksToAdd.length > 0) {
-				onProgress?.(`Embedding ${chunksToAdd.length} new chunks...`);
-				newVectors = await embedDocuments(
-					chunksToAdd.map((c) => buildChunkEmbeddingText(c)),
-					signal,
-				);
-				insertChunks(this.db, kb.id, chunksToAdd);
-			}
-
-			// Add new vectors to cache
-			for (let i = 0; i < chunksToAdd.length; i++) {
-				vectorCache.set(chunksToAdd[i].content_hash, newVectors[i]);
+				const startedAt = Date.now();
+				for (let offset = 0; offset < chunksToAdd.length; offset += INDEX_EMBED_BATCH_SIZE) {
+					if (signal?.aborted) throw new Error("Cancelled");
+					const batch = chunksToAdd.slice(offset, offset + INDEX_EMBED_BATCH_SIZE);
+					const elapsed = Date.now() - startedAt;
+					const processed = offset;
+					const rate = processed / Math.max(1, elapsed / 1000);
+					const remaining = Math.max(0, chunksToAdd.length - processed);
+					const etaMs = rate > 0 ? (remaining / rate) * 1000 : 0;
+					onProgress?.(
+						`Embedding update batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
+							chunksToAdd.length / INDEX_EMBED_BATCH_SIZE,
+						)}: ${processed}/${chunksToAdd.length} new chunks, elapsed ${formatDuration(
+							elapsed,
+						)}, ETA ${formatDuration(etaMs)}`,
+					);
+					const newVectors = await embedDocuments(
+						batch.map((c) => buildChunkEmbeddingText(c)),
+						signal,
+					);
+					if (signal?.aborted) throw new Error("Cancelled");
+					insertChunks(this.db, kb.id, batch);
+					for (let i = 0; i < batch.length; i++) {
+						vectorCache.set(batch[i].content_hash, newVectors[i]);
+					}
+					addedCount += batch.length;
+					updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+					onProgress?.(`Stored update batch: ${addedCount}/${chunksToAdd.length} new chunks`);
+				}
 			}
 
 			// 6. Rebuild vector file in DB chunk order (reusing cached vectors)
 			const finalChunks = getChunksByKB(this.db, kb.id);
-			const finalVectors: Float32Array[] = [];
-			for (const chunk of finalChunks) {
-				const vector = vectorCache.get(chunk.content_hash);
-				if (vector) finalVectors.push(vector);
+			replacementVectorPath = tempVectorPath(vectorPath);
+			const vectorWriter = openVectorWriter(replacementVectorPath);
+			try {
+				for (const chunk of finalChunks) {
+					const vector = vectorCache.get(chunk.content_hash);
+					if (vector) vectorWriter.append([vector]);
+				}
+			} finally {
+				vectorWriter.close();
 			}
-			saveVectors(vectorPath, finalVectors);
-			this.vectorCache.set(kb.id, finalVectors);
+			renameSync(replacementVectorPath, vectorPath);
+			replacementVectorPath = undefined;
+			this.invalidateVectorCache(kb.id);
 
 			// 7. Update counts
 			updateKBCounts(this.db, kb.id, finalChunks.length, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
+			onProgress?.(`Ready: +${chunksToAdd.length} -${idsToRemove.length} =${unchanged}`);
 
 			return { added: chunksToAdd.length, removed: idsToRemove.length, unchanged };
 		} catch (e) {
+			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
 			updateKBStatus(this.db, kb.id, "error");
 			throw e;
 		}
@@ -539,11 +643,19 @@ export class KnowledgeEngine {
 		const queryTokens = tokenizeForSimilarity(query);
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
 
-		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
-		const kbs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
-		if (kbs.length === 0) return { results: [], total_count: 0, has_more: false };
-
 		const warnings: string[] = [];
+		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
+		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
+		const kbs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
+		for (const kb of availableKBs) {
+			if (kb.status !== "ready" && kb.status !== "stale") {
+				warnings.push(`"${kb.name}" is ${kb.status}; search skipped until indexing is ready`);
+			}
+		}
+		if (kbs.length === 0) {
+			return { results: [], total_count: 0, has_more: false, warnings: warnings.length > 0 ? warnings : undefined };
+		}
+
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
 
@@ -799,9 +911,11 @@ export class KnowledgeEngine {
 		const header = JSON.parse(lines[0]) as { name: string; description?: string };
 		const kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
 		updateKBStatus(this.db, kb.id, "indexing");
+		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
+		let tempVectorFile: string | undefined;
 		try {
 			const chunkData = lines.slice(1).map((l) => JSON.parse(l) as ImportedChunk);
-			onProgress?.(`Importing ${chunkData.length} chunks, embedding...`);
+			onProgress?.(`Importing ${chunkData.length} chunks...`);
 			const chunks = chunkData.map((c) => ({
 				content_hash: contentHash(c.content),
 				content: c.content,
@@ -816,20 +930,46 @@ export class KnowledgeEngine {
 				...chunk,
 				content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)),
 			}));
-			const vectors = await embedDocuments(
-				indexedChunks.map((c) => buildChunkEmbeddingText(c)),
-				signal,
-			);
-			insertChunks(this.db, kb.id, indexedChunks);
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-			saveVectors(vectorPath, vectors);
-			this.vectorCache.set(kb.id, vectors);
+			tempVectorFile = tempVectorPath(vectorPath);
+			vectorWriter = openVectorWriter(tempVectorFile);
+			let inserted = 0;
+			for (let offset = 0; offset < indexedChunks.length; offset += INDEX_EMBED_BATCH_SIZE) {
+				if (signal?.aborted) throw new Error("Cancelled");
+				const batch = indexedChunks.slice(offset, offset + INDEX_EMBED_BATCH_SIZE);
+				onProgress?.(
+					`Embedding import batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
+						indexedChunks.length / INDEX_EMBED_BATCH_SIZE,
+					)}: ${offset}/${indexedChunks.length} chunks`,
+				);
+				const vectors = await embedDocuments(
+					batch.map((c) => buildChunkEmbeddingText(c)),
+					signal,
+				);
+				if (signal?.aborted) throw new Error("Cancelled");
+				insertChunks(this.db, kb.id, batch);
+				vectorWriter.append(vectors);
+				inserted += batch.length;
+				updateKBCounts(
+					this.db,
+					kb.id,
+					inserted,
+					new Set(indexedChunks.slice(0, inserted).map((c) => c.file_path)).size,
+				);
+			}
+			vectorWriter.close();
+			vectorWriter = undefined;
+			renameSync(tempVectorFile, vectorPath);
+			tempVectorFile = undefined;
+			this.invalidateVectorCache(kb.id);
 			updateKBCounts(this.db, kb.id, indexedChunks.length, new Set(indexedChunks.map((c) => c.file_path)).size);
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);
 			return { kb: savedKB, chunkCount: chunks.length };
 		} catch (e) {
+			vectorWriter?.close();
+			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
 			deleteKB(this.db, kb.id);
 			throw e;
 		}

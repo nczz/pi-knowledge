@@ -21,3 +21,11 @@ Search the indexed knowledge bases for: $ARGUMENTS
 - Concept queries: use natural language descriptions
 - Filter: `file_type: "typescript"` or `file_type: "python"`
 - No results? Check `knowledge_show` to confirm content is indexed
+
+## Indexing Safety
+
+- When creating a KB, prefer one `knowledge_add` call for the project root or relevant source/docs directory.
+- Do not create one KB per small file unless the user explicitly asks for separate KBs.
+- Avoid indexing generated or runtime artifacts such as `bin/`, `obj/`, `dist/`, `build/`, `node_modules/`, Playwright browser caches, `.app` bundles, `.pak`, and `.asar` files.
+- Do not exclude browser-domain source directories merely because they are named `chromium`, `chrome`, `firefox`, `webkit`, or `browsers`; those names may be first-party source in Playwright or browser-tooling projects.
+- If a project contains large embedded browsers or vendor bundles, index the source/docs/config directories directly or rely on the extension's default ignore rules.
