@@ -50,8 +50,10 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | Pi extension native | ✅ | N/A | ✅ |
 | Context injection per turn | ✅ | ❌ | ✅ |
 | Search result TUI rendering | ✅ | N/A | ❌ |
-| Full tool TUI rendering | planned | N/A | ❌ |
+| Full tool TUI rendering | partial | N/A | ❌ |
 | RPC mode support | ✅ | N/A | N/A |
+
+TUI rendering currently uses Pi's stable default tool rendering plus targeted result formatting. A fuller custom renderer is intentionally not enabled yet because custom renderers must be width-safe across terminal sizes and Pi TUI modes.
 
 ## Research-Backed Retrieval
 
