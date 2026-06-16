@@ -43,7 +43,9 @@ export interface RankingDiagnostics {
 	base_score: number;
 	coverage: number;
 	documentation_boost: number;
+	is_localization: boolean;
 	is_test: boolean;
+	localization_penalty: number;
 	path_boost: number;
 	source_boost: number;
 	test_intent: boolean;
@@ -70,6 +72,28 @@ function queryAsksForUserGuide(queryTokens: Set<string>): boolean {
 	const signals = signalTokens(queryTokens);
 	return ["config", "configuration", "install", "onboard", "quickstart", "setup", "start", "usage"].some((token) =>
 		signals.has(token),
+	);
+}
+
+function queryAsksForLocalization(queryTokens: Set<string>): boolean {
+	const signals = signalTokens(queryTokens);
+	return ["i18n", "lang", "language", "locale", "localization", "translation"].some((token) => signals.has(token));
+}
+
+export function isLocalizationPath(filePath: string, fileType: string): boolean {
+	if (!["json", "markdown", "text", "toml", "yaml"].includes(fileType)) return false;
+	const lower = filePath.toLowerCase();
+	return (
+		lower.includes("/locale/") ||
+		lower.startsWith("locale/") ||
+		lower.includes("/locales/") ||
+		lower.startsWith("locales/") ||
+		lower.includes("/lang/") ||
+		lower.startsWith("lang/") ||
+		lower.includes("/i18n/") ||
+		lower.startsWith("i18n/") ||
+		lower.includes("/translations/") ||
+		lower.startsWith("translations/")
 	);
 }
 
@@ -142,15 +166,20 @@ export function scoreChunkForQuery(baseScore: number, chunk: Chunk, queryTokens:
 	const docBoost = documentationBoost(chunk, queryTokens);
 	const testIntent = queryAsksForTests(queryTokens);
 	const test = isTestPath(chunk.file_path);
+	const localization = isLocalizationPath(chunk.file_path, chunk.file_type);
+	const localizationPenalty = localization && !queryAsksForLocalization(queryTokens) ? 0.2 : 1;
 	let adjustedScore = baseScore + pathBoost + sourceBoost + docBoost;
 	if (test && !testIntent) adjustedScore *= 0.48;
 	if (!test && testIntent) adjustedScore *= 0.88;
+	adjustedScore *= localizationPenalty;
 	return {
 		adjusted_score: adjustedScore,
 		base_score: baseScore,
 		coverage: queryCoverage(buildChunkEmbeddingText(chunk), queryTokens),
 		documentation_boost: docBoost,
+		is_localization: localization,
 		is_test: test,
+		localization_penalty: localizationPenalty,
 		path_boost: pathBoost,
 		source_boost: sourceBoost,
 		test_intent: testIntent,

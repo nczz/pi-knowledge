@@ -37,7 +37,18 @@ function estimateTokens(text: string): number {
 // 使用 'ignore' package (Pi 生態已用)
 const ig = ignore();
 ig.add(readFileSync('.gitignore', 'utf-8'));
-ig.add(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', '*.min.js']);
+ig.add([
+  'node_modules',
+  '.git',
+  'dist',
+  'build',
+  '.next',
+  '__pycache__',
+  '*.min.js',
+  'docs/*knowledge-base*report*.md',
+  'docs/*evaluation-report*.md',
+  'docs/*eval-report*.md',
+]);
 ```
 
 ### Binary 偵測

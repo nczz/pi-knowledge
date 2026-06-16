@@ -512,6 +512,46 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("demotes localization catalogs for implementation-oriented queries", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-locale-demotion-"));
+			try {
+				mkdirSync(join(projectDir, "channel"), { recursive: true });
+				mkdirSync(join(projectDir, "locale", "lang"), { recursive: true });
+				writeFileSync(
+					join(projectDir, "channel", "memory.go"),
+					[
+						"package channel",
+						"func ManageMemoryContext() string {",
+						'  return "LocaleDemotionToken memory context management implementation"',
+						"}",
+					].join("\n"),
+				);
+				writeFileSync(
+					join(projectDir, "locale", "lang", "en.json"),
+					JSON.stringify({
+						memory_context_management: "LocaleDemotionToken memory context management translation message labels",
+					}),
+				);
+
+				await engine.add(projectDir, "Locale Demotion");
+				const implementation = await engine.search("LocaleDemotionToken memory context management", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+				expect(implementation.results[0].file_path).toBe("channel/memory.go");
+
+				const localization = await engine.search("LocaleDemotionToken memory context translation message", {
+					mode: "hybrid",
+					limit: 2,
+					diversity: "strong",
+				});
+				expect(localization.results[0].file_path).toBe("locale/lang/en.json");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("interleaves files so README-like documents do not dominate hybrid results", async () => {
 			const projectDir = mkdtempSync(join(tmpdir(), "pk-file-interleave-"));
 			try {

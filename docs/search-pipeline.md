@@ -114,6 +114,8 @@ function scoreChunkForQuery(baseScore: number, chunk: Chunk, queryTokens: Set<st
 
 Ranking diagnostics are returned with each search result so score behavior can be inspected without guessing.
 
+Implementation-oriented queries also demote localization catalogs such as `locale/`, `lang/`, `i18n/`, and `translations/` unless the query explicitly asks for translation, language, locale, or i18n behavior. This prevents UI text catalogs from outranking source files that implement the behavior being searched.
+
 ### Confidence gate
 
 Hybrid/adaptive search must not always return something. Candidates must pass a minimum adjusted score and enough lexical evidence, except when the query strongly names a source module path. This prevents garbage queries or one accidental token match from returning unrelated code.

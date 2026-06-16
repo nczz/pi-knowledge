@@ -90,16 +90,19 @@ describe("walkDir", () => {
 	it("respects ignores and skips binary", () => {
 		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "src"), { recursive: true });
+		mkdirSync(join(tmp, "docs"), { recursive: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
 		writeFileSync(join(tmp, "src/a.ts"), "export const a = 1;");
 		writeFileSync(join(tmp, "node_modules/x.js"), "no");
 		writeFileSync(join(tmp, "b.png"), Buffer.from([0x89, 0x50, 0x00]));
 		writeFileSync(join(tmp, "c.md"), "# C\n\nContent");
+		writeFileSync(join(tmp, "docs/knowledge-base-full-evaluation-report.md"), "# Generated evaluation");
 		const paths = walkDir(tmp).map((f) => f.relPath);
 		expect(paths).toContain("src/a.ts");
 		expect(paths).toContain("c.md");
 		expect(paths).not.toContain("node_modules/x.js");
 		expect(paths).not.toContain("b.png");
+		expect(paths).not.toContain("docs/knowledge-base-full-evaluation-report.md");
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });

@@ -13,6 +13,8 @@
 - Added file-level result interleaving so README-style overview files cannot dominate top results with repeated chunks.
 - Added confidence gating for hybrid search so low-evidence garbage queries return no results instead of unrelated matches.
 - Strengthened source-file intent scoring so named modules and core implementation files outrank overview and test files when appropriate.
+- Demoted localization catalogs for implementation-oriented queries while preserving them for explicit translation or locale intent.
+- Excluded generated knowledge-base evaluation reports from default directory indexing to prevent self-referential retrieval pollution.
 
 ## [0.3.5] - 2026-06-15
 

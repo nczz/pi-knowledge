@@ -95,6 +95,28 @@ describe("ranking heuristics", () => {
 		expect(guideScore.adjusted_score).toBeGreaterThan(componentScore.adjusted_score);
 	});
 
+	it("penalizes localization files unless the query asks for localization", () => {
+		const implementation = chunk({
+			file_path: "channel/memory.go",
+			file_type: "go",
+			content: "Memory context management implementation.",
+		});
+		const locale = chunk({
+			file_path: "locale/lang/en.json",
+			file_type: "json",
+			content: "Memory context management message labels.",
+		});
+
+		const implementationScore = scoreChunkForQuery(0.5, implementation, tokenizeForSearch("memory context management"));
+		const localeScore = scoreChunkForQuery(0.7, locale, tokenizeForSearch("memory context management"));
+		const localeIntentScore = scoreChunkForQuery(0.7, locale, tokenizeForSearch("memory context translation message"));
+
+		expect(localeScore.is_localization).toBe(true);
+		expect(localeScore.localization_penalty).toBeLessThan(1);
+		expect(implementationScore.adjusted_score).toBeGreaterThan(localeScore.adjusted_score);
+		expect(localeIntentScore.localization_penalty).toBe(1);
+	});
+
 	it("requires enough lexical evidence unless source intent is strong", () => {
 		const accidental = chunk({
 			content: "Review examples mention unknown edge cases.",
