@@ -13,6 +13,7 @@ Search the indexed knowledge bases for: $ARGUMENTS
 2. Choose the search mode from the decision rules below instead of always using the default
 3. Present results with file paths and relevant snippets
 4. If results are insufficient, retry once with a different mode before concluding the KB lacks the answer
+5. If search behavior looks unhealthy, run `knowledge_doctor` and follow its actions
 
 ## Tips
 
@@ -28,8 +29,10 @@ Search the indexed knowledge bases for: $ARGUMENTS
 - Use `semantic` for broad conceptual questions when exact terms may differ from the indexed wording.
 - Use `adaptive` when the user needs nearby implementation context, related sections, or enough context to safely edit code.
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
+- Use `auto` when you need the tool to choose and retry modes based on the query shape.
 - If results are repetitive, retry with `diversity: "strong"` or `adaptive` before raising `limit`.
 - If results are empty but the KB should contain the answer, retry once with `fast` for exact terms or `semantic` for conceptual wording.
+- Request diagnostics when you need to explain why a result ranked highly or why a fallback mode was used.
 
 ## Indexing Safety
 

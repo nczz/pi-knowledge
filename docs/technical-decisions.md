@@ -183,6 +183,7 @@
 - Ranking 必須同時考慮 lexical coverage、path token、source file intent、documentation/setup intent、test intent 與 low-evidence confidence gate。
 - Ranking diagnostics 必須可回傳，方便用真實專案報告檢視分數與排序原因。
 - Agent-facing mode selection 必須文件化，不能只提供 modes 讓模型自行猜測。
+- `auto` mode 在工具層執行 primary mode selection 與 fallback，並回傳 mode/retry metadata。
 
 **理由**:
 - 索引增強解決「chunk 自身缺少檔案/章節/符號語意」。
@@ -190,6 +191,7 @@
 - 意圖排序讓 `stt/stt.go`、`bot/errors.go`、`INSTALL.md` 這類目標依查詢語意勝出，而不是被長文件或測試檔覆蓋。
 - Confidence gate 讓無意義或低證據查詢可以回傳 0 結果，避免 agent 建立錯誤信心。
 - Mode contract 讓 agent 依任務型態選擇 `fast`、`semantic`、`hybrid`、`adaptive` 或 `deep`，並在空/弱結果時重試一次，降低 false negative。
+- Tool-owned `auto` mode 降低 agent 忘記切換模式的機率；exact lookup fallback 必須防 semantic false positive。
 
 **重建索引邊界**:
 - Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。
@@ -217,6 +219,7 @@
 - vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
 - add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。
 - `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
+- `knowledge_doctor` 以 health score + blocking/warning/info issues + concrete action 收斂使用者下一步。
 - `knowledge_search` 跳過 `indexing` 和 `error` KB，只搜尋 `ready` 或 `stale` KB。
 - semantic/hybrid search 以 vector file ranged reads 掃描 top-K，不把整個 KB 的 Float32 vectors 放進長駐 cache。
 

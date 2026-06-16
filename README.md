@@ -76,6 +76,7 @@ pi install ./pi-knowledge
 | `knowledge_update` | Incrementally re-index changed files in a knowledge base |
 | `knowledge_show` | List all knowledge bases with stats |
 | `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
+| `knowledge_doctor` | Diagnose health score, skipped files, stuck jobs, stale data, and recommended fixes |
 | `knowledge_clear` | Remove all knowledge bases |
 | `knowledge_export` | Export a KB to shareable JSONL file |
 | `knowledge_import` | Import a KB from JSONL (re-embeds content) |
@@ -87,6 +88,7 @@ pi install ./pi-knowledge
 - `hybrid`: BM25 + vector search with normalized weighted score fusion.
 - `deep`: hybrid retrieval followed by cross-encoder reranking.
 - `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
+- `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
 
 Mode selection contract:
 
@@ -97,15 +99,15 @@ Mode selection contract:
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.
 
-Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics.
+Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, ranking coverage, path/source/test boosts, and adjusted scores.
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
 
 ## Large Project Indexing
 
-Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, elapsed time, and ETA where available. This keeps long-running project indexing observable and avoids one huge all-at-once embedding or vector-write step.
+Indexing prioritizes stability over raw speed. `knowledge_add`, `knowledge_update`, and `knowledge_import` embed and store chunks in bounded batches, stream vector files to disk, and report progress with file/chunk counts, skipped file counts, elapsed time, and ETA where available. This keeps long-running project indexing observable and avoids one huge all-at-once embedding or vector-write step.
 
-Search also avoids loading a full KB vector file into memory. Semantic and hybrid modes scan vectors from disk and retain only the top candidate vectors needed for ranking/diversity. `knowledge_status` reports stale files, orphaned chunks, coverage, and indexing jobs that appear stuck after an interrupted or crashed Pi process. KBs still marked `indexing` or `error` are visible in status but skipped by search until rebuilt. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
+Search also avoids loading a full KB vector file into memory. Semantic and hybrid modes scan vectors from disk and retain only the top candidate vectors needed for ranking/diversity. `knowledge_status` reports stale files, orphaned chunks, coverage, skipped files, and indexing jobs that appear stuck after an interrupted or crashed Pi process. `knowledge_doctor` summarizes the same signals as a health score with concrete actions. KBs still marked `indexing` or `error` are visible in status but skipped by search until rebuilt. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
 
 ## Architecture
 

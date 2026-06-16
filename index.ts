@@ -111,6 +111,9 @@ const Type = {
 	Number(options: Record<string, unknown> = {}): Schema {
 		return { type: "number", ...options };
 	},
+	Boolean(options: Record<string, unknown> = {}): Schema {
+		return { type: "boolean", ...options };
+	},
 	Literal(value: string): Schema {
 		return { const: value };
 	},
@@ -251,6 +254,7 @@ export default function (pi: ExtensionAPI) {
 			query: Type.String({ description: "Search query" }),
 			mode: Type.Optional(
 				Type.Union([
+					Type.Literal("auto"),
 					Type.Literal("fast"),
 					Type.Literal("semantic"),
 					Type.Literal("hybrid"),
@@ -263,6 +267,9 @@ export default function (pi: ExtensionAPI) {
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 			diversity: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("balanced"), Type.Literal("strong")])),
+			diagnostics: Type.Optional(
+				Type.Boolean({ description: "Include ranking diagnostics and mode/fallback details in the result" }),
+			),
 		}),
 		renderCall(args, theme: ThemeLike, context: RenderContextLike) {
 			const query = typeof args.query === "string" ? args.query : "";
@@ -278,18 +285,40 @@ export default function (pi: ExtensionAPI) {
 			return renderText(context, lines);
 		},
 		async execute(_id, params) {
-			const { query, mode, limit, kb_id, offset, file_type } = params;
+			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params;
 			const filters = file_type ? { file_type } : undefined;
-			const response = await engine.search(query, { mode, limit, kb_id, offset, filters });
+			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity });
 			if (response.results.length === 0) {
-				return { content: [{ type: "text", text: "No results found." }] };
+				const details = [
+					"No results found.",
+					response.mode_used ? `Mode used: ${response.mode_used}` : "",
+					response.retry_modes?.length ? `Retried: ${response.retry_modes.join(", ")}` : "",
+					response.warnings?.length ? `Warnings: ${response.warnings.join(" | ")}` : "",
+					response.suggestions?.length ? `Suggestions: ${response.suggestions.join(" | ")}` : "",
+				]
+					.filter(Boolean)
+					.join("\n");
+				return { content: [{ type: "text", text: details }] };
 			}
-			let output = `${response.total_count} results (showing ${response.results.length}):\n\n`;
+			let output = `${response.total_count} results (showing ${response.results.length})`;
+			if (response.mode_used) output += ` — mode: ${response.mode_used}`;
+			if (response.retry_modes?.length) output += ` — retried: ${response.retry_modes.join(", ")}`;
+			output += ":\n\n";
 			if (response.warnings?.length) {
 				output = `⚠️ ${response.warnings.join("\n⚠️ ")}\n\n${output}`;
 			}
 			output += response.results
-				.map((r, i) => `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}`)
+				.map((r, i) => {
+					const diag =
+						diagnostics && r.ranking
+							? `\nDiagnostics: base=${r.ranking.base_score.toFixed(3)}, adjusted=${r.ranking.adjusted_score.toFixed(
+									3,
+								)}, coverage=${r.ranking.coverage.toFixed(2)}, path_boost=${r.ranking.path_boost.toFixed(
+									2,
+								)}, source_boost=${r.ranking.source_boost.toFixed(2)}, test=${r.ranking.is_test}`
+							: "";
+					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}`;
+				})
 				.join("\n\n");
 			return { content: [{ type: "text", text: output }] };
 		},
@@ -351,6 +380,13 @@ export default function (pi: ExtensionAPI) {
 						lines.push(
 							`    ⚠️ indexing appears stuck for ${Math.round(diag.status_age_ms / 60000)}m; remove and rebuild if no pi process is actively indexing it`,
 						);
+					if (diag.skipped_files.total > 0)
+						lines.push(
+							`    skipped: ${diag.skipped_files.total} files (${Object.entries(diag.skipped_files.by_reason)
+								.filter(([, count]) => count > 0)
+								.map(([reason, count]) => `${reason}: ${count}`)
+								.join(", ")})`,
+						);
 				}
 			}
 			const totalStale = diagnostics.reduce((n, d) => n + d.stale_files.length, 0);
@@ -363,6 +399,28 @@ export default function (pi: ExtensionAPI) {
 					"",
 					`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing — run knowledge_update or rebuild affected KBs`,
 				);
+			return { content: [{ type: "text", text: lines.join("\n") }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_doctor",
+		label: "Knowledge Doctor",
+		description: "Diagnose knowledge base health, skipped files, stale indexes, stuck jobs, and recommended fixes",
+		promptSnippet: "Diagnose knowledge base health and recommended actions",
+		parameters: Type.Object({}),
+		async execute() {
+			const report = engine.doctor();
+			const lines = [`Health score: ${report.health_score}/100`, report.summary, ""];
+			if (report.issues.length === 0) {
+				lines.push("No issues found.");
+			} else {
+				for (const issue of report.issues) {
+					const scope = issue.kb_name ? ` [${issue.kb_name}]` : "";
+					lines.push(`- ${issue.severity.toUpperCase()}${scope}: ${issue.message}`);
+					lines.push(`  Action: ${issue.action}`);
+				}
+			}
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});

@@ -668,6 +668,26 @@ describe("KnowledgeEngine", () => {
 			expect(result.total_count).toBe(0);
 			expect(result.warnings?.[0]).toContain('"Partial" is indexing');
 		});
+
+		it("auto mode selects exact lookup and reports mode used", async () => {
+			await engine.add("Exact lookup content about AutoModeToken and command configuration.", "Auto");
+
+			const result = await engine.search("AutoModeToken", { mode: "auto", limit: 1 });
+
+			expect(result.total_count).toBeGreaterThan(0);
+			expect(result.mode_used).toBe("fast");
+			expect(result.retry_modes).toEqual([]);
+		});
+
+		it("auto mode retries alternate modes before returning no results", async () => {
+			await engine.add("Retry mode content about billing configuration and project setup.", "Auto Retry");
+
+			const result = await engine.search("zzzzzzzz nonexistent unmatched query", { mode: "auto", limit: 1 });
+
+			expect(result.total_count).toBe(0);
+			expect(result.retry_modes?.length).toBeGreaterThan(0);
+			expect(result.suggestions?.[0]).toContain("No results after auto mode fallback");
+		});
 	});
 
 	describe("diagnostics", () => {
@@ -702,6 +722,26 @@ describe("KnowledgeEngine", () => {
 			const [diagnostic] = engine.diagnose();
 			expect(diagnostic.status).toBe("indexing");
 			expect(diagnostic.stuck_indexing).toBe(true);
+		});
+
+		it("doctor reports actionable health issues", async () => {
+			await engine.add("Doctor content about health diagnostics and recovery.", "Doctor");
+			const [{ id }] = engine.list();
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET status = 'indexing', updated_at = ? WHERE id = ?").run(
+					Date.now() - 15 * 60 * 1000,
+					id,
+				);
+			} finally {
+				db.close();
+			}
+
+			const report = engine.doctor();
+
+			expect(report.health_score).toBeLessThan(100);
+			expect(report.issues.some((issue) => issue.severity === "blocking")).toBe(true);
+			expect(report.issues.some((issue) => issue.action.includes("remove and rebuild"))).toBe(true);
 		});
 	});
 

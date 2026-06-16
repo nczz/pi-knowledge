@@ -115,6 +115,43 @@ export interface ScannedFile {
 	fileType: string;
 }
 
+export interface SkippedScanEntry {
+	path: string;
+	reason: "ignored" | "oversized" | "binary" | "unreadable" | "inaccessible";
+	size?: number;
+}
+
+export interface ScanResult {
+	files: ScannedFile[];
+	skipped: {
+		total: number;
+		by_reason: Record<SkippedScanEntry["reason"], number>;
+		samples: SkippedScanEntry[];
+	};
+}
+
+const MAX_SKIPPED_SAMPLES = 25;
+
+function emptySkipped(): ScanResult["skipped"] {
+	return {
+		total: 0,
+		by_reason: {
+			ignored: 0,
+			oversized: 0,
+			binary: 0,
+			unreadable: 0,
+			inaccessible: 0,
+		},
+		samples: [],
+	};
+}
+
+function addSkipped(skipped: ScanResult["skipped"], entry: SkippedScanEntry): void {
+	skipped.total++;
+	skipped.by_reason[entry.reason]++;
+	if (skipped.samples.length < MAX_SKIPPED_SAMPLES) skipped.samples.push(entry);
+}
+
 function detectFileType(filePath: string): string {
 	const ext = extname(filePath).toLowerCase();
 	const map: Record<string, string> = {
@@ -164,6 +201,10 @@ function isBinaryFile(filePath: string): boolean {
 }
 
 export function walkDir(dirPath: string): ScannedFile[] {
+	return walkDirDetailed(dirPath).files;
+}
+
+export function walkDirDetailed(dirPath: string): ScanResult {
 	const ig = ignore();
 	ig.add(DEFAULT_IGNORE);
 
@@ -173,40 +214,54 @@ export function walkDir(dirPath: string): ScannedFile[] {
 	}
 
 	const results: ScannedFile[] = [];
+	const skipped = emptySkipped();
 
 	function walk(dir: string): void {
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
 		} catch {
+			addSkipped(skipped, { path: relative(dirPath, dir).split(sep).join("/") || ".", reason: "inaccessible" });
 			return;
 		}
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
 			const relPath = relative(dirPath, fullPath).split(sep).join("/");
 
-			if (ig.ignores(relPath)) continue;
+			if (ig.ignores(relPath)) {
+				addSkipped(skipped, { path: relPath, reason: "ignored" });
+				continue;
+			}
 
 			if (entry.isDirectory()) {
-				if (ig.ignores(`${relPath}/`)) continue;
+				if (ig.ignores(`${relPath}/`)) {
+					addSkipped(skipped, { path: `${relPath}/`, reason: "ignored" });
+					continue;
+				}
 				walk(fullPath);
 			} else if (entry.isFile()) {
 				const stat = statSync(fullPath);
-				if (stat.size > MAX_FILE_SIZE) continue;
-				if (isBinaryFile(fullPath)) continue;
+				if (stat.size > MAX_FILE_SIZE) {
+					addSkipped(skipped, { path: relPath, reason: "oversized", size: stat.size });
+					continue;
+				}
+				if (isBinaryFile(fullPath)) {
+					addSkipped(skipped, { path: relPath, reason: "binary", size: stat.size });
+					continue;
+				}
 
 				try {
 					const content = readFileSync(fullPath, "utf-8");
 					results.push({ path: fullPath, relPath, content, fileType: detectFileType(fullPath) });
 				} catch {
-					// skip unreadable files
+					addSkipped(skipped, { path: relPath, reason: "unreadable", size: stat.size });
 				}
 			}
 		}
 	}
 
 	walk(dirPath);
-	return results;
+	return { files: results, skipped };
 }
 
 // --- Chunking ---

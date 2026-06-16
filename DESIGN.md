@@ -26,6 +26,7 @@ Coding agents operate within limited context windows. When working on complex pr
 5. **100% local** — local ONNX embedding model, zero API keys required for core functionality
 6. **Deep Pi integration** — lifecycle hooks, auto-injection, TUI render, RPC support
 7. **Observable** — real-time progress, index health diagnostics, chunk coverage stats
+8. **Self-correcting agent UX** — auto mode selection, fallback metadata, and doctor actions make retrieval failures actionable
 
 ---
 
@@ -234,6 +235,7 @@ knowledge_search({
 | `hybrid` (default) | BM25 + vector + weighted score fusion + confidence gate | variable | General purpose |
 | `adaptive` | Hybrid + query-time neighboring context expansion | variable | Implementation context and related sections |
 | `deep` | Hybrid + cross-encoder rerank | slower | Maximum relevance |
+| `auto` | Tool-selected primary mode + bounded fallback | variable | Agent default when query shape is unclear |
 
 ---
 
@@ -248,6 +250,7 @@ api.registerTool(knowledgeRemoveTool);
 api.registerTool(knowledgeUpdateTool);
 api.registerTool(knowledgeShowTool);
 api.registerTool(knowledgeStatusTool);
+api.registerTool(knowledgeDoctorTool);
 api.registerTool(knowledgeClearTool);
 ```
 
@@ -259,7 +262,7 @@ promptSnippet: "Search indexed knowledge bases (docs, code, specs) for relevant 
 promptGuidelines: [
   "Before answering questions about project architecture, APIs, or domain concepts, search the knowledge base first",
   "When the user references documentation or specs, check if they are indexed and search them",
-  "Use hybrid by default, fast for exact symbols, semantic for conceptual wording, adaptive for surrounding context, and deep for high-stakes verification",
+  "Use hybrid by default, fast for exact symbols, semantic for conceptual wording, adaptive for surrounding context, deep for high-stakes verification, or auto when the tool should choose and retry",
 ]
 ```
 
@@ -345,7 +348,7 @@ Active watchers: 2
 Index health: ✓ no stale chunks
 ```
 
-Health checks: staleness detection, orphan cleanup, coverage %, embedding drift warning.
+Health checks: staleness detection, orphan cleanup, coverage %, skipped file counts/reasons, embedding drift warning, and stuck indexing detection. `knowledge_doctor` converts these signals into a health score and concrete actions.
 
 ---
 
@@ -374,6 +377,7 @@ Environment overrides:
 | `knowledge update` | `knowledge_update { kb_id, path }` | + incremental (only changed) |
 | `knowledge show` | `knowledge_show {}` | + health indicators |
 | `knowledge status` | `knowledge_status {}` | + granular progress % |
+| `knowledge doctor` | `knowledge_doctor {}` | + health score and recommended actions |
 | `knowledge clear` | `knowledge_clear {}` | identical |
 
 ---
@@ -389,7 +393,7 @@ Environment overrides:
 | No code-aware chunking | AST splitting (TS/JS/Python/Go/Rust). |
 | Server-dependent embedding | Local ONNX. Works offline, no API costs. |
 | Opaque progress | Real-time: files/chunks/embeddings + ETA. |
-| No quality metrics | Staleness, orphans, coverage %, drift. |
+| No quality metrics | Staleness, orphans, coverage %, skipped files, stuck jobs, health score. |
 | No metadata filters | Filter by file_type, kb_name, path, language. |
 | No dedup | Content-addressed update diff avoids re-embedding unchanged chunks. |
 

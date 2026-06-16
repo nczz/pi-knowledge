@@ -8,6 +8,7 @@ import {
 	contentHash,
 	preTokenizeForFTS,
 	walkDir,
+	walkDirDetailed,
 } from "../../src/indexer/chunker.ts";
 
 describe("preTokenizeForFTS", () => {
@@ -120,6 +121,23 @@ describe("walkDir", () => {
 		expect(paths).not.toContain("docs/knowledge-base-full-evaluation-report.md");
 		expect(paths).not.toContain("knowledge-backup.jsonl");
 		expect(paths).not.toContain("browsers/Chromium.app/Contents/Resources/en.lproj/locale.pak");
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("reports skipped file reasons and samples", () => {
+		rmSync(tmp, { recursive: true, force: true });
+		mkdirSync(join(tmp, "node_modules"), { recursive: true });
+		writeFileSync(join(tmp, "src.ts"), "export const token = 'ScanToken';");
+		writeFileSync(join(tmp, "node_modules", "ignored.js"), "ignored");
+		writeFileSync(join(tmp, "image.png"), Buffer.from([0x89, 0x50, 0x00]));
+
+		const scan = walkDirDetailed(tmp);
+
+		expect(scan.files.map((file) => file.relPath)).toContain("src.ts");
+		expect(scan.skipped.total).toBeGreaterThanOrEqual(2);
+		expect(scan.skipped.by_reason.ignored).toBeGreaterThan(0);
+		expect(scan.skipped.by_reason.binary).toBeGreaterThan(0);
+		expect(scan.skipped.samples.some((sample) => sample.path.includes("node_modules"))).toBe(true);
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });

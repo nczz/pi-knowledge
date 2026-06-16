@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { walkDir } from "../indexer/chunker.ts";
+import { type ScanResult, walkDirDetailed } from "../indexer/chunker.ts";
 import { getChunksByKB, type KnowledgeBase } from "../storage/sqlite.ts";
 
 export interface DiagnosticResult {
@@ -15,6 +15,7 @@ export interface DiagnosticResult {
 	coverage_percent: number; // indexed files / total scannable files
 	total_source_files: number;
 	indexed_files: number;
+	skipped_files: ScanResult["skipped"];
 }
 
 const DEFAULT_STALE_INDEXING_MS = 10 * 60 * 1000;
@@ -37,6 +38,17 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 		coverage_percent: 100,
 		total_source_files: 0,
 		indexed_files: kb.file_count,
+		skipped_files: {
+			total: 0,
+			by_reason: {
+				ignored: 0,
+				oversized: 0,
+				binary: 0,
+				unreadable: 0,
+				inaccessible: 0,
+			},
+			samples: [],
+		},
 	};
 
 	if (!kb.source_path || kb.source_type === "url" || !existsSync(kb.source_path)) {
@@ -47,7 +59,11 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 	const currentFiles = new Set<string>();
 	const isDirectory = statSync(kb.source_path).isDirectory();
 	try {
-		const scanned = isDirectory ? walkDir(kb.source_path).map((f) => f.relPath) : [kb.source_path];
+		const scanResult = isDirectory
+			? walkDirDetailed(kb.source_path)
+			: { files: [{ relPath: kb.source_path }], skipped: result.skipped_files };
+		result.skipped_files = scanResult.skipped;
+		const scanned = scanResult.files.map((f) => f.relPath);
 		for (const f of scanned) currentFiles.add(f);
 	} catch {
 		return result;
