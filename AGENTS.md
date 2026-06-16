@@ -93,6 +93,7 @@
 - `knowledge_search` score semantics are "higher is better" after leaving search modules, including BM25 fast mode.
 - `knowledge_status` diagnostics must handle directory, single-file, text, and URL KBs without false stale/orphan reports, and must surface stale `indexing` state left by interrupted runs. `knowledge_search` must skip non-ready/non-stale KBs rather than searching partial `indexing` or `error` data.
 - File watching must keep the polling fallback; native `fs.watch` can fail or stop under local resource limits.
+- Local Transformers.js models must run in the isolated model worker, not in the Pi TUI process. Native idle-dispose is opt-in only because macOS arm64 `/quit` can abort with `mutex lock failed` after `onnxruntime-node` is loaded in the main process.
 
 ## File Organization
 

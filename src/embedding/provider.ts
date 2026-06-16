@@ -1,12 +1,5 @@
-import { join } from "node:path";
-import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
+import { embedInModelWorker } from "../model-worker-client.ts";
 
-type FeatureExtractionPipeline = {
-	(input: string, options: { pooling: "mean"; normalize: true }): Promise<{ data: ArrayLike<number> }>;
-	dispose(): Promise<void> | void;
-};
-
-let pipelineInstance: FeatureExtractionPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 let disposePromise: Promise<void> | null = null;
 let activeRuns = 0;
@@ -15,22 +8,7 @@ const idleWaiters: Array<() => void> = [];
 
 const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_000);
 const EMBEDDING_CONFIG = process.env.PI_KNOWLEDGE_EMBEDDING ?? "local:multilingual-e5-small";
-
-function getModelCacheDir(): string {
-	return join(getDefaultKnowledgeDir(), "models");
-}
-
-async function loadPipeline(): Promise<FeatureExtractionPipeline> {
-	if (pipelineInstance) return pipelineInstance;
-	if (disposePromise) await disposePromise;
-	const { pipeline, env } = await import("@huggingface/transformers");
-	env.cacheDir = getModelCacheDir();
-	pipelineInstance = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", {
-		quantized: true,
-		dtype: "fp32",
-	});
-	return pipelineInstance;
-}
+const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
 
 function clearIdleTimer(): void {
 	if (disposeTimer) clearTimeout(disposeTimer);
@@ -40,6 +18,7 @@ function clearIdleTimer(): void {
 function scheduleIdleDispose(): void {
 	if (activeRuns > 0 || disposeRequested) return;
 	clearIdleTimer();
+	if (!ENABLE_NATIVE_IDLE_DISPOSE) return;
 	disposeTimer = setTimeout(() => dispose(), IDLE_TIMEOUT_MS);
 }
 
@@ -65,13 +44,7 @@ export async function dispose(): Promise<void> {
 	if (disposePromise) return disposePromise;
 	disposeRequested = true;
 	await waitForNoActiveRuns();
-	const instance = pipelineInstance;
-	pipelineInstance = null;
-	if (!instance) {
-		disposeRequested = false;
-		return;
-	}
-	disposePromise = Promise.resolve(instance.dispose()).finally(() => {
+	disposePromise = Promise.resolve().finally(() => {
 		disposePromise = null;
 		disposeRequested = false;
 	});
@@ -115,19 +88,12 @@ export async function embedTexts(
 			/* fallback to local */
 		}
 	}
-	const pipe = await loadPipeline();
 	beginRun();
-	const results: Float32Array[] = [];
 	try {
-		for (const text of texts) {
-			if (signal?.aborted) throw new Error("Cancelled");
-			const output = await pipe(`${prefix}: ${text}`, { pooling: "mean", normalize: true });
-			results.push(new Float32Array(output.data));
-		}
+		return await embedInModelWorker(texts, prefix, signal);
 	} finally {
 		endRun();
 	}
-	return results;
 }
 
 export async function embedQuery(text: string): Promise<Float32Array> {

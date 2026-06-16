@@ -21,6 +21,7 @@ import {
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
+import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
 import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
@@ -1584,6 +1585,7 @@ export class KnowledgeEngine {
 			await prepareEmbeddingForShutdown();
 			await prepareRerankerForShutdown();
 		}
+		shutdownModelWorker();
 		this.db?.close();
 		this.db = null;
 	}

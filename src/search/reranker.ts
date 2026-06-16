@@ -1,27 +1,12 @@
-import { join } from "node:path";
-import { getDefaultKnowledgeDir } from "../storage/sqlite.ts";
+import { rerankInModelWorker } from "../model-worker-client.ts";
 
-type RerankerPipeline = {
-	(input: { text: string; text_pair: string }): Promise<{ score?: number } | Array<{ score?: number }>>;
-	dispose(): Promise<void> | void;
-};
-
-let rerankerPipeline: RerankerPipeline | null = null;
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 let disposePromise: Promise<void> | null = null;
 let activeRuns = 0;
 let disposeRequested = false;
 const idleWaiters: Array<() => void> = [];
 const IDLE_MS = 30_000;
-
-async function load(): Promise<RerankerPipeline> {
-	if (rerankerPipeline) return rerankerPipeline;
-	if (disposePromise) await disposePromise;
-	const { pipeline, env } = await import("@huggingface/transformers");
-	env.cacheDir = join(getDefaultKnowledgeDir(), "models");
-	rerankerPipeline = await pipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2");
-	return rerankerPipeline;
-}
+const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
 
 function clearTimer(): void {
 	if (disposeTimer) clearTimeout(disposeTimer);
@@ -31,6 +16,7 @@ function clearTimer(): void {
 function scheduleDispose(): void {
 	if (activeRuns > 0 || disposeRequested) return;
 	clearTimer();
+	if (!ENABLE_NATIVE_IDLE_DISPOSE) return;
 	disposeTimer = setTimeout(() => disposeReranker(), IDLE_MS);
 }
 
@@ -56,13 +42,7 @@ export async function disposeReranker(): Promise<void> {
 	if (disposePromise) return disposePromise;
 	disposeRequested = true;
 	await waitForNoActiveRuns();
-	const instance = rerankerPipeline;
-	rerankerPipeline = null;
-	if (!instance) {
-		disposeRequested = false;
-		return;
-	}
-	disposePromise = Promise.resolve(instance.dispose()).finally(() => {
+	disposePromise = Promise.resolve().finally(() => {
 		disposePromise = null;
 		disposeRequested = false;
 	});
@@ -85,20 +65,10 @@ export async function rerank(
 	topK: number,
 ): Promise<Array<{ chunkId: string; score: number }>> {
 	if (candidates.length === 0) return [];
-	const pipe = await load();
 	beginRun();
-
-	const results: Array<{ chunkId: string; score: number }> = [];
 	try {
-		for (const c of candidates) {
-			const output = await pipe({ text: query, text_pair: c.content });
-			const score = Array.isArray(output) ? (output[0]?.score ?? 0) : (output?.score ?? 0);
-			results.push({ chunkId: c.chunkId, score });
-		}
+		return await rerankInModelWorker(query, candidates, topK);
 	} finally {
 		endRun();
 	}
-
-	results.sort((a, b) => b.score - a.score);
-	return results.slice(0, topK);
 }

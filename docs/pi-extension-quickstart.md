@@ -208,7 +208,9 @@ Pi binary 會提供 virtual modules：
 - Type-only imports from Pi packages are acceptable when they are erased by Node strip-only TypeScript.
 - Heavy/optional dependencies 可用 dynamic import 延遲載入，但要在 AGENTS.md 記錄為例外。
 
-### Memory 管理 (Lazy Load + Idle Dispose)
+### Memory 管理 (Lazy Load + Safe Shutdown)
+
+一般 JS/檔案/DB 資源可以 idle dispose；native ML runtime 不能直接套用這個範例。`@huggingface/transformers` / `onnxruntime-node` 在 macOS arm64 已驗證 `/quit` 可能造成 `mutex lock failed` abort。local model 應在隔離 worker process 中執行，Pi TUI 主程序不要直接 import native ONNX backend。
 
 ```typescript
 let resource: any = null;
@@ -221,8 +223,8 @@ async function getResource() {
 }
 
 function resetTimer() {
-  if (timer) clearTimeout(timer);
-  timer = setTimeout(() => dispose(), 30_000); // 30s idle
+	if (timer) clearTimeout(timer);
+	timer = setTimeout(() => dispose(), 30_000); // 30s idle
 }
 
 async function dispose() {
@@ -240,7 +242,20 @@ async execute() {
 // 在 session_shutdown 中:
 pi.on("session_shutdown", async () => {
   await dispose();
-  await new Promise(r => setTimeout(r, 500)); // native cleanup delay
+});
+```
+
+對 ONNX/native model：
+
+```typescript
+// Prefer a model worker. Do not import onnxruntime-node in Pi's TUI process.
+const model = await requestModelWorker({ task, modelId, input });
+
+pi.on("session_shutdown", async () => {
+  clearIdleTimer();
+  await waitForNoActiveRuns();
+  shutdownModelWorkerWithSigkill();
+  closeDatabaseAndWatchers();
 });
 ```
 
@@ -328,10 +343,10 @@ npm publish
 |------|------|
 | tool 沒有被 LLM 呼叫 | 確認 description 清楚描述「何時用」+ promptGuidelines 指引 |
 | native dep 載入失敗 | 確認 tree-sitter 版本配對；確認 `pi install` 有跑 postinstall |
-| TUI render crash | Pi 自動 fallback 到預設顯示，不會 crash extension |
+| TUI render crash | 不要提供未完整驗證的 custom renderer；先用 Pi 預設 renderer |
 | Session state 遺失 | 用 filesystem 持久化，不要存在記憶體 |
 | 多個 Pi session 衝突 | SQLite WAL mode + busy_timeout |
-| Exit 時 native crash | onnxruntime macOS bug，加 500ms shutdown delay |
+| Exit 時 native crash | onnxruntime macOS bug；不要在 idle timer 或 session_shutdown 主動 dispose ONNX pipeline |
 | `process.env` 讀不到 | env var 在 extension load 時讀取（module scope），不是 tool execute 時 |
 
 ---

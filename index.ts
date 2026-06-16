@@ -5,92 +5,6 @@ import { getActiveWatcherCount, startWatcher, stopAllWatchers } from "./src/watc
 
 type Schema = Record<string, unknown> & { optional?: true };
 type ContextMessage = { role: string; content: string };
-type ThemeLike = {
-	fg?: (name: string, text: string) => string;
-};
-type RenderContextLike = {
-	lastComponent?: RenderableText;
-};
-type RenderOptionsLike = {
-	expanded?: boolean;
-};
-type ToolResultLike = {
-	content?: Array<{ type: string; text?: string }>;
-};
-
-const MAX_RENDER_LINE_WIDTH = 80;
-const ESCAPE = "\u001B";
-
-function ansiSequenceLength(line: string, offset: number): number {
-	if (line[offset] !== ESCAPE || line[offset + 1] !== "[") return 0;
-	for (let i = offset + 2; i < line.length; i++) {
-		const codePoint = line.charCodeAt(i);
-		if (codePoint >= 0x40 && codePoint <= 0x7e) return i - offset + 1;
-	}
-	return 0;
-}
-
-function charRenderWidth(char: string): number {
-	const codePoint = char.codePointAt(0);
-	if (codePoint === undefined) return 0;
-	if (
-		(codePoint >= 0x1100 && codePoint <= 0x115f) ||
-		(codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
-		(codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
-		(codePoint >= 0xf900 && codePoint <= 0xfaff) ||
-		(codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
-		(codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
-		(codePoint >= 0xff00 && codePoint <= 0xff60) ||
-		(codePoint >= 0xffe0 && codePoint <= 0xffe6)
-	) {
-		return 2;
-	}
-	return 1;
-}
-
-function truncateRenderLine(line: string): string {
-	let visibleWidth = 0;
-	let output = "";
-	for (let i = 0; i < line.length; ) {
-		const ansiLength = ansiSequenceLength(line, i);
-		if (ansiLength > 0) {
-			output += line.slice(i, i + ansiLength);
-			i += ansiLength;
-			continue;
-		}
-		const codePoint = line.codePointAt(i);
-		if (codePoint === undefined) break;
-		const char = String.fromCodePoint(codePoint);
-		const width = charRenderWidth(char);
-		if (visibleWidth + width > MAX_RENDER_LINE_WIDTH - 1) return `${output}…`;
-		output += char;
-		visibleWidth += width;
-		i += char.length;
-	}
-	return output;
-}
-
-/**
- * Minimal duck-type shim for @earendil-works/pi-tui Text component.
- * Allows startup without Pi virtual module while implementing the render host methods this extension needs.
- */
-class RenderableText {
-	private text: string;
-
-	constructor(text = "") {
-		this.text = text;
-	}
-
-	setText(text: string): void {
-		this.text = text;
-	}
-
-	invalidate(): void {}
-
-	render(): string[] {
-		return this.text.split("\n").map(truncateRenderLine);
-	}
-}
 
 const Type = {
 	Object(properties: Record<string, Schema>): Schema {
@@ -127,16 +41,6 @@ const Type = {
 		return { ...schema, optional: true };
 	},
 };
-
-function themed(theme: ThemeLike, name: string, text: string): string {
-	return theme.fg ? theme.fg(name, text) : text;
-}
-
-function renderText(context: RenderContextLike, text: string): RenderableText {
-	const component = context.lastComponent ?? new RenderableText();
-	component.setText(text);
-	return component;
-}
 
 const engine = new KnowledgeEngine();
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
@@ -365,19 +269,6 @@ export default function (pi: ExtensionAPI) {
 				Type.Boolean({ description: "Include ranking diagnostics and mode/fallback details in the result" }),
 			),
 		}),
-		renderCall(args, theme: ThemeLike, context: RenderContextLike) {
-			const query = typeof args.query === "string" ? args.query : "";
-			const mode = typeof args.mode === "string" ? args.mode : "hybrid";
-			return renderText(
-				context,
-				`${themed(theme, "accent", "Search")}: "${query}" ${themed(theme, "muted", `(${mode})`)}`,
-			);
-		},
-		renderResult(result: ToolResultLike, options: RenderOptionsLike, _theme: ThemeLike, context: RenderContextLike) {
-			const text = result.content?.find((item) => item.type === "text")?.text ?? "";
-			const lines = options.expanded ? text : text.split("\n").slice(0, 5).join("\n");
-			return renderText(context, lines);
-		},
 		async execute(_id, params) {
 			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params;
 			const filters = file_type ? { file_type } : undefined;
@@ -399,7 +290,7 @@ export default function (pi: ExtensionAPI) {
 			if (response.retry_modes?.length) output += ` — retried: ${response.retry_modes.join(", ")}`;
 			output += ":\n\n";
 			if (response.warnings?.length) {
-				output = `⚠️ ${response.warnings.join("\n⚠️ ")}\n\n${output}`;
+				output = `Warnings:\n- ${response.warnings.join("\n- ")}\n\n${output}`;
 			}
 			output += response.results
 				.map((r, i) => {

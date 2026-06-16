@@ -161,7 +161,7 @@ interface ToolDefinition<TParams extends TSchema> {
 | Event | 用途 | pi-knowledge 使用 |
 |-------|------|------------------|
 | `session_start` | 初始化 | ✅ warm up index, check staleness |
-| `session_shutdown` | Cleanup | ✅ flush writes, dispose model, stop watcher |
+| `session_shutdown` | Cleanup | ✅ flush writes, stop watcher, close DB; do not actively dispose native ONNX models |
 | `before_agent_start` | 修改 system prompt | ✅ inject KB metadata |
 | `context` | 修改 messages | ✅ auto-inject search results (opt-in) |
 | `tool_call` | 攔截 | ❌ 不需要 |
@@ -217,5 +217,5 @@ export function loadClipboardNative() {
 4. **Lifecycle**: session_start 初始化 → before_agent_start 注入 metadata → session_shutdown cleanup
 5. **進度**: onUpdate callback in execute() + ctx.ui.notify
 6. **Background work**: session_start 中 fire-and-forget 的 staleness check
-7. **Model dispose**: session_shutdown 確保釋放
+7. **Model lifecycle**: local models are lazy-loaded in an isolated worker process; Pi's TUI process never imports `onnxruntime-node`, and shutdown kills the worker after active runs finish because native teardown can crash on `/quit` on macOS arm64.
 8. **RPC 相容**: 標準 execute() 在所有 mode 都能工作

@@ -177,15 +177,18 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 **症狀**: Pi 結束時 `libc++abi: terminating due to uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument`
 
-**原因**: [microsoft/onnxruntime#25038](https://github.com/microsoft/onnxruntime/issues/25038) — OrtEnv destructor 在 exit() 時 lock 已失效的 thread pool mutex。macOS arm64 + onnxruntime 1.22.0。
+**原因**: [microsoft/onnxruntime#25038](https://github.com/microsoft/onnxruntime/issues/25038) — OrtEnv destructor 在 exit() 時 lock 已失效的 thread pool mutex。已在 macOS arm64 + `@huggingface/transformers@3.8.1` transitive `onnxruntime-node@1.21.0` 重現。
 
 **影響**: Session 和 KB 資料通常已在 crash 前存檔完成，但 abort 會讓使用者誤判 session 不乾淨，必須當成品質問題處理。
 
 **緩解**:
 
-- idle timer 30s + session_shutdown 後 500ms delay，讓 native thread pool 有時間在 exit 前清理。
-- Embedding/reranker dispose 必須是 idempotent。Idle timer 和 `session_shutdown` 可能同時觸發 dispose；必須先清空 pipeline reference 再 await native `dispose()`，避免同一個 ONNX session 被 double-dispose。
-- Idle timer 不能在 active model run 中 dispose。大型 `knowledge_add` 可能 embedding 上千 chunks，超過 30 秒；必須在 batch 開始時清掉 timer，等 batch 結束後才重新啟動 idle countdown，否則會在下一個 chunk 推論時出現 `Session already disposed`。
-- Pi `session_shutdown` 不應主動 dispose ONNX pipelines。關閉 session 時只清 idle timers、等待 active runs 完成、關閉 DB/watcher；讓 process exit 接管 native runtime teardown，避免在 Pi shutdown path 觸發 onnxruntime native mutex crash。
+- 預設本地模型在隔離子程序中載入 transformers.js / `onnxruntime-node`，Pi TUI 主程序不得直接 import native ONNX backend。
+- 預設不要在 Pi 互動 session 內 idle-dispose native ONNX pipelines。已驗證「Pi 主程序載入 native backend 後，`knowledge_search` 後 idle 超過 30 秒再 `/quit`」會噴 `mutex lock failed`。
+- `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 只作為明確 opt-in 記憶體回收選項；商用品質預設必須偏向穩定退出。
+- `session_shutdown` 等待 active runs 後以 `SIGKILL` 收掉 model worker，避免 native destructor 在 Pi TUI 主程序 teardown 路徑執行。
+- Embedding/reranker dispose 仍必須是 idempotent。測試或明確 dispose path 可能重複呼叫；必須先清空 pipeline reference 再 await native `dispose()`，避免同一個 ONNX session 被 double-dispose。
+- Pi `session_shutdown` 不應主動 dispose ONNX pipelines。關閉 session 時只清 timers、等待 active runs 完成、關閉 DB/watcher；讓 process exit 接管 native runtime teardown，避免在 Pi shutdown path 觸發 onnxruntime native mutex crash。
+- 不要在 extension 內提供未完整驗證的 custom TUI renderer。已驗證 tool result/warning 行寬超過 Pi TUI 寬度時會先觸發 `Rendered line ... exceeds terminal width`，接著因 native runtime teardown 出現同一個 `mutex lock failed` 二次崩潰。
 
 **根本修復**: 等 Microsoft 修正 → 升級 onnxruntime。無法從 JS 端解決。

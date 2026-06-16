@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1] - 2026-06-16
+
+### Fixed
+- Isolated local Transformers.js embedding and reranker models in a model worker process so Pi's TUI process no longer loads `onnxruntime-node`, fixing macOS arm64 `/quit` aborts after knowledge-base tool usage.
+- Removed the custom `knowledge_search` TUI renderer and switched warning output to plain text to avoid Pi TUI line-width render crashes.
+- Kept native ONNX idle disposal opt-in only, prioritizing stable session shutdown over aggressive memory reclamation.
+
+### Changed
+- Documented the native model lifecycle contract, the onnxruntime teardown pitfall, and the worker-based shutdown strategy in contributor and architecture docs.
+
 ## [0.4.0] - 2026-06-16
 
 ### Added

@@ -96,7 +96,8 @@ const output = await extractor('query: 認證流程', { pooling: 'mean', normali
 | Batch 32 chunks | ~200-400ms |
 | 1000 chunks 全量 | ~15-30s |
 | 記憶體 (model loaded) | ~200-300 MB |
-| 記憶體 (idle, disposed) | ~5 MB |
+| 記憶體 (unused) | ~5 MB |
+| 記憶體 (after local model use) | Model remains resident until process exit by default |
 
 ---
 
@@ -115,7 +116,10 @@ const output = await extractor('query: 認證流程', { pooling: 'mean', normali
 | 情境 | 方案 |
 |------|------|
 | Quantized 品質不足 | `PI_KNOWLEDGE_MODEL_QUALITY=full` (118 MB) |
-| 零 native dep 需求 | `PI_KNOWLEDGE_BACKEND=wasm` |
+| 零 native dep 需求 | Not currently supported by the Node bundle; local models run in an isolated worker |
+| 明確啟用 native idle dispose | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` |
+
+> Stability note: local models run in a worker process and are not idle-disposed by default. On macOS arm64, loading the native ONNX backend in the Pi TUI process can make Pi abort on `/quit` with `mutex lock failed`.
 | 有 API key | `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small` |
 
 ---
