@@ -46,9 +46,12 @@
 
 **決策**:
 - Embedding cache key: `SHA-256(content)` — 只看內容
-- Chunk identity: `SHA-256(content + filePath + startLine)` — KB 內唯一
+- Chunk identity: `SHA-256(filePath + fileType + startLine + endLine + metadataJson + content)` — KB 內唯一
 
-**理由**: 檔案開頭新增 code 時，後面 chunk position 變但 content 不變 → 不需 re-embed。
+**理由**:
+- Embedding cache 可以只看 content，因為同一段文字的語意向量可重用。
+- Chunk identity 不能只看 content，否則不同檔案或同檔不同位置的相同內容會在 update 時互相覆蓋，造成刪除檔案後 stale chunks/orphans 留在 KB。
+- 目前 SQLite `content_hash` 欄位承擔的是 chunk identity，不是 embedding cache key；因此必須包含 path、line 與 metadata。若未來新增真正 embedding cache，應使用獨立欄位或獨立 cache key。
 
 ---
 
@@ -214,18 +217,26 @@
 **背景**: 真實專案可能包含數百到數十萬個可索引 chunk。若 `knowledge_add`、`knowledge_update` 或 `knowledge_import` 一次持有全部 embedding input、全部 Float32 vectors，再用單一 `Buffer.alloc` 寫 vector file，會讓大型 codebase 建 KB 時不穩定，也讓使用者無法判斷還要等多久。
 
 **決策**:
+- directory scan 用 iterator/callback 型 API 串流產生檔案，production add/update path 不先收集所有 `ScannedFile.content`；diagnostics 使用 metadata-only scanner，不讀取完整檔案內容。
+- binary detection 只讀固定 sample，不用 `readFileSync` 讀完整檔案後再取前段。
 - embedding batch 固定上限，目前為 64 chunks。
 - 每個 batch 成功後立即寫入 SQLite 並更新 KB counts，讓 `updated_at` 代表索引仍有進展。
 - vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
-- add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。
+- update 以 hash manifest 判斷新增/刪除/未變更，新增向量先寫入 temporary vector file，最後依 SQLite chunk iterator 重建正式 vector file。
+- 刪除 chunks 必須分批執行，避免大型 KB 超過 SQLite parameter limit。
+- add/update/import 都必須提供 progress；能估算時包含 elapsed 與 ETA。未知總量的 directory scan 回報 phase、已掃描檔案、chunk 數、skipped 數與 elapsed，不為 ETA 先做全量內容掃描。
+- add/update/import 的 job state 必須持久化到 SQLite，包含 operation、status、phase、last message、started_at、last_progress_at、processed files/chunks、skipped、added、removed、unchanged 與 error_message。
 - `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
+- `knowledge_status` diagnostics 需用 chunk iterator 與 streaming source scan，不載入全部 chunk content 或全部來源內容，並以 persisted job state 區分「仍在進展」和「卡住」。
 - `knowledge_doctor` 以 health score + blocking/warning/info issues + concrete action 收斂使用者下一步。
 - `knowledge_search` 跳過 `indexing` 和 `error` KB，只搜尋 `ready` 或 `stale` KB。
-- semantic/hybrid search 以 vector file ranged reads 掃描 top-K，不把整個 KB 的 Float32 vectors 放進長駐 cache。
+- semantic/hybrid search 以 vector file ranged reads 掃描 top-K，不把整個 KB 的 Float32 vectors 或全部 chunk IDs 放進長駐 cache。
 
 **理由**:
 - 商用品質的索引行為應先求穩定完成，再求速度。
 - 批次寫入讓大型專案在模型推論、SQLite 寫入、向量檔輸出三個階段都有可觀測進度。
+- persisted job state 讓使用者可以在下一個 prompt、另一個狀態查詢或 TUI 更新消失後仍知道索引目前在哪個階段，而不是只能看到 `Working...`。
+- 串流掃描讓 400 萬行等級 codebase 的主要記憶體消耗由「全部檔案內容 + 全部 chunks + 全部 vectors」降為「當前檔案 + embedding batch + hash/id metadata + top-K candidates」。
 - 串流向量檔避免最後一次把所有向量複製到同一個巨大 buffer。
 - query-time streaming scan 的時間複雜度仍是 O(N)，但記憶體用量由 O(N vectors) 降到 O(topK vectors)，更符合本階段「再大的 codebase 先穩定可跑」的目標。
 

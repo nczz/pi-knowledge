@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, type Dirent, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 import ignore from "ignore";
 import type { ChunkInsert } from "../storage/sqlite.ts";
@@ -115,6 +115,13 @@ export interface ScannedFile {
 	fileType: string;
 }
 
+export interface ScannableFile {
+	path: string; // absolute path
+	relPath: string; // relative to root
+	fileType: string;
+	size: number;
+}
+
 export interface SkippedScanEntry {
 	path: string;
 	reason: "ignored" | "oversized" | "binary" | "unreadable" | "inaccessible";
@@ -132,7 +139,7 @@ export interface ScanResult {
 
 const MAX_SKIPPED_SAMPLES = 25;
 
-function emptySkipped(): ScanResult["skipped"] {
+export function createSkippedScanStats(): ScanResult["skipped"] {
 	return {
 		total: 0,
 		by_reason: {
@@ -150,6 +157,15 @@ function addSkipped(skipped: ScanResult["skipped"], entry: SkippedScanEntry): vo
 	skipped.total++;
 	skipped.by_reason[entry.reason]++;
 	if (skipped.samples.length < MAX_SKIPPED_SAMPLES) skipped.samples.push(entry);
+}
+
+export function summarizeSkippedScan(skipped: ScanResult["skipped"]): string {
+	return (
+		Object.entries(skipped.by_reason)
+			.filter(([, count]) => count > 0)
+			.map(([reason, count]) => `${reason}: ${count}`)
+			.join(", ") || "none"
+	);
 }
 
 function detectFileType(filePath: string): string {
@@ -191,20 +207,21 @@ function detectFileType(filePath: string): string {
 
 function isBinaryFile(filePath: string): boolean {
 	if (BINARY_EXTENSIONS.has(extname(filePath).toLowerCase())) return true;
+	let fd: number | undefined;
 	try {
-		const fd = readFileSync(filePath, { flag: "r" });
-		const sample = fd.subarray(0, 512);
-		return sample.includes(0x00);
+		fd = openSync(filePath, "r");
+		const sample = Buffer.alloc(512);
+		const bytesRead = readSync(fd, sample, 0, sample.length, 0);
+		if (bytesRead === 0) return false;
+		return sample.subarray(0, bytesRead).includes(0x00);
 	} catch {
 		return true;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
-export function walkDir(dirPath: string): ScannedFile[] {
-	return walkDirDetailed(dirPath).files;
-}
-
-export function walkDirDetailed(dirPath: string): ScanResult {
+function buildIgnoreMatcher(dirPath: string): ReturnType<typeof ignore> {
 	const ig = ignore();
 	ig.add(DEFAULT_IGNORE);
 
@@ -213,10 +230,16 @@ export function walkDirDetailed(dirPath: string): ScanResult {
 		ig.add(readFileSync(gitignorePath, "utf-8"));
 	}
 
-	const results: ScannedFile[] = [];
-	const skipped = emptySkipped();
+	return ig;
+}
 
-	function walk(dir: string): void {
+export function* iterateScannableFiles(
+	dirPath: string,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+): Generator<ScannableFile> {
+	const ig = buildIgnoreMatcher(dirPath);
+
+	function* walk(dir: string): Generator<ScannableFile> {
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -238,29 +261,65 @@ export function walkDirDetailed(dirPath: string): ScanResult {
 					addSkipped(skipped, { path: `${relPath}/`, reason: "ignored" });
 					continue;
 				}
-				walk(fullPath);
+				yield* walk(fullPath);
 			} else if (entry.isFile()) {
-				const stat = statSync(fullPath);
-				if (stat.size > MAX_FILE_SIZE) {
-					addSkipped(skipped, { path: relPath, reason: "oversized", size: stat.size });
+				let size = 0;
+				try {
+					size = statSync(fullPath).size;
+				} catch {
+					addSkipped(skipped, { path: relPath, reason: "unreadable" });
+					continue;
+				}
+				if (size > MAX_FILE_SIZE) {
+					addSkipped(skipped, { path: relPath, reason: "oversized", size });
 					continue;
 				}
 				if (isBinaryFile(fullPath)) {
-					addSkipped(skipped, { path: relPath, reason: "binary", size: stat.size });
+					addSkipped(skipped, { path: relPath, reason: "binary", size });
 					continue;
 				}
 
-				try {
-					const content = readFileSync(fullPath, "utf-8");
-					results.push({ path: fullPath, relPath, content, fileType: detectFileType(fullPath) });
-				} catch {
-					addSkipped(skipped, { path: relPath, reason: "unreadable", size: stat.size });
-				}
+				yield { path: fullPath, relPath, fileType: detectFileType(fullPath), size };
 			}
 		}
 	}
 
-	walk(dirPath);
+	yield* walk(dirPath);
+}
+
+export function* iterateScannedFiles(
+	dirPath: string,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+): Generator<ScannedFile> {
+	for (const file of iterateScannableFiles(dirPath, skipped)) {
+		try {
+			const content = readFileSync(file.path, "utf-8");
+			yield { ...file, content };
+		} catch {
+			addSkipped(skipped, { path: file.relPath, reason: "unreadable", size: file.size });
+		}
+	}
+}
+
+export async function iterateScannedFilesAsync(
+	dirPath: string,
+	onFile: (file: ScannedFile) => Promise<void> | void,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+): Promise<ScanResult["skipped"]> {
+	for (const file of iterateScannedFiles(dirPath, skipped)) {
+		await onFile(file);
+	}
+	return skipped;
+}
+
+export function walkDir(dirPath: string): ScannedFile[] {
+	return walkDirDetailed(dirPath).files;
+}
+
+export function walkDirDetailed(dirPath: string): ScanResult {
+	const results: ScannedFile[] = [];
+	const skipped = createSkippedScanStats();
+	for (const file of iterateScannedFiles(dirPath, skipped)) results.push(file);
 	return { files: results, skipped };
 }
 
@@ -287,6 +346,21 @@ export function preTokenizeForFTS(content: string): string {
 
 export function contentHash(content: string): string {
 	return createHash("sha256").update(content).digest("hex");
+}
+
+export function chunkIdentityHash(opts: {
+	content: string;
+	filePath: string;
+	fileType: string;
+	startLine: number;
+	endLine: number;
+	metadataJson: string;
+}): string {
+	return contentHash(
+		[opts.filePath, opts.fileType, String(opts.startLine), String(opts.endLine), opts.metadataJson, opts.content].join(
+			"\0",
+		),
+	);
 }
 
 function normalizeHeading(heading: string): string {
@@ -330,7 +404,7 @@ function makeChunk(
 ): Omit<ChunkInsert, "kb_id"> {
 	const metadata_json = JSON.stringify(metadata);
 	const chunk = {
-		content_hash: contentHash(content),
+		content_hash: chunkIdentityHash({ content, filePath, fileType, startLine, endLine, metadataJson: metadata_json }),
 		content,
 		content_tokenized: "",
 		file_path: filePath,

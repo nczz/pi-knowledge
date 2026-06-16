@@ -3,10 +3,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildChunkEmbeddingText,
+	chunkIdentityHash,
 	chunkMarkdown,
 	chunkText,
 	contentHash,
+	createSkippedScanStats,
+	iterateScannableFiles,
+	iterateScannedFiles,
 	preTokenizeForFTS,
+	summarizeSkippedScan,
 	walkDir,
 	walkDirDetailed,
 } from "../../src/indexer/chunker.ts";
@@ -25,6 +30,26 @@ describe("contentHash", () => {
 	it("consistent", () => expect(contentHash("x")).toBe(contentHash("x")));
 	it("64 hex chars", () => expect(contentHash("x")).toHaveLength(64));
 	it("different input → different hash", () => expect(contentHash("a")).not.toBe(contentHash("b")));
+});
+
+describe("chunkIdentityHash", () => {
+	const base = {
+		content: "same content",
+		fileType: "typescript",
+		startLine: 1,
+		endLine: 2,
+		metadataJson: "{}",
+	};
+
+	it("distinguishes duplicate content in different files", () => {
+		expect(chunkIdentityHash({ ...base, filePath: "a.ts" })).not.toBe(chunkIdentityHash({ ...base, filePath: "b.ts" }));
+	});
+
+	it("distinguishes duplicate content at different locations", () => {
+		expect(chunkIdentityHash({ ...base, filePath: "a.ts", startLine: 1, endLine: 2 })).not.toBe(
+			chunkIdentityHash({ ...base, filePath: "a.ts", startLine: 10, endLine: 11 }),
+		);
+	});
 });
 
 describe("chunkMarkdown", () => {
@@ -138,6 +163,39 @@ describe("walkDir", () => {
 		expect(scan.skipped.by_reason.ignored).toBeGreaterThan(0);
 		expect(scan.skipped.by_reason.binary).toBeGreaterThan(0);
 		expect(scan.skipped.samples.some((sample) => sample.path.includes("node_modules"))).toBe(true);
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("streams files while accumulating bounded skipped stats", () => {
+		rmSync(tmp, { recursive: true, force: true });
+		mkdirSync(join(tmp, "src"), { recursive: true });
+		for (let i = 0; i < 30; i++) writeFileSync(join(tmp, "src", `file-${i}.ts`), `export const value${i} = ${i};`);
+		for (let i = 0; i < 40; i++) writeFileSync(join(tmp, `image-${i}.png`), Buffer.from([0x89, 0x50, 0x00]));
+		const skipped = createSkippedScanStats();
+		const paths: string[] = [];
+
+		for (const file of iterateScannedFiles(tmp, skipped)) {
+			if (paths.length < 5) paths.push(file.relPath);
+		}
+
+		expect(paths).toHaveLength(5);
+		expect(skipped.samples.length).toBeLessThanOrEqual(25);
+		expect(summarizeSkippedScan(skipped)).toContain("binary");
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("can scan file metadata without loading file content", () => {
+		rmSync(tmp, { recursive: true, force: true });
+		mkdirSync(join(tmp, "src"), { recursive: true });
+		writeFileSync(join(tmp, "src", "large.ts"), `export const LargeMetadataToken = "${"x".repeat(1000)}";`);
+		const skipped = createSkippedScanStats();
+
+		const [file] = [...iterateScannableFiles(tmp, skipped)];
+
+		expect(file.relPath).toBe("src/large.ts");
+		expect(file.fileType).toBe("typescript");
+		expect(file.size).toBeGreaterThan(1000);
+		expect("content" in file).toBe(false);
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });

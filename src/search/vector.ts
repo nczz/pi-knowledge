@@ -10,6 +10,8 @@ export interface VectorFileSearchResult {
 	vectorsByChunkId: Map<string, Float32Array>;
 }
 
+type ChunkIdSource = Iterable<string | { id: string }>;
+
 function cosine(a: Float32Array, b: Float32Array): number {
 	let dot = 0;
 	for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
@@ -49,19 +51,23 @@ export function searchVector(
 export function searchVectorFile(
 	queryVec: Float32Array,
 	vectorPath: string,
-	chunkIds: string[],
+	chunkIds: ChunkIdSource,
 	limit = 50,
 ): VectorFileSearchResult {
 	const reader = openVectorReader(vectorPath);
 	if (!reader) return { results: [], vectorsByChunkId: new Map() };
 	try {
 		if (reader.dim !== queryVec.length) return { results: [], vectorsByChunkId: new Map() };
-		const count = Math.min(reader.count, chunkIds.length);
 		const scratch = new Float32Array(reader.dim);
 		const top: Array<VectorResult & { vector: Float32Array }> = [];
-		for (let i = 0; i < count; i++) {
-			if (!reader.readInto(i, scratch)) continue;
-			keepTopK(top, { chunkId: chunkIds[i], score: cosine(queryVec, scratch) }, scratch, limit);
+		let i = 0;
+		for (const chunkIdRef of chunkIds) {
+			if (i >= reader.count) break;
+			const vectorIndex = i;
+			i++;
+			if (!reader.readInto(vectorIndex, scratch)) continue;
+			const chunkId = typeof chunkIdRef === "string" ? chunkIdRef : chunkIdRef.id;
+			keepTopK(top, { chunkId, score: cosine(queryVec, scratch) }, scratch, limit);
 		}
 		const sorted = top.sort((a, b) => b.score - a.score);
 		const vectorsByChunkId = new Map(sorted.map((item) => [item.chunkId, item.vector]));

@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
-import { openDatabase } from "../../src/storage/sqlite.ts";
+import { getIndexingJob, openDatabase } from "../../src/storage/sqlite.ts";
 
 const TEST_DIR = "/tmp/pk-test-engine";
 
@@ -57,6 +57,26 @@ describe("KnowledgeEngine", () => {
 			await engine.initialize(TEST_DIR);
 			// Should not throw
 			expect(engine.list()).toEqual([]);
+		});
+
+		it("migrates existing databases to include indexing job state", async () => {
+			await engine.dispose();
+			const db = openDatabase(TEST_DIR);
+			db.prepare("UPDATE schema_version SET version = 1").run();
+			db.prepare("DROP TABLE indexing_jobs").run();
+			db.close();
+
+			engine = new KnowledgeEngine();
+			await engine.initialize(TEST_DIR);
+			const migrated = openDatabase(TEST_DIR);
+			const table = migrated
+				.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'indexing_jobs'")
+				.get();
+			const version = migrated.prepare("SELECT version FROM schema_version").get() as { version: number };
+			migrated.close();
+
+			expect(table).toBeTruthy();
+			expect(version.version).toBeGreaterThanOrEqual(2);
 		});
 	});
 
@@ -113,12 +133,20 @@ describe("KnowledgeEngine", () => {
 				const updates: string[] = [];
 
 				const { chunkCount } = await engine.add(projectDir, "Progress", (message) => updates.push(message));
+				const db = openDatabase(TEST_DIR);
+				const job = getIndexingJob(db, engine.list().find((kb) => kb.name === "Progress")?.id ?? "");
+				db.close();
 
 				expect(chunkCount).toBe(70);
+				expect(job?.status).toBe("succeeded");
+				expect(job?.phase).toBe("succeeded");
+				expect(job?.processed_files).toBe(70);
+				expect(job?.processed_chunks).toBe(70);
+				expect(job?.message).toContain("Ready: 70 chunks");
 				expect(updates.some((message) => message.includes("Scanning"))).toBe(true);
-				expect(updates.some((message) => message.includes("Found 70 files"))).toBe(true);
+				expect(updates.some((message) => message.includes("Scanned 70 files"))).toBe(true);
+				expect(updates.some((message) => message.includes("skipped 0"))).toBe(true);
 				expect(updates.some((message) => message.includes("Embedding batch"))).toBe(true);
-				expect(updates.some((message) => message.includes("ETA"))).toBe(true);
 				expect(updates.at(-1)).toContain("Ready: 70 chunks from 70 files");
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
@@ -174,6 +202,11 @@ describe("KnowledgeEngine", () => {
 			controller.abort();
 
 			await expect(engine.update("Cancellable", undefined, controller.signal)).rejects.toThrow("Cancelled");
+			const db = openDatabase(TEST_DIR);
+			const job = getIndexingJob(db, engine.list().find((kb) => kb.name === "Cancellable")?.id ?? "");
+			db.close();
+			expect(job?.status).toBe("cancelled");
+			expect(job?.message).toBe("Update cancelled.");
 		});
 
 		it("reports batched progress while embedding many changed chunks", async () => {
@@ -200,8 +233,30 @@ describe("KnowledgeEngine", () => {
 				expect(result.removed).toBe(70);
 				expect(updates.some((message) => message.includes("Embedding update batch"))).toBe(true);
 				expect(updates.some((message) => message.includes("Stored update batch"))).toBe(true);
-				expect(updates.some((message) => message.includes("ETA"))).toBe(true);
+				expect(updates.some((message) => message.includes("Changes: +70 -70 =0"))).toBe(true);
 				expect(updates.at(-1)).toBe("Ready: +70 -70 =0");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("removes one duplicate-content file without orphaning stale chunks", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-duplicate-update-"));
+			try {
+				const duplicateContent = "DuplicateIdentityToken shared content that appears in multiple source files.";
+				writeFileSync(join(projectDir, "a.txt"), duplicateContent);
+				writeFileSync(join(projectDir, "b.txt"), duplicateContent);
+				await engine.add(projectDir, "Duplicate Identity");
+
+				unlinkSync(join(projectDir, "b.txt"));
+				const result = await engine.update("Duplicate Identity");
+				const diagnostics = engine.diagnose().find((item) => item.kb_name === "Duplicate Identity");
+
+				expect(result.added).toBe(0);
+				expect(result.removed).toBe(1);
+				expect(result.unchanged).toBe(1);
+				expect(diagnostics?.orphan_files).toEqual([]);
+				expect(diagnostics?.indexed_files).toBe(1);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}

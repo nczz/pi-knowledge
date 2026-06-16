@@ -12,9 +12,11 @@ import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import {
 	buildChunkEmbeddingText,
 	chunkFile,
-	contentHash,
+	chunkIdentityHash,
+	createSkippedScanStats,
+	iterateScannedFiles,
 	preTokenizeForFTS,
-	walkDirDetailed,
+	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
@@ -34,19 +36,22 @@ import {
 	createKB,
 	deleteChunksByIds,
 	deleteKB,
+	finishIndexingJob,
 	getChunkById,
 	getChunkCount,
-	getChunkHashesByKB,
-	getChunkIdsByKB,
 	getChunksByFile,
 	getChunksByKB,
 	getFileCount,
 	getKB,
 	getKBByName,
 	insertChunks,
+	iterateChunkIdsByKB,
+	iterateChunksByKB,
 	type KnowledgeBase,
 	listKBs,
 	openDatabase,
+	startIndexingJob,
+	updateIndexingJob,
 	updateKBCounts,
 	updateKBStatus,
 } from "./storage/sqlite.ts";
@@ -126,6 +131,10 @@ const ADAPTIVE_MAX_CONTEXT_CHARS = 6_000;
 const ADAPTIVE_NEIGHBOR_TARGET = 5;
 const INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
+
+function isCancellationError(error: unknown): boolean {
+	return error instanceof Error && error.message === "Cancelled";
+}
 
 function tempVectorPath(vectorPath: string): string {
 	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -449,6 +458,7 @@ export class KnowledgeEngine {
 			source_type: sourceType,
 		});
 		updateKBStatus(this.db, kb.id, "indexing");
+		startIndexingJob(this.db, kb.id, "add", `Starting indexing for "${name}"`);
 
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
@@ -460,8 +470,10 @@ export class KnowledgeEngine {
 			let fileCount = 0;
 			let pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 			const startedAt = Date.now();
+			let latestSkippedTotal = 0;
 
-			const reportProgress = (phase: string, processedFiles?: number, totalFiles?: number): void => {
+			const reportProgress = (phase: string, processedFiles?: number, totalFiles?: number, skippedTotal = 0): void => {
+				latestSkippedTotal = skippedTotal;
 				const elapsed = Date.now() - startedAt;
 				let suffix = `${chunkCount} chunks, elapsed ${formatDuration(elapsed)}`;
 				if (processedFiles !== undefined && totalFiles !== undefined && totalFiles > 0) {
@@ -469,8 +481,21 @@ export class KnowledgeEngine {
 					const remainingFiles = Math.max(0, totalFiles - processedFiles);
 					const etaMs = rate > 0 ? (remainingFiles / rate) * 1000 : 0;
 					suffix = `${processedFiles}/${totalFiles} files, ${suffix}, ETA ${formatDuration(etaMs)}`;
+				} else if (processedFiles !== undefined) {
+					suffix = `${processedFiles} files scanned, ${suffix}`;
 				}
-				onProgress?.(`${phase}: ${suffix}`);
+				if (skippedTotal > 0) suffix = `${suffix}, skipped ${skippedTotal}`;
+				const message = `${phase}: ${suffix}`;
+				updateIndexingJob(this.db, kb.id, {
+					phase,
+					message,
+					processed_files: processedFiles,
+					processed_chunks: chunkCount,
+					total_files: totalFiles,
+					skipped_total: skippedTotal,
+					added_chunks: chunkCount,
+				});
+				onProgress?.(message);
 			};
 
 			const flushPending = async (processedFiles?: number, totalFiles?: number): Promise<void> => {
@@ -503,11 +528,14 @@ export class KnowledgeEngine {
 			};
 
 			if (isUrl) {
-				onProgress?.(`Fetching ${source}...`);
+				const message = `Fetching ${source}...`;
+				updateIndexingJob(this.db, kb.id, { phase: "fetching", message });
+				onProgress?.(message);
 				const chunks = await chunkUrl(source, signal);
 				fileCount = 1;
 				await addChunks(chunks);
 			} else if (isFile && resolvedSource.endsWith(".pdf")) {
+				updateIndexingJob(this.db, kb.id, { phase: "extracting", message: "Extracting text from PDF..." });
 				onProgress?.("Extracting text from PDF...");
 				const { extractText } = await import("unpdf");
 				const buf = (await import("node:fs")).readFileSync(resolvedSource);
@@ -515,32 +543,39 @@ export class KnowledgeEngine {
 				fileCount = 1;
 				await addChunks(await chunkFile(normalizeExtractedText(text), resolvedSource));
 			} else if (isFile && (resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc"))) {
+				updateIndexingJob(this.db, kb.id, { phase: "extracting", message: "Extracting text from DOCX..." });
 				onProgress?.("Extracting text from DOCX...");
 				const mammoth = await import("mammoth");
 				const result = await mammoth.extractRawText({ path: resolvedSource });
 				fileCount = 1;
 				await addChunks(await chunkFile(result.value, resolvedSource));
 			} else if (isDir) {
-				onProgress?.(`Scanning ${resolvedSource}...`);
-				const scan = walkDirDetailed(resolvedSource);
-				const files = scan.files;
-				onProgress?.(
-					`Found ${files.length} files, skipped ${scan.skipped.total} (${
-						Object.entries(scan.skipped.by_reason)
-							.filter(([, count]) => count > 0)
-							.map(([reason, count]) => `${reason}: ${count}`)
-							.join(", ") || "none"
-					}), chunking...`,
-				);
+				const scanningMessage = `Scanning ${resolvedSource}...`;
+				updateIndexingJob(this.db, kb.id, { phase: "scanning", message: scanningMessage });
+				onProgress?.(scanningMessage);
+				const skipped = createSkippedScanStats();
 				let processedFiles = 0;
-				for (const file of files) {
+				for (const file of iterateScannedFiles(resolvedSource, skipped)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const chunks = await chunkFile(file.content, file.relPath);
 					processedFiles++;
+					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
-					await addChunks(chunks, processedFiles, files.length);
-					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, files.length);
+					await addChunks(chunks, processedFiles, undefined);
+					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, undefined, skipped.total);
 				}
+				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${summarizeSkippedScan(
+					skipped,
+				)}), finalizing...`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "finalizing",
+					message: finalizingMessage,
+					processed_files: processedFiles,
+					processed_chunks: chunkCount,
+					skipped_total: skipped.total,
+					added_chunks: chunkCount,
+				});
+				onProgress?.(finalizingMessage);
 			} else if (isFile) {
 				const { readFileSync } = await import("node:fs");
 				const content = readFileSync(resolvedSource, "utf-8");
@@ -563,13 +598,32 @@ export class KnowledgeEngine {
 
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after add: ${kb.id}`);
-			onProgress?.(
-				`Ready: ${chunkCount} chunks from ${savedFileCount} files in ${formatDuration(Date.now() - startedAt)}`,
-			);
+			const readyMessage = `Ready: ${chunkCount} chunks from ${savedFileCount} files in ${formatDuration(
+				Date.now() - startedAt,
+			)}`;
+			updateIndexingJob(this.db, kb.id, {
+				phase: "ready",
+				message: readyMessage,
+				processed_files: savedFileCount,
+				processed_chunks: chunkCount,
+				skipped_total: latestSkippedTotal,
+				added_chunks: chunkCount,
+			});
+			finishIndexingJob(this.db, kb.id, "succeeded", readyMessage);
+			onProgress?.(readyMessage);
 			return { kb: savedKB, chunkCount };
 		} catch (e) {
 			vectorWriter?.close();
 			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
+			if (this.db) {
+				finishIndexingJob(
+					this.db,
+					kb.id,
+					isCancellationError(e) ? "cancelled" : "failed",
+					isCancellationError(e) ? "Indexing cancelled." : "Indexing failed.",
+					e instanceof Error ? e.message : String(e),
+				);
+			}
 			// Clean up partial state on failure
 			deleteKB(this.db, kb.id);
 			throw e;
@@ -589,122 +643,239 @@ export class KnowledgeEngine {
 		}
 
 		updateKBStatus(this.db, kb.id, "indexing");
+		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		let replacementVectorPath: string | undefined;
+		let addedVectorPath: string | undefined;
+		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 
 		try {
-			// 1. Scan and chunk current source
-			onProgress?.("Scanning source...");
-			let newChunks: Awaited<ReturnType<typeof chunkFile>> = [];
-			if (kb.source_type === "url") {
-				onProgress?.(`Fetching ${kb.source_path}...`);
-				newChunks = await chunkUrl(kb.source_path, signal);
-			} else if (statSync(kb.source_path).isDirectory()) {
-				const scan = walkDirDetailed(kb.source_path);
-				const files = scan.files;
-				onProgress?.(
-					`Found ${files.length} files, skipped ${scan.skipped.total} (${
-						Object.entries(scan.skipped.by_reason)
-							.filter(([, count]) => count > 0)
-							.map(([reason, count]) => `${reason}: ${count}`)
-							.join(", ") || "none"
-					})`,
+			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			addedVectorPath = tempVectorPath(`${vectorPath}.added`);
+			addedVectorWriter = openVectorWriter(addedVectorPath);
+			const existingHashes = new Map<string, Array<{ id: string; vectorIndex: number }>>();
+			let existingIndex = 0;
+			for (const chunk of iterateChunksByKB(this.db, kb.id)) {
+				const entries = existingHashes.get(chunk.content_hash) ?? [];
+				entries.push({ id: chunk.id, vectorIndex: existingIndex });
+				existingHashes.set(chunk.content_hash, entries);
+				existingIndex++;
+			}
+
+			const oldVectorIndexByHash = new Map<string, number[]>();
+			const newVectorIndexByHash = new Map<string, number[]>();
+			let pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
+			let addedVectorCount = 0;
+			let addedCount = 0;
+			let unchanged = 0;
+			let scannedFiles = 0;
+			let scannedChunks = 0;
+			const startedAt = Date.now();
+
+			const flushPending = async (): Promise<void> => {
+				if (!this.db || !addedVectorWriter || pendingChunks.length === 0) return;
+				if (signal?.aborted) throw new Error("Cancelled");
+				const batch = pendingChunks;
+				pendingChunks = [];
+				const elapsed = Date.now() - startedAt;
+				const message = `Embedding update batch: ${addedCount} new chunks stored, ${scannedFiles} files scanned, elapsed ${formatDuration(
+					elapsed,
+				)}`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "embedding",
+					message,
+					processed_files: scannedFiles,
+					processed_chunks: scannedChunks,
+					added_chunks: addedCount,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(message);
+				const newVectors = await embedDocuments(
+					batch.map((c) => buildChunkEmbeddingText(c)),
+					signal,
 				);
-				for (const file of files) newChunks.push(...(await chunkFile(file.content, file.relPath)));
+				if (signal?.aborted) throw new Error("Cancelled");
+				addedVectorWriter.append(newVectors);
+				for (let i = 0; i < batch.length; i++) {
+					const indexes = newVectorIndexByHash.get(batch[i].content_hash) ?? [];
+					indexes.push(addedVectorCount + i);
+					newVectorIndexByHash.set(batch[i].content_hash, indexes);
+				}
+				addedVectorCount += newVectors.length;
+				insertChunks(this.db, kb.id, batch);
+				addedCount += batch.length;
+				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+				const storedMessage = `Stored update batch: +${addedCount} chunks, =${unchanged} unchanged`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "storing",
+					message: storedMessage,
+					processed_files: scannedFiles,
+					processed_chunks: scannedChunks,
+					added_chunks: addedCount,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(storedMessage);
+			};
+
+			const processChunks = async (chunks: Awaited<ReturnType<typeof chunkFile>>): Promise<void> => {
+				for (const chunk of chunks) {
+					scannedChunks++;
+					const existing = existingHashes.get(chunk.content_hash);
+					if (existing && existing.length > 0) {
+						const retained = existing.shift();
+						if (retained) {
+							const indexes = oldVectorIndexByHash.get(chunk.content_hash) ?? [];
+							indexes.push(retained.vectorIndex);
+							oldVectorIndexByHash.set(chunk.content_hash, indexes);
+						}
+						unchanged++;
+						continue;
+					}
+					pendingChunks.push(chunk);
+					if (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) await flushPending();
+				}
+			};
+
+			updateIndexingJob(this.db, kb.id, { phase: "scanning", message: "Scanning source..." });
+			onProgress?.("Scanning source...");
+			if (kb.source_type === "url") {
+				const message = `Fetching ${kb.source_path}...`;
+				updateIndexingJob(this.db, kb.id, { phase: "fetching", message });
+				onProgress?.(message);
+				scannedFiles = 1;
+				await processChunks(await chunkUrl(kb.source_path, signal));
+			} else if (statSync(kb.source_path).isDirectory()) {
+				const skipped = createSkippedScanStats();
+				for (const file of iterateScannedFiles(kb.source_path, skipped)) {
+					if (signal?.aborted) throw new Error("Cancelled");
+					scannedFiles++;
+					await processChunks(await chunkFile(file.content, file.relPath));
+					if (scannedFiles % 25 === 0) {
+						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
+						updateIndexingJob(this.db, kb.id, {
+							phase: "scanning",
+							message,
+							processed_files: scannedFiles,
+							processed_chunks: scannedChunks,
+							skipped_total: skipped.total,
+							added_chunks: addedCount,
+							unchanged_chunks: unchanged,
+						});
+						onProgress?.(message);
+					}
+				}
+				const message = `Scanned ${scannedFiles} files, skipped ${skipped.total} (${summarizeSkippedScan(
+					skipped,
+				)}), reconciling deletes...`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "reconciling",
+					message,
+					processed_files: scannedFiles,
+					processed_chunks: scannedChunks,
+					skipped_total: skipped.total,
+					added_chunks: addedCount,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(message);
 			} else {
 				const { readFileSync } = await import("node:fs");
-				newChunks = await chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path);
+				scannedFiles = 1;
+				await processChunks(await chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path));
 			}
+			await flushPending();
+			addedVectorWriter.close();
+			addedVectorWriter = undefined;
 
-			// 2. Load existing state: chunks (hash→id) + vectors (ordered)
-			const existingHashes = getChunkHashesByKB(this.db, kb.id);
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-
-			// Build hash→old vector index cache from existing DB order.
-			const existingChunks = getChunksByKB(this.db, kb.id);
-			const oldVectorIndexByHash = new Map<string, number>();
-			for (let i = 0; i < existingChunks.length; i++) {
-				if (!oldVectorIndexByHash.has(existingChunks[i].content_hash)) {
-					oldVectorIndexByHash.set(existingChunks[i].content_hash, i);
-				}
+			const idsToRemove: string[] = [];
+			for (const entries of existingHashes.values()) {
+				idsToRemove.push(...entries.map((entry) => entry.id));
 			}
-
-			// 3. Identify changes
-			const newHashSet = new Set(newChunks.map((c) => c.content_hash));
-			const chunksToAdd = newChunks.filter((c) => !existingHashes.has(c.content_hash));
-			const idsToRemove = [...existingHashes.entries()].filter(([hash]) => !newHashSet.has(hash)).map(([, id]) => id);
-			const unchanged = newChunks.length - chunksToAdd.length;
-
-			onProgress?.(`Changes: +${chunksToAdd.length} -${idsToRemove.length} =${unchanged}`);
-
-			// 4. Remove deleted chunks from DB
 			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
+			const changesMessage = `Changes: +${addedCount} -${idsToRemove.length} =${unchanged}`;
+			updateIndexingJob(this.db, kb.id, {
+				phase: "reconciling",
+				message: changesMessage,
+				processed_files: scannedFiles,
+				processed_chunks: scannedChunks,
+				added_chunks: addedCount,
+				removed_chunks: idsToRemove.length,
+				unchanged_chunks: unchanged,
+			});
+			onProgress?.(changesMessage);
 
-			// 5. Embed ONLY new chunks
-			let addedCount = 0;
-			const newVectorsByHash = new Map<string, Float32Array>();
-			if (chunksToAdd.length > 0) {
-				const startedAt = Date.now();
-				for (let offset = 0; offset < chunksToAdd.length; offset += INDEX_EMBED_BATCH_SIZE) {
-					if (signal?.aborted) throw new Error("Cancelled");
-					const batch = chunksToAdd.slice(offset, offset + INDEX_EMBED_BATCH_SIZE);
-					const elapsed = Date.now() - startedAt;
-					const processed = offset;
-					const rate = processed / Math.max(1, elapsed / 1000);
-					const remaining = Math.max(0, chunksToAdd.length - processed);
-					const etaMs = rate > 0 ? (remaining / rate) * 1000 : 0;
-					onProgress?.(
-						`Embedding update batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
-							chunksToAdd.length / INDEX_EMBED_BATCH_SIZE,
-						)}: ${processed}/${chunksToAdd.length} new chunks, elapsed ${formatDuration(
-							elapsed,
-						)}, ETA ${formatDuration(etaMs)}`,
-					);
-					const newVectors = await embedDocuments(
-						batch.map((c) => buildChunkEmbeddingText(c)),
-						signal,
-					);
-					if (signal?.aborted) throw new Error("Cancelled");
-					insertChunks(this.db, kb.id, batch);
-					for (let i = 0; i < batch.length; i++) {
-						newVectorsByHash.set(batch[i].content_hash, newVectors[i]);
-					}
-					addedCount += batch.length;
-					updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
-					onProgress?.(`Stored update batch: ${addedCount}/${chunksToAdd.length} new chunks`);
-				}
-			}
-
-			// 6. Rebuild vector file in DB chunk order (reusing cached vectors)
-			const finalChunks = getChunksByKB(this.db, kb.id);
 			replacementVectorPath = tempVectorPath(vectorPath);
 			const vectorWriter = openVectorWriter(replacementVectorPath);
 			const oldVectorReader = openVectorReader(vectorPath);
+			const newVectorReader = openVectorReader(addedVectorPath);
+			let finalChunkCount = 0;
+			const takeVectorIndex = (indexesByHash: Map<string, number[]>, hash: string): number | undefined => {
+				const indexes = indexesByHash.get(hash);
+				return indexes?.shift();
+			};
 			try {
-				for (const chunk of finalChunks) {
+				for (const chunk of iterateChunksByKB(this.db, kb.id)) {
+					const oldVectorIndex = takeVectorIndex(oldVectorIndexByHash, chunk.content_hash);
+					const newVectorIndex = takeVectorIndex(newVectorIndexByHash, chunk.content_hash);
 					const vector =
-						newVectorsByHash.get(chunk.content_hash) ??
-						(oldVectorReader && oldVectorIndexByHash.has(chunk.content_hash)
-							? oldVectorReader.read(oldVectorIndexByHash.get(chunk.content_hash) ?? -1)
-							: undefined);
+						oldVectorReader && oldVectorIndex !== undefined
+							? oldVectorReader.read(oldVectorIndex)
+							: newVectorReader && newVectorIndex !== undefined
+								? newVectorReader.read(newVectorIndex)
+								: undefined;
 					if (!vector) throw new Error(`Missing vector while rebuilding knowledge base: ${chunk.id}`);
 					vectorWriter.append([vector]);
+					finalChunkCount++;
+					if (finalChunkCount % 1_000 === 0) {
+						const message = `Rebuilding vector file: ${finalChunkCount} chunks written`;
+						updateIndexingJob(this.db, kb.id, {
+							phase: "rebuilding_vectors",
+							message,
+							processed_files: scannedFiles,
+							processed_chunks: finalChunkCount,
+							added_chunks: addedCount,
+							removed_chunks: idsToRemove.length,
+							unchanged_chunks: unchanged,
+						});
+						onProgress?.(message);
+					}
 				}
 			} finally {
 				oldVectorReader?.close();
+				newVectorReader?.close();
 				vectorWriter.close();
 			}
 			renameSync(replacementVectorPath, vectorPath);
 			replacementVectorPath = undefined;
+			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
+			addedVectorPath = undefined;
 
-			// 7. Update counts
-			updateKBCounts(this.db, kb.id, finalChunks.length, getFileCount(this.db, kb.id));
+			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
-			onProgress?.(`Ready: +${chunksToAdd.length} -${idsToRemove.length} =${unchanged}`);
+			const readyMessage = `Ready: +${addedCount} -${idsToRemove.length} =${unchanged}`;
+			updateIndexingJob(this.db, kb.id, {
+				phase: "ready",
+				message: readyMessage,
+				processed_files: scannedFiles,
+				processed_chunks: finalChunkCount,
+				added_chunks: addedCount,
+				removed_chunks: idsToRemove.length,
+				unchanged_chunks: unchanged,
+			});
+			finishIndexingJob(this.db, kb.id, "succeeded", readyMessage);
+			onProgress?.(readyMessage);
 
-			return { added: chunksToAdd.length, removed: idsToRemove.length, unchanged };
+			return { added: addedCount, removed: idsToRemove.length, unchanged };
 		} catch (e) {
+			addedVectorWriter?.close();
 			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
+			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			updateKBStatus(this.db, kb.id, "error");
+			finishIndexingJob(
+				this.db,
+				kb.id,
+				isCancellationError(e) ? "cancelled" : "failed",
+				isCancellationError(e) ? "Update cancelled." : "Update failed.",
+				e instanceof Error ? e.message : String(e),
+			);
 			throw e;
 		}
 	}
@@ -781,15 +952,14 @@ export class KnowledgeEngine {
 					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`,
 				);
 			}
-			const chunkIds = getChunkIdsByKB(db, kb.id);
-			if (chunkIds.length === 0) continue;
+			if (kb.chunk_count === 0) continue;
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 
 			if (retrievalMode === "fast") {
 				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id));
 			} else if (retrievalMode === "semantic") {
 				const queryVec = await embedQuery(query);
-				const vectorResults = searchVectorFile(queryVec, vectorPath, chunkIds, candidateLimit);
+				const vectorResults = searchVectorFile(queryVec, vectorPath, iterateChunkIdsByKB(db, kb.id), candidateLimit);
 				allResults.push(...vectorResults.results);
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
@@ -799,7 +969,7 @@ export class KnowledgeEngine {
 
 				let vecResults: { chunkId: string; score: number }[] = [];
 				const queryVec = await embedQuery(query);
-				const vectorResults = searchVectorFile(queryVec, vectorPath, chunkIds, candidateLimit);
+				const vectorResults = searchVectorFile(queryVec, vectorPath, iterateChunkIdsByKB(db, kb.id), candidateLimit);
 				vecResults = vectorResults.results;
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 				const fused = weightedScoreFusion(bm25Results, vecResults);
@@ -1003,11 +1173,13 @@ export class KnowledgeEngine {
 
 		for (const diagnostic of diagnostics) {
 			if (diagnostic.stuck_indexing) {
+				const phase = diagnostic.job ? ` during ${diagnostic.job.phase}` : "";
 				issues.push({
 					severity: "blocking",
 					kb_name: diagnostic.kb_name,
-					message: `Indexing appears stuck for ${formatDuration(diagnostic.status_age_ms)}.`,
-					action: "Confirm no Pi process is actively indexing it, then remove and rebuild this KB.",
+					message: `Indexing appears stuck${phase} for ${formatDuration(diagnostic.last_progress_age_ms)}.`,
+					action:
+						"Check knowledge_status for the last progress message. If no Pi process is actively indexing it, remove and rebuild this KB.",
 				});
 			}
 			if (diagnostic.status === "error") {
@@ -1120,13 +1292,27 @@ export class KnowledgeEngine {
 		const header = JSON.parse(lines[0]) as { name: string; description?: string };
 		const kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
 		updateKBStatus(this.db, kb.id, "indexing");
+		startIndexingJob(this.db, kb.id, "import", `Starting import for "${header.name}"`);
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
 		try {
 			const chunkData = lines.slice(1).map((l) => JSON.parse(l) as ImportedChunk);
-			onProgress?.(`Importing ${chunkData.length} chunks...`);
+			const importMessage = `Importing ${chunkData.length} chunks...`;
+			updateIndexingJob(this.db, kb.id, {
+				phase: "importing",
+				message: importMessage,
+				total_files: chunkData.length,
+			});
+			onProgress?.(importMessage);
 			const chunks = chunkData.map((c) => ({
-				content_hash: contentHash(c.content),
+				content_hash: chunkIdentityHash({
+					content: c.content,
+					filePath: c.file_path,
+					fileType: c.file_type,
+					startLine: c.start_line,
+					endLine: c.end_line,
+					metadataJson: c.metadata_json || "{}",
+				}),
 				content: c.content,
 				content_tokenized: "",
 				file_path: c.file_path,
@@ -1146,11 +1332,17 @@ export class KnowledgeEngine {
 			for (let offset = 0; offset < indexedChunks.length; offset += INDEX_EMBED_BATCH_SIZE) {
 				if (signal?.aborted) throw new Error("Cancelled");
 				const batch = indexedChunks.slice(offset, offset + INDEX_EMBED_BATCH_SIZE);
-				onProgress?.(
-					`Embedding import batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
-						indexedChunks.length / INDEX_EMBED_BATCH_SIZE,
-					)}: ${offset}/${indexedChunks.length} chunks`,
-				);
+				const message = `Embedding import batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
+					indexedChunks.length / INDEX_EMBED_BATCH_SIZE,
+				)}: ${offset}/${indexedChunks.length} chunks`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "embedding",
+					message,
+					processed_chunks: offset,
+					total_files: indexedChunks.length,
+					added_chunks: inserted,
+				});
+				onProgress?.(message);
 				const vectors = await embedDocuments(
 					batch.map((c) => buildChunkEmbeddingText(c)),
 					signal,
@@ -1165,6 +1357,13 @@ export class KnowledgeEngine {
 					inserted,
 					new Set(indexedChunks.slice(0, inserted).map((c) => c.file_path)).size,
 				);
+				updateIndexingJob(this.db, kb.id, {
+					phase: "storing",
+					message: `Stored import batch: ${inserted}/${indexedChunks.length} chunks`,
+					processed_chunks: inserted,
+					total_files: indexedChunks.length,
+					added_chunks: inserted,
+				});
 			}
 			vectorWriter.close();
 			vectorWriter = undefined;
@@ -1174,10 +1373,20 @@ export class KnowledgeEngine {
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);
+			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${indexedChunks.length} chunks`);
 			return { kb: savedKB, chunkCount: chunks.length };
 		} catch (e) {
 			vectorWriter?.close();
 			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
+			if (this.db) {
+				finishIndexingJob(
+					this.db,
+					kb.id,
+					isCancellationError(e) ? "cancelled" : "failed",
+					isCancellationError(e) ? "Import cancelled." : "Import failed.",
+					e instanceof Error ? e.message : String(e),
+				);
+			}
 			deleteKB(this.db, kb.id);
 			throw e;
 		}

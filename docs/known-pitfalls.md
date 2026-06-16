@@ -150,13 +150,19 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 穩定性要求:
 
 - embedding 以固定 batch 執行，batch 前後都要檢查 cancellation signal。
+- directory scan 要串流處理檔案，不能先把全部檔案內容收進 `ScannedFile[]` 再開始 chunking。保留相容 helper 可以，但 production add/update/diagnostics path 必須吃 iterator。
+- binary detection 只能讀固定大小 sample。不要用 `readFileSync` 讀完整檔案後再檢查前 512 bytes。
 - chunks 要分批寫入 SQLite，`updated_at` 和 counts 要隨 batch 更新，讓 `knowledge_status` 能判斷是否仍活著。
 - vector file 要 streaming append，最後回寫 header；不要在索引路徑用單一巨大 `Buffer.alloc`。
-- progress 必須包含目前 phase、已處理量、elapsed，能估 ETA 時要回報 ETA。
+- update 不能建立 `newChunks`、`chunksToAdd`、`finalChunks` 這類大型全量陣列後才開始處理。新增向量應寫入 temporary vector file，刪除應分批，正式 vector file 應依 DB iterator 重建。
+- chunk identity 不能只看 content。大型 codebase 常有重複模板、空函式、產生器輸出或同名設定片段；若 hash 不含 path/line/metadata，update 會把不同檔案的相同內容當同一個 chunk，刪除其中一個檔案時會留下 stale/orphan chunk。
+- progress 必須包含目前 phase、已處理量、elapsed，能估 ETA 時要回報 ETA。未知總量的大型 directory scan 不應為了百分比或 ETA 先做全量內容掃描。
+- progress 不能只靠 `onUpdate`。大型索引常跨越多個 prompt 或 TUI render；phase、last message、last progress time、processed counts、skipped、added/removed/unchanged 與 error/cancelled state 必須持久化，讓 `knowledge_status` 可以判斷正在進展還是真的卡死。
 - progress 與 diagnostics 必須揭露 skipped file count/reasons/samples，否則使用者無法判斷是索引器漏掉還是安全排除。
 - `knowledge_status` 必須標示超過 stale threshold 的 `indexing` KB，並提示先確認沒有 active Pi process，再 remove/rebuild。
 - `knowledge_search` 必須跳過 `indexing` 和 `error` KB，避免中斷後的半成品被 agent 當成可靠檢索結果。
-- query-time semantic/hybrid search 不應把整個 KB vector file 載入長駐 cache。大型 KB 搜尋要用 streaming/ranged read 掃描 top-K，只保留候選向量給 MMR/diversity。
+- query-time semantic/hybrid search 不應把整個 KB vector file 或全部 chunk IDs 載入長駐 cache。大型 KB 搜尋要用 streaming/ranged read 掃描 top-K，只保留候選向量給 MMR/diversity。
+- diagnostics 不能把所有 chunk content 或所有來源內容載入記憶體，也不應讀取完整來源檔案；只保留 stale/orphan/coverage 判斷需要的 file path、file type、size 和 indexed_at metadata。
 - `knowledge_doctor` 必須把 status/diagnostics 收斂成 health score 與 concrete actions，避免使用者看見一堆統計但不知道下一步。
 
 

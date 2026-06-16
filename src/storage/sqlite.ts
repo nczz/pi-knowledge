@@ -18,6 +18,25 @@ export interface KnowledgeBase {
 	status: "ready" | "indexing" | "error" | "stale";
 }
 
+export interface IndexingJob {
+	kb_id: string;
+	operation: "add" | "update" | "import";
+	status: "running" | "succeeded" | "failed" | "cancelled";
+	phase: string;
+	message: string;
+	started_at: number;
+	updated_at: number;
+	last_progress_at: number;
+	processed_files: number;
+	processed_chunks: number;
+	total_files: number | null;
+	skipped_total: number;
+	added_chunks: number;
+	removed_chunks: number;
+	unchanged_chunks: number;
+	error_message: string | null;
+}
+
 export interface Chunk {
 	id: string;
 	kb_id: string;
@@ -34,7 +53,7 @@ export interface Chunk {
 
 export type ChunkInsert = Omit<Chunk, "id" | "kb_id" | "indexed_at">;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -67,6 +86,26 @@ CREATE TABLE IF NOT EXISTS chunks (
   end_line INTEGER NOT NULL DEFAULT 0,
   metadata_json TEXT NOT NULL DEFAULT '{}',
   indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+  kb_id TEXT PRIMARY KEY,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  message TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_progress_at INTEGER NOT NULL,
+  processed_files INTEGER NOT NULL DEFAULT 0,
+  processed_chunks INTEGER NOT NULL DEFAULT 0,
+  total_files INTEGER,
+  skipped_total INTEGER NOT NULL DEFAULT 0,
+  added_chunks INTEGER NOT NULL DEFAULT 0,
+  removed_chunks INTEGER NOT NULL DEFAULT 0,
+  unchanged_chunks INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
   FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
 );
 
@@ -127,8 +166,27 @@ export function openDatabase(knowledgeDir?: string): Database.Database {
 
 function runMigrations(db: Database.Database, from: number, to: number): void {
 	const migrations: Record<number, string> = {
-		// Future migrations go here, keyed by target version number:
-		// 2: "ALTER TABLE ...",
+		2: `
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+  kb_id TEXT PRIMARY KEY,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  message TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_progress_at INTEGER NOT NULL,
+  processed_files INTEGER NOT NULL DEFAULT 0,
+  processed_chunks INTEGER NOT NULL DEFAULT 0,
+  total_files INTEGER,
+  skipped_total INTEGER NOT NULL DEFAULT 0,
+  added_chunks INTEGER NOT NULL DEFAULT 0,
+  removed_chunks INTEGER NOT NULL DEFAULT 0,
+  unchanged_chunks INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+`,
 	};
 	for (let v = from + 1; v <= to; v++) {
 		if (migrations[v]) db.exec(migrations[v]);
@@ -165,6 +223,7 @@ export function listKBs(db: Database.Database): KnowledgeBase[] {
 }
 
 export function deleteKB(db: Database.Database, id: string): void {
+	db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
 }
@@ -180,6 +239,110 @@ export function updateKBCounts(db: Database.Database, id: string, chunkCount: nu
 		Date.now(),
 		id,
 	);
+}
+
+// --- Indexing Jobs ---
+
+export function startIndexingJob(
+	db: Database.Database,
+	kbId: string,
+	operation: IndexingJob["operation"],
+	message: string,
+): void {
+	const now = Date.now();
+	db.prepare(
+		`INSERT INTO indexing_jobs (
+			kb_id, operation, status, phase, message, started_at, updated_at, last_progress_at
+		) VALUES (?, ?, 'running', 'starting', ?, ?, ?, ?)
+		ON CONFLICT(kb_id) DO UPDATE SET
+			operation = excluded.operation,
+			status = 'running',
+			phase = 'starting',
+			message = excluded.message,
+			started_at = excluded.started_at,
+			updated_at = excluded.updated_at,
+			last_progress_at = excluded.last_progress_at,
+			processed_files = 0,
+			processed_chunks = 0,
+			total_files = NULL,
+			skipped_total = 0,
+			added_chunks = 0,
+			removed_chunks = 0,
+			unchanged_chunks = 0,
+			error_message = NULL`,
+	).run(kbId, operation, message, now, now, now);
+}
+
+export function updateIndexingJob(
+	db: Database.Database,
+	kbId: string,
+	progress: {
+		phase?: string;
+		message?: string;
+		processed_files?: number;
+		processed_chunks?: number;
+		total_files?: number | null;
+		skipped_total?: number;
+		added_chunks?: number;
+		removed_chunks?: number;
+		unchanged_chunks?: number;
+	},
+): void {
+	const current = getIndexingJob(db, kbId);
+	if (!current) return;
+	const now = Date.now();
+	db.prepare(
+		`UPDATE indexing_jobs SET
+			phase = ?,
+			message = ?,
+			updated_at = ?,
+			last_progress_at = ?,
+			processed_files = ?,
+			processed_chunks = ?,
+			total_files = ?,
+			skipped_total = ?,
+			added_chunks = ?,
+			removed_chunks = ?,
+			unchanged_chunks = ?
+		WHERE kb_id = ?`,
+	).run(
+		progress.phase ?? current.phase,
+		progress.message ?? current.message,
+		now,
+		now,
+		progress.processed_files ?? current.processed_files,
+		progress.processed_chunks ?? current.processed_chunks,
+		progress.total_files === undefined ? current.total_files : progress.total_files,
+		progress.skipped_total ?? current.skipped_total,
+		progress.added_chunks ?? current.added_chunks,
+		progress.removed_chunks ?? current.removed_chunks,
+		progress.unchanged_chunks ?? current.unchanged_chunks,
+		kbId,
+	);
+}
+
+export function finishIndexingJob(
+	db: Database.Database,
+	kbId: string,
+	status: Extract<IndexingJob["status"], "succeeded" | "failed" | "cancelled">,
+	message: string,
+	errorMessage?: string,
+): void {
+	const now = Date.now();
+	db.prepare(
+		`UPDATE indexing_jobs SET
+			status = ?,
+			phase = ?,
+			message = ?,
+			updated_at = ?,
+			last_progress_at = ?,
+			error_message = ?
+		WHERE kb_id = ?`,
+	).run(status, status, message, now, now, errorMessage ?? null, kbId);
+}
+
+export function getIndexingJob(db: Database.Database, kbId: string): IndexingJob | undefined {
+	return db.prepare("SELECT * FROM indexing_jobs WHERE kb_id = ?").get(kbId) as IndexingJob | undefined;
 }
 
 // --- CRUD: Chunks ---
@@ -214,9 +377,19 @@ export function getChunksByKB(db: Database.Database, kbId: string): Chunk[] {
 	return db.prepare("SELECT * FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as Chunk[];
 }
 
+export function iterateChunksByKB(db: Database.Database, kbId: string): IterableIterator<Chunk> {
+	return db.prepare("SELECT * FROM chunks WHERE kb_id = ? ORDER BY rowid").iterate(kbId) as IterableIterator<Chunk>;
+}
+
 export function getChunkIdsByKB(db: Database.Database, kbId: string): string[] {
 	const rows = db.prepare("SELECT id FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as { id: string }[];
 	return rows.map((r) => r.id);
+}
+
+export function iterateChunkIdsByKB(db: Database.Database, kbId: string): IterableIterator<{ id: string }> {
+	return db.prepare("SELECT id FROM chunks WHERE kb_id = ? ORDER BY rowid").iterate(kbId) as IterableIterator<{
+		id: string;
+	}>;
 }
 
 export function getChunkById(db: Database.Database, id: string): Chunk | undefined {
@@ -249,8 +422,14 @@ export function deleteChunksByKB(db: Database.Database, kbId: string): void {
 
 export function deleteChunksByIds(db: Database.Database, ids: string[]): void {
 	if (ids.length === 0) return;
-	const placeholders = ids.map(() => "?").join(",");
-	db.prepare(`DELETE FROM chunks WHERE id IN (${placeholders})`).run(...ids);
+	const batchSize = 500;
+	const deleteBatch = db.transaction((batch: string[]) => {
+		const placeholders = batch.map(() => "?").join(",");
+		db.prepare(`DELETE FROM chunks WHERE id IN (${placeholders})`).run(...batch);
+	});
+	for (let offset = 0; offset < ids.length; offset += batchSize) {
+		deleteBatch(ids.slice(offset, offset + batchSize));
+	}
 }
 
 export function getChunkHashesByKB(db: Database.Database, kbId: string): Map<string, string> {
@@ -259,6 +438,18 @@ export function getChunkHashesByKB(db: Database.Database, kbId: string): Map<str
 		content_hash: string;
 	}[];
 	return new Map(rows.map((r) => [r.content_hash, r.id]));
+}
+
+export function iterateChunkHashesByKB(
+	db: Database.Database,
+	kbId: string,
+): IterableIterator<{ id: string; content_hash: string }> {
+	return db
+		.prepare("SELECT id, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid")
+		.iterate(kbId) as IterableIterator<{
+		id: string;
+		content_hash: string;
+	}>;
 }
 
 export function getChunkCount(db: Database.Database, kbId: string): number {

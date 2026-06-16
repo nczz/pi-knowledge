@@ -88,6 +88,22 @@ describe("search pipeline", () => {
 			expect(r.vectorsByChunkId.size).toBe(2);
 			expect(r.vectorsByChunkId.has(r.results[0].chunkId)).toBe(true);
 		});
+		it("accepts streamed chunk id rows from storage", () => {
+			const q = new Float32Array([1, 0, 0, 0]);
+			const vectorPath = `${TEST_DIR}/vectors-row-iterator.bin`;
+			saveVectors(vectorPath, [
+				new Float32Array([0, 1, 0, 0]),
+				new Float32Array([0.95, 0.05, 0, 0]),
+				new Float32Array([0.2, 0.8, 0, 0]),
+			]);
+			const streamedRows = chunkIds.slice(0, 3).map((id) => ({ id }));
+
+			const r = searchVectorFile(q, vectorPath, streamedRows, 1);
+
+			expect(r.results).toHaveLength(1);
+			expect(r.results[0].chunkId).toBe(chunkIds[1]);
+			expect(r.vectorsByChunkId.size).toBe(1);
+		});
 	});
 
 	describe("RRF", () => {

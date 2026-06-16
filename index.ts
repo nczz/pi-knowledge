@@ -369,6 +369,24 @@ export default function (pi: ExtensionAPI) {
 				);
 				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
 				if (diag) {
+					if (diag.job) {
+						const jobAge = Math.round((Date.now() - diag.job.last_progress_at) / 1000);
+						const progress = [
+							`${diag.job.processed_files} files`,
+							`${diag.job.processed_chunks} chunks`,
+							diag.job.skipped_total > 0 ? `${diag.job.skipped_total} skipped` : "",
+							diag.job.added_chunks > 0 ? `+${diag.job.added_chunks}` : "",
+							diag.job.removed_chunks > 0 ? `-${diag.job.removed_chunks}` : "",
+							diag.job.unchanged_chunks > 0 ? `=${diag.job.unchanged_chunks}` : "",
+						]
+							.filter(Boolean)
+							.join(", ");
+						lines.push(
+							`    job: ${diag.job.status}/${diag.job.phase} — ${progress || "no processed items yet"} — last progress ${jobAge}s ago`,
+						);
+						if (diag.job.message) lines.push(`    last: ${diag.job.message}`);
+						if (diag.job.error_message) lines.push(`    error: ${diag.job.error_message}`);
+					}
 					lines.push(
 						`    coverage: ${diag.coverage_percent}% (${diag.indexed_files}/${diag.total_source_files} files)`,
 					);
@@ -378,7 +396,7 @@ export default function (pi: ExtensionAPI) {
 						lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
 					if (diag.stuck_indexing)
 						lines.push(
-							`    ⚠️ indexing appears stuck for ${Math.round(diag.status_age_ms / 60000)}m; remove and rebuild if no pi process is actively indexing it`,
+							`    ⚠️ indexing appears stuck for ${Math.round(diag.last_progress_age_ms / 60000)}m; remove and rebuild if no pi process is actively indexing it`,
 						);
 					if (diag.skipped_files.total > 0)
 						lines.push(
