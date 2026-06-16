@@ -149,6 +149,39 @@ describe("walkDir", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 
+	it("can include suggested-excluded text after explicit confirmation", () => {
+		rmSync(tmp, { recursive: true, force: true });
+		mkdirSync(join(tmp, "node_modules"), { recursive: true });
+		writeFileSync(join(tmp, ".env"), "CONFIRMED_ENV_TEXT=1");
+		writeFileSync(join(tmp, "node_modules", "x.js"), "export const ConfirmedVendorText = true;");
+		writeFileSync(join(tmp, "image.png"), Buffer.from([0x89, 0x50, 0x00]));
+
+		const scan = walkDirDetailed(tmp, { includeSuggestedText: true });
+		const paths = scan.files.map((file) => file.relPath);
+
+		expect(paths).toContain(".env");
+		expect(paths).toContain("node_modules/x.js");
+		expect(paths).not.toContain("image.png");
+		expect(scan.skipped.by_reason.binary).toBe(1);
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("can include a focused suggested-excluded path without including the whole suggested tree", () => {
+		rmSync(tmp, { recursive: true, force: true });
+		mkdirSync(join(tmp, "node_modules", "chosen"), { recursive: true });
+		mkdirSync(join(tmp, "node_modules", "other"), { recursive: true });
+		writeFileSync(join(tmp, "node_modules", "chosen", "index.js"), "export const ChosenVendorText = true;");
+		writeFileSync(join(tmp, "node_modules", "other", "index.js"), "export const OtherVendorText = true;");
+
+		const scan = walkDirDetailed(tmp, { includePaths: ["node_modules/chosen/index.js"] });
+		const paths = scan.files.map((file) => file.relPath);
+
+		expect(paths).toContain("node_modules/chosen/index.js");
+		expect(paths).not.toContain("node_modules/other/index.js");
+		expect(scan.skipped.by_reason.suggested_excluded).toBeGreaterThan(0);
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
 	it("reports skipped file reasons and samples", () => {
 		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
@@ -160,7 +193,7 @@ describe("walkDir", () => {
 
 		expect(scan.files.map((file) => file.relPath)).toContain("src.ts");
 		expect(scan.skipped.total).toBeGreaterThanOrEqual(2);
-		expect(scan.skipped.by_reason.ignored).toBeGreaterThan(0);
+		expect(scan.skipped.by_reason.suggested_excluded).toBeGreaterThan(0);
 		expect(scan.skipped.by_reason.binary).toBeGreaterThan(0);
 		expect(scan.skipped.samples.some((sample) => sample.path.includes("node_modules"))).toBe(true);
 		rmSync(tmp, { recursive: true, force: true });

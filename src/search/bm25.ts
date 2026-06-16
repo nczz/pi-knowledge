@@ -12,6 +12,10 @@ function prepareFtsTerms(query: string): string[] {
 		.filter((t) => t.length > 0);
 }
 
+function quoteFtsTerm(term: string): string {
+	return `"${term.replace(/"/g, '""')}"`;
+}
+
 function runSearch(db: Database.Database, ftsQuery: string, limit: number, kbId?: string): BM25Result[] {
 	if (kbId) {
 		return db
@@ -31,13 +35,20 @@ function runSearch(db: Database.Database, ftsQuery: string, limit: number, kbId?
 		.all(ftsQuery, limit) as BM25Result[];
 }
 
-export function searchBM25(db: Database.Database, query: string, limit = 50, kbId?: string): BM25Result[] {
+export function searchBM25(
+	db: Database.Database,
+	query: string,
+	limit = 50,
+	kbId?: string,
+	options: { allowOrFallback?: boolean } = {},
+): BM25Result[] {
 	const terms = prepareFtsTerms(query);
 	if (terms.length === 0) return [];
 	try {
-		const strict = runSearch(db, terms.join(" AND "), limit, kbId);
-		if (strict.length > 0 || terms.length === 1) return strict;
-		return runSearch(db, terms.join(" OR "), limit, kbId);
+		const quotedTerms = terms.map(quoteFtsTerm);
+		const strict = runSearch(db, quotedTerms.join(" AND "), limit, kbId);
+		if (strict.length > 0 || terms.length === 1 || options.allowOrFallback === false) return strict;
+		return runSearch(db, quotedTerms.join(" OR "), limit, kbId);
 	} catch {
 		return [];
 	}

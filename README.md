@@ -74,6 +74,7 @@ pi install ./pi-knowledge
 
 | Tool | Description |
 |------|-------------|
+| `knowledge_plan` | Inspect an indexing source before writing a KB; reports scannable files, suggested exclusions, and technical skips |
 | `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
 | `knowledge_search` | Hybrid, deep, or adaptive search across one or all knowledge bases |
 | `knowledge_remove` | Remove a knowledge base by name or ID |
@@ -110,6 +111,8 @@ For best search quality, rebuild or update existing knowledge bases after upgrad
 ## Large Project Indexing
 
 Indexing is designed as a stable long-running operation, not a quick background trick. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in hard-capped batches, stream vector files to disk, and report progress with file/chunk counts, chunks/sec, skipped file counts, elapsed time, and file ETA where available. Directory indexing starts with a metadata-only planning scan so large repositories can show total scannable files and skipped counts before expensive embedding starts.
+
+Directory indexing separates technical skips from user-confirmable suggestions. `knowledge_plan` inspects a source without writing a KB, so agents can show scannable files, suggested exclusions, and technical skips before asking the user to confirm scope. Unsupported binary/non-text files, oversized files, unreadable files, inaccessible paths, and documents that cannot be extracted are skipped for stability. Text files that may be private or low-signal, such as `.env`, credential-named files, generated reports, lockfiles, vendor text, build output text, and runtime/cache text, are suggested exclusions by default rather than permanent blocks. Agents should explain the privacy and search-precision tradeoff, ask the user when the choice is ambiguous, and then use `include_suggested_text` or focused `include_paths` when the user confirms those text files belong in the KB. Ordinary project configuration files such as `settings.json` or `appsettings.json` remain indexable because they often describe real system behavior.
 
 Indexing progress is persisted in SQLite, not only printed as transient tool updates. `knowledge_status` shows the current or last indexing operation, phase, last progress message, last progress age, processed file/chunk counts, skipped count, and add/remove/unchanged counts. This makes long indexing runs distinguishable from stuck jobs even if the user checks status from a later prompt.
 

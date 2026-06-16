@@ -54,7 +54,7 @@ const BINARY_EXTENSIONS = new Set([
 	".lib",
 ]);
 
-const DEFAULT_IGNORE = [
+const DEFAULT_SUGGESTED_EXCLUDE = [
 	"node_modules",
 	".git",
 	"dist",
@@ -91,8 +91,6 @@ const DEFAULT_IGNORE = [
 	"docs/*knowledge-base*report*.md",
 	"*knowledge-base-evaluation-report*.md",
 	"*knowledge*.jsonl",
-	"setting*.json",
-	"appsettings*.json",
 	"*.min.js",
 	"*.min.css",
 	"*.map",
@@ -107,6 +105,12 @@ const DEFAULT_IGNORE = [
 	"*.pyc",
 	"*.class",
 ];
+
+export interface ScanOptions {
+	includeSuggestedText?: boolean;
+	includePaths?: string[];
+	excludePaths?: string[];
+}
 
 export interface ScannedFile {
 	path: string; // absolute path
@@ -124,7 +128,7 @@ export interface ScannableFile {
 
 export interface SkippedScanEntry {
 	path: string;
-	reason: "ignored" | "oversized" | "binary" | "unreadable" | "inaccessible";
+	reason: "suggested_excluded" | "oversized" | "binary" | "unreadable" | "inaccessible";
 	size?: number;
 }
 
@@ -143,7 +147,7 @@ export function createSkippedScanStats(): ScanResult["skipped"] {
 	return {
 		total: 0,
 		by_reason: {
-			ignored: 0,
+			suggested_excluded: 0,
 			oversized: 0,
 			binary: 0,
 			unreadable: 0,
@@ -223,7 +227,7 @@ function isBinaryFile(filePath: string): boolean {
 
 function buildIgnoreMatcher(dirPath: string): ReturnType<typeof ignore> {
 	const ig = ignore();
-	ig.add(DEFAULT_IGNORE);
+	ig.add(DEFAULT_SUGGESTED_EXCLUDE);
 
 	const gitignorePath = join(dirPath, ".gitignore");
 	if (existsSync(gitignorePath)) {
@@ -233,11 +237,33 @@ function buildIgnoreMatcher(dirPath: string): ReturnType<typeof ignore> {
 	return ig;
 }
 
+function normalizeScanPath(path: string): string {
+	return path.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function normalizeScanPaths(paths: string[] | undefined): string[] {
+	return (paths ?? []).map(normalizeScanPath).filter(Boolean);
+}
+
+function pathMatches(relPath: string, patterns: string[]): boolean {
+	const normalized = normalizeScanPath(relPath);
+	return patterns.some((pattern) => normalized === pattern || normalized.startsWith(`${pattern}/`));
+}
+
+function directoryCouldContainIncludedPath(relPath: string, includePaths: string[]): boolean {
+	const normalized = normalizeScanPath(relPath);
+	return includePaths.some((includePath) => includePath.startsWith(`${normalized}/`));
+}
+
 export function* iterateScannableFiles(
 	dirPath: string,
 	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
 ): Generator<ScannableFile> {
 	const ig = buildIgnoreMatcher(dirPath);
+	const includePaths = normalizeScanPaths(options.includePaths);
+	const excludePaths = normalizeScanPaths(options.excludePaths);
+	const includeSuggestedText = options.includeSuggestedText === true;
 
 	function* walk(dir: string): Generator<ScannableFile> {
 		let entries: Dirent[];
@@ -250,15 +276,29 @@ export function* iterateScannableFiles(
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
 			const relPath = relative(dirPath, fullPath).split(sep).join("/");
+			const explicitlyIncluded = pathMatches(relPath, includePaths);
 
-			if (ig.ignores(relPath)) {
-				addSkipped(skipped, { path: relPath, reason: "ignored" });
+			if (pathMatches(relPath, excludePaths)) {
+				addSkipped(skipped, { path: relPath, reason: "suggested_excluded" });
+				continue;
+			}
+
+			if (ig.ignores(relPath) && !includeSuggestedText && !explicitlyIncluded) {
+				if (entry.isDirectory() && directoryCouldContainIncludedPath(relPath, includePaths)) {
+					yield* walk(fullPath);
+					continue;
+				}
+				addSkipped(skipped, { path: relPath, reason: "suggested_excluded" });
 				continue;
 			}
 
 			if (entry.isDirectory()) {
-				if (ig.ignores(`${relPath}/`)) {
-					addSkipped(skipped, { path: `${relPath}/`, reason: "ignored" });
+				if (ig.ignores(`${relPath}/`) && !includeSuggestedText && !explicitlyIncluded) {
+					if (directoryCouldContainIncludedPath(relPath, includePaths)) {
+						yield* walk(fullPath);
+						continue;
+					}
+					addSkipped(skipped, { path: `${relPath}/`, reason: "suggested_excluded" });
 					continue;
 				}
 				yield* walk(fullPath);
@@ -290,8 +330,9 @@ export function* iterateScannableFiles(
 export function* iterateScannedFiles(
 	dirPath: string,
 	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
 ): Generator<ScannedFile> {
-	for (const file of iterateScannableFiles(dirPath, skipped)) {
+	for (const file of iterateScannableFiles(dirPath, skipped, options)) {
 		try {
 			const content = readFileSync(file.path, "utf-8");
 			yield { ...file, content };
@@ -305,22 +346,27 @@ export async function iterateScannedFilesAsync(
 	dirPath: string,
 	onFile: (file: ScannedFile) => Promise<void> | void,
 	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
 ): Promise<ScanResult["skipped"]> {
-	for (const file of iterateScannedFiles(dirPath, skipped)) {
+	for (const file of iterateScannedFiles(dirPath, skipped, options)) {
 		await onFile(file);
 	}
 	return skipped;
 }
 
-export function walkDir(dirPath: string): ScannedFile[] {
-	return walkDirDetailed(dirPath).files;
+export function walkDir(dirPath: string, options: ScanOptions = {}): ScannedFile[] {
+	return walkDirDetailed(dirPath, options).files;
 }
 
-export function walkDirDetailed(dirPath: string): ScanResult {
+export function walkDirDetailed(dirPath: string, options: ScanOptions = {}): ScanResult {
 	const results: ScannedFile[] = [];
 	const skipped = createSkippedScanStats();
-	for (const file of iterateScannedFiles(dirPath, skipped)) results.push(file);
+	for (const file of iterateScannedFiles(dirPath, skipped, options)) results.push(file);
 	return { files: results, skipped };
+}
+
+export function isReadableTextFile(filePath: string): boolean {
+	return !isBinaryFile(filePath);
 }
 
 // --- Chunking ---

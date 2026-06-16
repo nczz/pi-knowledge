@@ -108,6 +108,10 @@ export function queryCoverage(text: string, queryTokens: Set<string>): number {
 	return matched / signals.size;
 }
 
+export function hasAnyLexicalEvidence(text: string, queryTokens: Set<string>): boolean {
+	return queryCoverage(text, queryTokens) > 0;
+}
+
 export function pathTokenBoost(filePath: string, queryTokens: Set<string>): number {
 	const pathTokens = signalTokens(tokenizeForSearch(filePath.replace(/[./_-]/g, " ")));
 	const signals = signalTokens(queryTokens);

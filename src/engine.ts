@@ -14,15 +14,18 @@ import {
 	chunkFile,
 	chunkIdentityHash,
 	createSkippedScanStats,
+	isReadableTextFile,
 	iterateScannableFiles,
 	iterateScannedFiles,
 	preTokenizeForFTS,
+	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
 import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
 import {
+	hasAnyLexicalEvidence,
 	hasEnoughLexicalEvidence,
 	MIN_HYBRID_SCORE,
 	normalizeFileTypeFilter,
@@ -92,6 +95,12 @@ export interface SearchResponse {
 
 export type ProgressCallback = (msg: string) => void;
 
+export interface AddOptions {
+	include_suggested_text?: boolean;
+	include_paths?: string[];
+	exclude_paths?: string[];
+}
+
 interface ImportedChunk {
 	content: string;
 	file_path: string;
@@ -138,6 +147,15 @@ interface DirectoryScanPlan {
 	bytes: number;
 	skippedTotal: number;
 	skippedSummary: string;
+	skipped: ReturnType<typeof createSkippedScanStats>;
+}
+
+export interface IndexPlan {
+	source_type: "file" | "directory" | "text" | "url";
+	scannable_files: number;
+	scannable_bytes: number;
+	skipped: ReturnType<typeof createSkippedScanStats>;
+	summary: string;
 }
 
 function isCancellationError(error: unknown): boolean {
@@ -148,11 +166,45 @@ function tempVectorPath(vectorPath: string): string {
 	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 }
 
-function planDirectoryScan(dirPath: string): DirectoryScanPlan {
+function toScanOptions(options: AddOptions = {}): ScanOptions {
+	return {
+		includeSuggestedText: options.include_suggested_text === true,
+		includePaths: options.include_paths,
+		excludePaths: options.exclude_paths,
+	};
+}
+
+function serializeAddOptions(options: AddOptions = {}): string | undefined {
+	const normalized: AddOptions = {};
+	if (options.include_suggested_text === true) normalized.include_suggested_text = true;
+	if (options.include_paths && options.include_paths.length > 0) normalized.include_paths = options.include_paths;
+	if (options.exclude_paths && options.exclude_paths.length > 0) normalized.exclude_paths = options.exclude_paths;
+	return Object.keys(normalized).length > 0 ? JSON.stringify(normalized) : undefined;
+}
+
+function parseAddOptions(raw: string | null): AddOptions {
+	if (!raw) return {};
+	try {
+		const parsed = JSON.parse(raw) as AddOptions;
+		return {
+			include_suggested_text: parsed.include_suggested_text === true,
+			include_paths: Array.isArray(parsed.include_paths)
+				? parsed.include_paths.filter((item) => typeof item === "string")
+				: undefined,
+			exclude_paths: Array.isArray(parsed.exclude_paths)
+				? parsed.exclude_paths.filter((item) => typeof item === "string")
+				: undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
+function planDirectoryScan(dirPath: string, options: ScanOptions = {}): DirectoryScanPlan {
 	const skipped = createSkippedScanStats();
 	let files = 0;
 	let bytes = 0;
-	for (const file of iterateScannableFiles(dirPath, skipped)) {
+	for (const file of iterateScannableFiles(dirPath, skipped, options)) {
 		files++;
 		bytes += file.size;
 	}
@@ -161,6 +213,7 @@ function planDirectoryScan(dirPath: string): DirectoryScanPlan {
 		bytes,
 		skippedTotal: skipped.total,
 		skippedSummary: summarizeSkippedScan(skipped),
+		skipped,
 	};
 }
 
@@ -465,11 +518,63 @@ export class KnowledgeEngine {
 		this.db = openDatabase(knowledgeDir);
 	}
 
+	plan(source: string, options: AddOptions = {}): IndexPlan {
+		const resolvedSource = resolve(source);
+		const isUrl = source.startsWith("http://") || source.startsWith("https://");
+		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
+		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
+		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
+		if (isDir) {
+			const plan = planDirectoryScan(resolvedSource, toScanOptions(options));
+			return {
+				source_type: "directory",
+				scannable_files: plan.files,
+				scannable_bytes: plan.bytes,
+				skipped: plan.skipped,
+				summary: `Directory plan: ${plan.files} scannable files, ${formatBytes(plan.bytes)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`,
+			};
+		}
+		if (isFile) {
+			const skipped = createSkippedScanStats();
+			const supportedDocument =
+				resolvedSource.endsWith(".pdf") || resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc");
+			if (!supportedDocument && !isReadableTextFile(resolvedSource)) {
+				skipped.total = 1;
+				skipped.by_reason.binary = 1;
+				skipped.samples.push({ path: resolvedSource, reason: "binary" });
+				return {
+					source_type: "file",
+					scannable_files: 0,
+					scannable_bytes: 0,
+					skipped,
+					summary: "File plan: 0 scannable files; file is unsupported binary/non-text",
+				};
+			}
+			const size = statSync(resolvedSource).size;
+			return {
+				source_type: "file",
+				scannable_files: 1,
+				scannable_bytes: size,
+				skipped,
+				summary: `File plan: 1 scannable file, ${formatBytes(size)} source size`,
+			};
+		}
+		const skipped = createSkippedScanStats();
+		return {
+			source_type: sourceType,
+			scannable_files: 1,
+			scannable_bytes: Buffer.byteLength(source),
+			skipped,
+			summary: `${sourceType === "url" ? "URL" : "Inline text"} plan: 1 source`,
+		};
+	}
+
 	async add(
 		source: string,
 		name: string,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
+		options: AddOptions = {},
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		const resolvedSource = resolve(source);
@@ -477,6 +582,7 @@ export class KnowledgeEngine {
 		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
 		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
 		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
+		const scanOptions = toScanOptions(options);
 
 		const existingKB = getKBByName(this.db, name);
 		if (existingKB) {
@@ -489,6 +595,7 @@ export class KnowledgeEngine {
 			name,
 			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
 			source_type: sourceType,
+			source_options: serializeAddOptions(options),
 		});
 		updateKBStatus(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "add", `Starting indexing for "${name}"`);
@@ -583,7 +690,7 @@ export class KnowledgeEngine {
 				fileCount = 1;
 				await addChunks(await chunkFile(result.value, resolvedSource));
 			} else if (isDir) {
-				const plan = planDirectoryScan(resolvedSource);
+				const plan = planDirectoryScan(resolvedSource, scanOptions);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
 				)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`;
@@ -604,7 +711,7 @@ export class KnowledgeEngine {
 				onProgress?.(scanningMessage);
 				const skipped = createSkippedScanStats();
 				let processedFiles = 0;
-				for (const file of iterateScannedFiles(resolvedSource, skipped)) {
+				for (const file of iterateScannedFiles(resolvedSource, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const chunks = await chunkFile(file.content, file.relPath);
 					processedFiles++;
@@ -627,6 +734,9 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(finalizingMessage);
 			} else if (isFile) {
+				if (!isReadableTextFile(resolvedSource)) {
+					throw new Error(`File is not readable text and has no supported extractor: ${resolvedSource}`);
+				}
 				const { readFileSync } = await import("node:fs");
 				const content = readFileSync(resolvedSource, "utf-8");
 				fileCount = 1;
@@ -694,6 +804,7 @@ export class KnowledgeEngine {
 
 		updateKBStatus(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
+		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -796,7 +907,7 @@ export class KnowledgeEngine {
 				scannedFiles = 1;
 				await processChunks(await chunkUrl(kb.source_path, signal));
 			} else if (statSync(kb.source_path).isDirectory()) {
-				const plan = planDirectoryScan(kb.source_path);
+				const plan = planDirectoryScan(kb.source_path, scanOptions);
 				plannedTotalFiles = plan.files;
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
@@ -809,7 +920,7 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(planningMessage);
 				const skipped = createSkippedScanStats();
-				for (const file of iterateScannedFiles(kb.source_path, skipped)) {
+				for (const file of iterateScannedFiles(kb.source_path, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					scannedFiles++;
 					await processChunks(await chunkFile(file.content, file.relPath));
@@ -1022,7 +1133,7 @@ export class KnowledgeEngine {
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 
 			if (retrievalMode === "fast") {
-				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id));
+				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id, { allowOrFallback: false }));
 			} else if (retrievalMode === "semantic") {
 				const queryVec = await embedQuery(query);
 				const vectorResults = searchVectorFile(queryVec, vectorPath, iterateChunkIdsByKB(db, kb.id), candidateLimit);
@@ -1060,7 +1171,13 @@ export class KnowledgeEngine {
 			}
 		}
 		let scored = unique;
-		if (retrievalMode !== "fast" && retrievalMode !== "semantic") {
+		if (retrievalMode === "fast") {
+			scored = unique.filter((result) => {
+				const chunk = getChunkById(db, result.chunkId);
+				if (!chunk) return false;
+				return hasAnyLexicalEvidence(buildChunkEmbeddingText(chunk), queryTokens);
+			});
+		} else if (retrievalMode !== "semantic") {
 			scored = unique.filter((result) => {
 				const chunk = getChunkById(db, result.chunkId);
 				if (!chunk) return false;

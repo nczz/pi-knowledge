@@ -120,6 +120,9 @@ const Type = {
 	Union(items: Schema[]): Schema {
 		return { anyOf: items };
 	},
+	Array(item: Schema): Schema {
+		return { type: "array", items: item };
+	},
 	Optional(schema: Schema): Schema {
 		return { ...schema, optional: true };
 	},
@@ -191,25 +194,107 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "knowledge_plan",
+		label: "Knowledge Plan",
+		description:
+			"Inspect an indexing source without writing a KB, showing scannable files, suggested exclusions, and technical skips",
+		promptSnippet: "Plan a knowledge-base indexing scope before calling knowledge_add",
+		promptGuidelines: [
+			"Use knowledge_plan before knowledge_add for broad directories, large repositories, or sources that may contain private or low-signal text",
+			"Show the user suggested exclusions and technical skips before asking whether to include risky or low-signal text",
+			"After the user confirms scope, call knowledge_add with matching include_suggested_text, include_paths, or exclude_paths",
+			"Do not use knowledge_plan as a substitute for knowledge_search; it only plans indexing scope",
+		],
+		parameters: Type.Object({
+			source: Type.String({ description: "File path, directory path, URL, or inline text to inspect before indexing" }),
+			include_suggested_text: Type.Optional(
+				Type.Boolean({
+					description:
+						"Preview the scope if suggested-excluded text such as vendor/build/runtime/cache/secret-named text is included",
+				}),
+			),
+			include_paths: Type.Optional(
+				Type.Array(
+					Type.String({
+						description:
+							"Relative paths under a directory source to include even when they match suggested-exclude patterns",
+					}),
+				),
+			),
+			exclude_paths: Type.Optional(
+				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this plan" })),
+			),
+		}),
+		execute(_id, params) {
+			const { source, include_suggested_text, include_paths, exclude_paths } = params;
+			const plan = engine.plan(source, {
+				include_suggested_text: include_suggested_text === true,
+				include_paths: Array.isArray(include_paths)
+					? include_paths.filter((item) => typeof item === "string")
+					: undefined,
+				exclude_paths: Array.isArray(exclude_paths)
+					? exclude_paths.filter((item) => typeof item === "string")
+					: undefined,
+			});
+			const samples = plan.skipped.samples
+				.map((sample) => `- ${sample.reason}: ${sample.path}${sample.size ? ` (${sample.size} bytes)` : ""}`)
+				.join("\n");
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							plan.summary,
+							`Source type: ${plan.source_type}`,
+							`Skipped summary: ${JSON.stringify(plan.skipped.by_reason)}`,
+							samples ? `Skipped samples:\n${samples}` : "Skipped samples: none",
+						].join("\n"),
+					},
+				],
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "knowledge_add",
 		label: "Knowledge Add",
 		description: "Index files, directories, or text into a named knowledge base for semantic search",
 		promptSnippet: "Index files/dirs/text into a searchable knowledge base",
 		promptGuidelines: [
+			"Use knowledge_plan first for broad directories, large repositories, or sources that may contain private or low-signal text",
 			"Use knowledge_add when the user asks to index, remember, or learn from files or documentation",
-			"Prefer one knowledge_add call for the project root or relevant directory; do not call it once per file",
+			"Prefer one knowledge_add call for the project root or relevant directory with include_paths/exclude_paths; do not call it once per file",
 			"If a knowledge base with the same name already exists, use knowledge_update or ask before replacing it",
-			"Do not index secrets or environment-specific config files unless the user explicitly asks for that exact file",
-			"Index source, documentation, and configuration rather than generated browser/runtime/build/vendor artifacts",
-			"Default directory indexing skips common generated and browser runtime artifacts, while preserving browser-domain source directories such as chromium/firefox/webkit",
+			"Index source, documentation, and ordinary configuration files that explain how the project works",
+			"Default directory indexing suggests excluding generated, vendor, browser runtime, obvious secret, and low-signal text artifacts; these are not permanent blocks",
+			"For ambiguous or risky text such as .env, private keys, certificates, credential-named files, settings.json, appsettings.json, cloud config, editor config, generated reports, lockfiles, or vendor text, explain the tradeoff and ask the user before including it",
+			"If the user confirms a suggested-excluded text file or directory should be indexed, call knowledge_add with include_suggested_text or a focused include_paths value so the tool follows the confirmed scope",
+			"Non-text, unsupported binary, oversized, unreadable, and inaccessible files remain technical skips even when the user wants broad indexing",
 			"Provide a descriptive name for this single knowledge base",
 		],
 		parameters: Type.Object({
 			source: Type.String({ description: "File path, directory path, or inline text to index" }),
 			name: Type.String({ description: "Display name for this knowledge base" }),
+			include_suggested_text: Type.Optional(
+				Type.Boolean({
+					description:
+						"Include text files that are normally suggested for exclusion, such as vendor/build/runtime/cache/secret-named text, after user confirmation",
+				}),
+			),
+			include_paths: Type.Optional(
+				Type.Array(
+					Type.String({
+						description:
+							"Relative paths under a directory source to include even when they match suggested-exclude patterns",
+					}),
+				),
+			),
+			exclude_paths: Type.Optional(
+				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this KB" })),
+			),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
-			const { source, name } = params;
+			const { source, name, include_suggested_text, include_paths, exclude_paths } = params;
 			const { kb, chunkCount } = await engine.add(
 				source,
 				name,
@@ -217,6 +302,15 @@ export default function (pi: ExtensionAPI) {
 					onUpdate?.({ content: [{ type: "text", text: msg }] });
 				},
 				_signal,
+				{
+					include_suggested_text: include_suggested_text === true,
+					include_paths: Array.isArray(include_paths)
+						? include_paths.filter((item) => typeof item === "string")
+						: undefined,
+					exclude_paths: Array.isArray(exclude_paths)
+						? exclude_paths.filter((item) => typeof item === "string")
+						: undefined,
+				},
 			);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {

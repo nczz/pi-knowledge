@@ -96,6 +96,23 @@ describe("KnowledgeEngine", () => {
 	});
 
 	describe("add", () => {
+		it("plans suggested exclusions without writing a knowledge base", () => {
+			const projectDir = join(TEST_DIR, "plan-project");
+			mkdirSync(join(projectDir, "node_modules"), { recursive: true });
+			writeFileSync(join(projectDir, "src.ts"), "export const PlanSourceToken = true;");
+			writeFileSync(join(projectDir, ".env"), "PLAN_SECRET_TOKEN=1");
+			writeFileSync(join(projectDir, "node_modules", "pkg.js"), "export const PlanVendorToken = true;");
+			writeFileSync(join(projectDir, "image.png"), Buffer.from([0x89, 0x50, 0x00]));
+
+			const plan = engine.plan(projectDir);
+
+			expect(engine.list()).toHaveLength(0);
+			expect(plan.source_type).toBe("directory");
+			expect(plan.scannable_files).toBe(1);
+			expect(plan.skipped.by_reason.suggested_excluded).toBeGreaterThan(0);
+			expect(plan.skipped.by_reason.binary).toBe(1);
+		});
+
 		it("rejects duplicate knowledge base names", async () => {
 			await engine.add("Original content about authentication tokens and sessions.", "Duplicate");
 
@@ -179,25 +196,58 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
-		it("directory indexing skips common build output and secret config files", async () => {
+		it("directory indexing keeps ordinary config while skipping build output and obvious secrets", async () => {
 			const projectDir = join(TEST_DIR, "project");
 			mkdirSync(join(projectDir, "src"), { recursive: true });
 			mkdirSync(join(projectDir, "bin"), { recursive: true });
 			mkdirSync(join(projectDir, "obj"), { recursive: true });
 			writeFileSync(join(projectDir, "src", "Program.cs"), 'public class Program { string topic = "AlphaSafeToken"; }');
-			writeFileSync(join(projectDir, "setting.json"), '{"ConnectionString":"SecretShouldNotIndex"}');
+			writeFileSync(join(projectDir, "settings.json"), '{"FeatureFlag":"ConfigShouldIndexToken"}');
+			writeFileSync(join(projectDir, ".env"), "API_KEY=SecretShouldNotIndex");
+			writeFileSync(join(projectDir, "service.key"), "PrivateKeyShouldNotIndex");
 			writeFileSync(join(projectDir, "bin", "runtime.json"), '{"runtime":"BuildOutputShouldNotIndex"}');
 			writeFileSync(join(projectDir, "obj", "assets.json"), '{"asset":"ObjShouldNotIndex"}');
 
 			const { kb } = await engine.add(projectDir, "Filtered Project");
 
-			expect(kb.file_count).toBe(1);
+			expect(kb.file_count).toBe(2);
 			const safe = await engine.search("AlphaSafeToken", { mode: "fast" });
 			expect(safe.total_count).toBeGreaterThan(0);
+			const config = await engine.search("ConfigShouldIndexToken", { mode: "fast" });
+			expect(config.total_count).toBeGreaterThan(0);
 			const secret = await engine.search("SecretShouldNotIndex", { mode: "fast" });
 			expect(secret.total_count).toBe(0);
+			const privateKey = await engine.search("PrivateKeyShouldNotIndex", { mode: "fast" });
+			expect(privateKey.total_count).toBe(0);
 			const build = await engine.search("BuildOutputShouldNotIndex", { mode: "fast" });
 			expect(build.total_count).toBe(0);
+		});
+
+		it("can index suggested-excluded text after user-confirmed scope override", async () => {
+			const projectDir = join(TEST_DIR, "confirmed-project");
+			mkdirSync(join(projectDir, "src"), { recursive: true });
+			mkdirSync(join(projectDir, "node_modules", "chosen"), { recursive: true });
+			writeFileSync(join(projectDir, "src", "main.ts"), "export const MainToken = true;");
+			writeFileSync(join(projectDir, ".env"), "CONFIRMED_SECRET_TOKEN=1");
+			writeFileSync(
+				join(projectDir, "node_modules", "chosen", "index.js"),
+				"export const ConfirmedVendorToken = true;",
+			);
+
+			const { kb } = await engine.add(projectDir, "Confirmed Scope", undefined, undefined, {
+				include_paths: [".env", "node_modules/chosen/index.js"],
+			});
+
+			expect(kb.file_count).toBe(3);
+			const secret = await engine.search("CONFIRMED_SECRET_TOKEN", { mode: "fast" });
+			expect(secret.total_count).toBeGreaterThan(0);
+			const vendor = await engine.search("ConfirmedVendorToken", { mode: "fast" });
+			expect(vendor.total_count).toBeGreaterThan(0);
+
+			writeFileSync(join(projectDir, ".env"), "CONFIRMED_SECRET_TOKEN=1\nUPDATED_CONFIRMED_SECRET=1");
+			await engine.update("Confirmed Scope");
+			const updated = await engine.search("UPDATED_CONFIRMED_SECRET", { mode: "fast" });
+			expect(updated.total_count).toBeGreaterThan(0);
 		});
 	});
 

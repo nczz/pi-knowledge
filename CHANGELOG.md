@@ -5,6 +5,7 @@
 ### Added
 - Added persisted indexing job state for long-running `knowledge_add`, `knowledge_update`, and `knowledge_import` operations. `knowledge_status` now reports operation, phase, last progress message, last progress age, processed files/chunks, skipped count, and add/remove/unchanged counts so large indexing runs do not look frozen after transient tool updates disappear.
 - Added metadata-only directory planning and chunk throughput in indexing progress so large repositories show total scannable files, skipped counts, chunks/sec, and file ETA before expensive embedding starts.
+- Added `knowledge_plan` as a no-write indexing scope inspection tool so agents can show scannable files, suggested exclusions, and technical skips before asking the user to confirm risky or low-signal text.
 - Added contextual indexing for rebuilds: embeddings and FTS now include file path, file type, heading breadcrumbs, and code symbols while keeping returned chunk content readable.
 - Added more focused rebuild-time chunking for Markdown and plain text, with reduced overlap to avoid near-duplicate retrieval units.
 - Added adaptive search mode with query-time contextual window expansion around relevant seed chunks.
@@ -16,7 +17,11 @@
 - Added confidence gating for hybrid search so low-evidence garbage queries return no results instead of unrelated matches.
 - Strengthened source-file intent scoring so named modules and core implementation files outrank overview and test files when appropriate.
 - Demoted localization catalogs for implementation-oriented queries while preserving them for explicit translation or locale intent.
-- Excluded generated knowledge-base evaluation reports from default directory indexing to prevent self-referential retrieval pollution.
+- Suggested excluding generated knowledge-base evaluation reports from default directory indexing to prevent self-referential retrieval pollution, while allowing confirmed inclusion through scope overrides.
+
+### Changed
+- Reworked directory indexing policy from hard text-file blocking to suggested exclusions plus confirmed scope overrides. Risky or low-signal text such as `.env`, secret/credential-named text, generated reports, lockfiles, vendor text, build output text, and runtime/cache text is skipped by default but can be included after user confirmation with `include_suggested_text` or focused `include_paths`. Unsupported binary/non-text, oversized, unreadable, inaccessible, and unextractable files remain technical skips.
+- Persisted confirmed include/exclude scope options so `knowledge_update` preserves the same directory indexing scope instead of silently dropping user-confirmed text files.
 
 ## [0.3.5] - 2026-06-15
 

@@ -244,3 +244,25 @@
 
 **限制**:
 - 搜尋仍是 exact scan，不是 ANN。若未來需要百萬級 chunk 的低延遲搜尋，需改成 mmap/分片向量索引或外部 ANN index。
+
+---
+
+## ADR-016: 文字檔風險由 agent 與使用者確認，不做永久硬排除
+
+**狀態**: 已決定
+
+**背景**: 大型專案常把重要架構、feature flags、module wiring、cloud/runtime 行為放在 `settings.json`、`appsettings.json`、`.env`、editor config、generated report、lockfile、vendor text 或其他設定/文字檔中。這些檔案可能是專案知識，也可能包含私人資訊或降低搜尋精準度。若產品層用 broad hard ignore 直接排除文字檔，會讓合法索引需求建立不完整 KB；若完全不提示 agent，又可能把敏感或低價值內容納入索引。
+
+**決策**:
+- hard skip 只用於技術不可索引或會破壞穩定性的內容: unsupported binary/non-text、oversized、unreadable、inaccessible、無法抽取文字的文件。
+- `.env`、private-key-looking text、credential/secret-named text、generated report、lockfile、vendor text、build output text、runtime/cache text 是 suggested exclusion，不是永久 hard block。
+- `knowledge_plan` 是 no-write inspection tool，讓 agent 在建立 KB 前先回報 scannable files、suggested exclusions、technical skips，再請使用者確認。
+- `knowledge_add` 預設可以略過 suggested exclusions，但必須提供 `include_suggested_text` 與 focused `include_paths` 讓 agent 在使用者確認後納入。
+- `exclude_paths` 讓 agent 能在單一專案 KB 中精準排除使用者不想索引的文字檔，不需要拆成大量 per-file KB。
+- confirmed scope options 必須持久化，`knowledge_update` 需重用同一套 include/exclude 規則，避免更新後悄悄丟失使用者確認過的文字檔。
+- `knowledge_add` prompt guidance 必須要求 agent 把 source/docs/config 當成專案知識候選，同時對 ambiguous/risky/low-signal text 做風險與精準度判斷；若看起來可能是 environment-specific、private data 或搜尋污染來源，先向使用者確認。
+
+**理由**:
+- 工具層 hard block 應用在技術不可索引與穩定性底線；文字內容是否值得索引是產品/agent/user 的範圍決策。
+- 將模糊決策移到 prompt、scan suggestions 與 user confirmation，可以保留完整性，同時讓使用者對隱私與精準度風險有最後決定權。
+- 這比針對單一測試專案調整 ignore 更通用，適用於 .NET、Node、Java、cloud-native、browser tooling 等不同專案型態。

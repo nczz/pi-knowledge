@@ -1,7 +1,12 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { createSkippedScanStats, iterateScannableFiles, type ScanResult } from "../indexer/chunker.ts";
+import {
+	createSkippedScanStats,
+	iterateScannableFiles,
+	type ScanOptions,
+	type ScanResult,
+} from "../indexer/chunker.ts";
 import { getIndexingJob, type IndexingJob, iterateChunksByKB, type KnowledgeBase } from "../storage/sqlite.ts";
 
 export interface DiagnosticResult {
@@ -27,6 +32,28 @@ function staleIndexingMs(): number {
 	return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_INDEXING_MS;
 }
 
+function scanOptionsFromSourceOptions(raw: string | null): ScanOptions {
+	if (!raw) return {};
+	try {
+		const parsed = JSON.parse(raw) as {
+			include_suggested_text?: unknown;
+			include_paths?: unknown;
+			exclude_paths?: unknown;
+		};
+		return {
+			includeSuggestedText: parsed.include_suggested_text === true,
+			includePaths: Array.isArray(parsed.include_paths)
+				? parsed.include_paths.filter((item) => typeof item === "string")
+				: undefined,
+			excludePaths: Array.isArray(parsed.exclude_paths)
+				? parsed.exclude_paths.filter((item) => typeof item === "string")
+				: undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
 export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): DiagnosticResult {
 	const statusAgeMs = Date.now() - kb.updated_at;
 	const job = getIndexingJob(db, kb.id);
@@ -46,7 +73,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 		skipped_files: {
 			total: 0,
 			by_reason: {
-				ignored: 0,
+				suggested_excluded: 0,
 				oversized: 0,
 				binary: 0,
 				unreadable: 0,
@@ -67,7 +94,13 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 	try {
 		if (isDirectory) {
 			const skipped = createSkippedScanStats();
-			for (const file of iterateScannableFiles(kb.source_path, skipped)) currentFiles.add(file.relPath);
+			for (const file of iterateScannableFiles(
+				kb.source_path,
+				skipped,
+				scanOptionsFromSourceOptions(kb.source_options),
+			)) {
+				currentFiles.add(file.relPath);
+			}
 			result.skipped_files = skipped;
 		} else {
 			currentFiles.add(kb.source_path);

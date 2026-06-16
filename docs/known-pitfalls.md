@@ -139,6 +139,12 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 如果差距很大，優先補 ignore 規則，而不是調整 embedding/ranking。
 
+## Ambiguous config should not be hard-excluded
+
+`settings.json`、`appsettings.json`、`.env`、credential/secret-named text、cloud/editor/runtime config 這類檔案可能是專案行為的關鍵知識，也可能含有環境或私人資訊。不要為了「避免敏感資料」而把文字檔做成無法覆蓋的產品層 hard block，否則會讓使用者明確想索引設定、或大型專案需要設定脈絡時建立不完整的 KB。
+
+產品層 hard skip 只適合技術不可索引或會破壞穩定性的內容: unsupported binary/non-text、oversized、unreadable、inaccessible、無法抽取文字的文件。其他文字檔應是 suggested exclusion: 預設提醒並略過，但 agent 可在向使用者確認後用 `include_suggested_text` 或 focused `include_paths` 納入。這包含 `.env`、secret/credential-named text、private-key-looking text、generated report、lockfile、vendor text、build output text、runtime/cache text。普通 config 的取捨應放在 `knowledge_add` prompt guidance: agent 需要判斷它是專案知識還是 environment/private data；風險不明時先問使用者，而不是工具單方面永久阻擋。
+
 ## Large indexing must be bounded and observable
 
 大型 codebase 建立 KB 是受支援的長任務；產品可以花時間完成，但不能因規模大而崩潰、靜默假死或留下看似健康的 partial KB。不能把「掃描完成、全部 chunk 放進陣列、全部 embedding、全部向量一次寫檔」當作可接受流程。這會在最糟情境產生三種問題:

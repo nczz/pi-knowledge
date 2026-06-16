@@ -10,6 +10,7 @@ export interface KnowledgeBase {
 	description: string | null;
 	source_path: string | null;
 	source_type: "file" | "directory" | "text" | "url";
+	source_options: string | null;
 	created_at: number;
 	updated_at: number;
 	chunk_count: number;
@@ -53,7 +54,7 @@ export interface Chunk {
 
 export type ChunkInsert = Omit<Chunk, "id" | "kb_id" | "indexed_at">;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   description TEXT,
   source_path TEXT,
   source_type TEXT NOT NULL DEFAULT 'directory',
+  source_options TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   chunk_count INTEGER NOT NULL DEFAULT 0,
@@ -189,6 +191,13 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 `,
 	};
 	for (let v = from + 1; v <= to; v++) {
+		if (v === 3) {
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "source_options")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN source_options TEXT");
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -197,14 +206,29 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 
 export function createKB(
 	db: Database.Database,
-	opts: { name: string; description?: string; source_path?: string; source_type: KnowledgeBase["source_type"] },
+	opts: {
+		name: string;
+		description?: string;
+		source_path?: string;
+		source_type: KnowledgeBase["source_type"];
+		source_options?: string;
+	},
 ): KnowledgeBase {
 	const id = randomUUID();
 	const now = Date.now();
 	db.prepare(
-		`INSERT INTO knowledge_bases (id, name, description, source_path, source_type, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-	).run(id, opts.name, opts.description ?? null, opts.source_path ?? null, opts.source_type, now, now);
+		`INSERT INTO knowledge_bases (id, name, description, source_path, source_type, source_options, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	).run(
+		id,
+		opts.name,
+		opts.description ?? null,
+		opts.source_path ?? null,
+		opts.source_type,
+		opts.source_options ?? null,
+		now,
+		now,
+	);
 	const kb = getKB(db, id);
 	if (!kb) throw new Error(`Failed to create knowledge base: ${id}`);
 	return kb;
