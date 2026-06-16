@@ -37,15 +37,19 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 ## Research-Backed Retrieval
 
-`pi-knowledge` applies and dogfoods retrieval techniques from RAG and information retrieval research:
+`pi-knowledge` turns retrieval research into product behavior that agents can actually use:
 
-- **Contextual Retrieval**: searchable embeddings and FTS text include deterministic local context such as file path, file type, Markdown heading breadcrumbs, and code symbols, following the core idea from Anthropic's Contextual Retrieval work without sending chunks to an LLM to generate context.
-- **Hybrid retrieval**: BM25 and dense embeddings are fused with normalized weighted scores, preserving useful score spread for diagnostics instead of hiding relevance differences behind compressed rank-only scores.
-- **Diversity reranking**: MMR-style reranking, file interleaving, vector redundancy checks, and adaptive-window overlap collapse reduce repeated README or same-file chunks in top results.
-- **Intent-aware ranking**: source, documentation/setup, test, and localization intent are handled differently so implementation queries return implementation files, setup queries return guides, test queries can surface tests, and translation catalogs do not dominate general code searches.
-- **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks.
+- **RAG-native project memory**: follows the Retrieval-Augmented Generation pattern from Lewis et al. 2020: keep source truth outside the model, retrieve it at answer time, and inject only relevant context.
+- **Dense semantic recall**: uses multilingual dense embeddings in the spirit of Dense Passage Retrieval (Karpukhin et al. 2020), so conceptual queries can find code/docs even when wording differs.
+- **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and code symbols with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
+- **Hybrid retrieval with diagnosable scores**: combines BM25 and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
+- **MMR-style diversity**: uses Maximal Marginal Relevance ideas (Goldstein and Carbonell 1998), file interleaving, vector redundancy checks, and adaptive-window overlap collapse so repeated README or same-file chunks do not dominate top results.
+- **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
+- **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks, reducing false confidence when the KB does not contain the answer.
 
-In project-level dogfood, these changes improved a real codebase evaluation from early 3.x/5 quality to above 4.5/5 after rebuilds, with fixes for score compression, README repetition, garbage-query false positives, small-module discoverability, and source-vs-test ranking. Existing KBs should be rebuilt or updated after upgrades that change indexing text.
+This is intentionally not a heavy ColBERT-style late-interaction index yet (Khattab and Zaharia 2020). The current product chooses lightweight local embeddings, BM25, query-aware ranking, optional cross-encoder reranking, streamed vector scans, and health diagnostics for commercial usefulness with low setup cost.
+
+In project-level dogfood, these changes improved a real codebase evaluation from early 3.x/5 quality to above 4.5/5 after rebuilds, with fixes for score compression, README repetition, garbage-query false positives, small-module discoverability, source-vs-test ranking, indexing stability, and auto-mode false positives. Existing KBs should be rebuilt or updated after upgrades that change indexing text.
 
 ## Quick Start
 

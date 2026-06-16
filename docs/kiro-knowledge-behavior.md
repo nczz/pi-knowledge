@@ -170,8 +170,10 @@ knowledge cancel {
 | 粗略 progress | Real-time: files/chunks/embeddings + ETA |
 | 無 code-aware chunking | AST-based（TS/JS/Python/Go）保留函數邊界 |
 | 無 metadata filter | Filter by file_type, language, kb_name, path |
-| 無 dedup | Content-addressed embedding cache |
-| 無 diagnostics | Staleness, orphans, coverage %, drift warning |
+| 無 dedup | Content-addressed incremental diff（未變更 chunk 不重嵌入） |
+| 無 diagnostics | Staleness, orphans, coverage %, skipped files, stuck indexing, health score |
+| 需要手動選搜尋策略 | `auto` mode 工具層選擇與 fallback，並回傳 mode/retry metadata |
+| 大型 KB 可能吃記憶體 | streamed vector write + ranged read top-K search |
 
 ---
 

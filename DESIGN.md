@@ -177,12 +177,11 @@ Note: multilingual-e5-small chosen over all-MiniLM-L6-v2 because:
 - Only ~10 MB larger (quantized ONNX)
 - See RESEARCH.md §4 for full comparison
 
-### Optional: Pi AI Provider
+### Optional: Environment-configured provider
 
-When user has API keys configured in Pi's model registry, offer higher-quality embeddings:
-- OpenAI `text-embedding-3-small` (1536d)
-- Google `text-embedding-004` (768d)
-- Configurable via `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small`
+The default path is local ONNX. If `PI_KNOWLEDGE_EMBEDDING` is set to an external provider and the matching environment API key is available, embeddings can use that provider with local fallback:
+- OpenAI `text-embedding-3-small` via `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small`
+- `OPENAI_API_KEY` is required for OpenAI embedding
 
 ### Vector Storage
 
