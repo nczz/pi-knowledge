@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.2] - 2026-06-18
+
+### Changed
+- Added the `pi-package` npm keyword so the published package can be discovered by Pi's package catalog.
+- Published the updated product positioning metadata introduced after v0.4.1, including local-first RAG, hybrid code/doc search, reranking, diagnostics, and large-project indexing keywords.
+
 ## [0.4.1] - 2026-06-16
 
 ### Fixed
