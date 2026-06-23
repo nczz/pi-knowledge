@@ -1,6 +1,6 @@
 {
 	"name": "pi-knowledge",
-	"version": "0.4.3",
+	"version": "0.4.4",
 	"description": "Local-first RAG knowledge base for Pi agents with hybrid code/doc search, reranking, diagnostics, and large-project indexing",
 	"type": "module",
 	"main": "dist/index.js",

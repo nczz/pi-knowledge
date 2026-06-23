@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.4] - 2026-06-23
+
+### Fixed
+- Simplified the packaged `extension.js` entry shim while preserving the built `dist/` first, source `index.ts` fallback behavior for local development.
+
 ## [0.4.3] - 2026-06-23
 
 ### Fixed
