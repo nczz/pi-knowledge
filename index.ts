@@ -1,6 +1,6 @@
-import { KnowledgeEngine } from "./src/engine.ts";
-import { getDefaultKnowledgeDir } from "./src/storage/sqlite.ts";
-import { getActiveWatcherCount, startWatcher, stopAllWatchers } from "./src/watcher/file-watcher.ts";
+type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
+type StorageRuntime = typeof import("./src/storage/sqlite.ts");
+type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
 type ToolUpdate = (result: ToolResult) => void;
@@ -23,7 +23,10 @@ type ContextEvent = { messages: Array<{ role: string; content?: unknown }> };
 type BeforeAgentStartEvent = { systemPrompt: string };
 type ExtensionAPI = {
 	on(event: "context", handler: (event: ContextEvent, ctx: unknown) => unknown): void;
-	on(event: "before_agent_start", handler: (event: BeforeAgentStartEvent, ctx: unknown) => unknown): void;
+	on(
+		event: "before_agent_start",
+		handler: (event: BeforeAgentStartEvent, ctx: unknown) => unknown | Promise<unknown>,
+	): void;
 	on(event: "session_start" | "session_shutdown", handler: (event: unknown, ctx: unknown) => unknown): void;
 	registerTool(tool: ToolDefinition): void;
 };
@@ -66,17 +69,99 @@ const Type = {
 	},
 };
 
-const engine = new KnowledgeEngine();
+type Runtime = {
+	engine: KnowledgeEngineInstance;
+	storage: StorageRuntime;
+	watcher: WatcherRuntime;
+};
+
+const RUNTIME_EXTENSION = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
 const AUTO_INJECT = process.env.PI_KNOWLEDGE_AUTO_INJECT === "true";
 
+let runtime: Runtime | undefined;
+let runtimePromise: Promise<Runtime> | undefined;
+let initializePromise: Promise<Runtime> | undefined;
+let initialized = false;
+let disposePromise: Promise<void> | undefined;
+
+function runtimeModule(modulePath: string): string {
+	return `${modulePath}${RUNTIME_EXTENSION}`;
+}
+
+async function loadRuntime(): Promise<Runtime> {
+	if (disposePromise) await disposePromise;
+	if (runtime) return runtime;
+	runtimePromise ??= Promise.all([
+		import(runtimeModule("./src/engine")),
+		import(runtimeModule("./src/storage/sqlite")),
+		import(runtimeModule("./src/watcher/file-watcher")),
+	]).then(([engineModule, storage, watcher]) => {
+		runtime = { engine: new engineModule.KnowledgeEngine(), storage, watcher };
+		return runtime;
+	});
+	return runtimePromise;
+}
+
+async function ensureInitialized(): Promise<Runtime> {
+	if (disposePromise) await disposePromise;
+	if (initialized && runtime) return runtime;
+	initializePromise ??= (async () => {
+		const loaded = await loadRuntime();
+		await loaded.engine.initialize(loaded.storage.getDefaultKnowledgeDir());
+		initialized = true;
+		return loaded;
+	})();
+	try {
+		return await initializePromise;
+	} catch (error) {
+		initializePromise = undefined;
+		throw error;
+	}
+}
+
+async function disposeRuntime(): Promise<void> {
+	if (disposePromise) return disposePromise;
+	const pendingInitialize = initializePromise;
+	const pendingRuntime = runtimePromise;
+	disposePromise = (async () => {
+		let loaded = runtime;
+		if (!loaded && pendingInitialize) {
+			try {
+				loaded = await pendingInitialize;
+			} catch {
+				loaded = runtime;
+			}
+		}
+		if (!loaded && pendingRuntime) {
+			try {
+				loaded = await pendingRuntime;
+			} catch {
+				loaded = runtime;
+			}
+		}
+		initialized = false;
+		initializePromise = undefined;
+		runtime = undefined;
+		runtimePromise = undefined;
+		if (!loaded) return;
+		loaded.watcher.stopAllWatchers();
+		await loaded.engine.dispose({ disposeModels: false });
+	})();
+	try {
+		await disposePromise;
+	} finally {
+		disposePromise = undefined;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
-		await engine.initialize(getDefaultKnowledgeDir());
+		const { engine, watcher } = await ensureInitialized();
 		if (WATCH_ENABLED) {
 			for (const kb of engine.list()) {
 				if (kb.source_path && kb.source_type === "directory") {
-					startWatcher(kb.id, kb.source_path, (kbId) => {
+					watcher.startWatcher(kb.id, kb.source_path, (kbId) => {
 						engine.update(kbId).catch(() => {});
 					});
 				}
@@ -85,21 +170,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		stopAllWatchers();
-		await engine.dispose({ disposeModels: false });
+		await disposeRuntime();
 	});
 
 	// Auto-inject: search KB for relevant context before each LLM call (opt-in)
 	if (AUTO_INJECT) {
 		pi.on("context", async (event) => {
-			const kbs = engine.list();
-			if (kbs.length === 0) return;
-			// Find last user message
-			const lastUser = [...event.messages].reverse().find((m) => m.role === "user");
-			if (!lastUser) return;
-			const text = "content" in lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
-			if (!text || text.length < 5) return;
 			try {
+				const { engine } = await ensureInitialized();
+				const kbs = engine.list();
+				if (kbs.length === 0) return;
+				// Find last user message
+				const lastUser = [...event.messages].reverse().find((m) => m.role === "user");
+				if (!lastUser) return;
+				const text = "content" in lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
+				if (!text || text.length < 5) return;
 				const results = await engine.search(text, { mode: "fast", limit: 3 });
 				if (results.results.length === 0) return;
 				const context = results.results.map((r) => `[${r.file_path}]: ${r.snippet}`).join("\n\n");
@@ -112,7 +197,8 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", async (event) => {
+		const { engine } = await ensureInitialized();
 		const kbs = engine.list();
 		if (kbs.length === 0) return undefined;
 		const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
@@ -154,7 +240,8 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this plan" })),
 			),
 		}),
-		execute(_id, params) {
+		async execute(_id, params) {
+			const { engine } = await ensureInitialized();
 			const { source, include_suggested_text, include_paths, exclude_paths } = params as {
 				source: string;
 				include_suggested_text?: boolean;
@@ -228,6 +315,7 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
+			const { engine, watcher } = await ensureInitialized();
 			const { source, name, include_suggested_text, include_paths, exclude_paths } = params as {
 				source: string;
 				name: string;
@@ -254,7 +342,7 @@ export default function (pi: ExtensionAPI) {
 			);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
-				startWatcher(kb.id, kb.source_path, (kbId) => {
+				watcher.startWatcher(kb.id, kb.source_path, (kbId) => {
 					engine.update(kbId).catch(() => {});
 				});
 			}
@@ -306,6 +394,7 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params) {
+			const { engine } = await ensureInitialized();
 			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params as {
 				query: string;
 				mode?: "auto" | "fast" | "semantic" | "hybrid" | "deep" | "adaptive";
@@ -363,6 +452,7 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to update" }),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
+			const { engine } = await ensureInitialized();
 			const { added, removed, unchanged } = await engine.update(
 				(params as { target: string }).target,
 				(msg) => {
@@ -382,11 +472,12 @@ export default function (pi: ExtensionAPI) {
 		description: "Show knowledge engine status with health diagnostics: staleness, orphans, and coverage",
 		parameters: Type.Object({}),
 		async execute() {
+			const { engine, storage, watcher } = await ensureInitialized();
 			const kbs = engine.list();
-			const watchCount = getActiveWatcherCount();
+			const watchCount = watcher.getActiveWatcherCount();
 			const diagnostics = engine.diagnose();
 			const lines = [
-				`Storage: ${getDefaultKnowledgeDir()}`,
+				`Storage: ${storage.getDefaultKnowledgeDir()}`,
 				`Knowledge bases: ${kbs.length}`,
 				`Active watchers: ${watchCount}`,
 				"",
@@ -458,6 +549,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Diagnose knowledge base health and recommended actions",
 		parameters: Type.Object({}),
 		async execute() {
+			const { engine } = await ensureInitialized();
 			const report = engine.doctor();
 			const lines = [`Health score: ${report.health_score}/100`, report.summary, ""];
 			if (report.issues.length === 0) {
@@ -479,6 +571,7 @@ export default function (pi: ExtensionAPI) {
 		description: "List all indexed knowledge bases",
 		parameters: Type.Object({}),
 		async execute() {
+			const { engine } = await ensureInitialized();
 			const kbs = engine.list();
 			if (kbs.length === 0) return { content: [{ type: "text", text: "No knowledge bases." }] };
 			const lines = kbs.map((kb) => `• ${kb.name} — ${kb.chunk_count} chunks, ${kb.file_count} files (${kb.status})`);
@@ -494,6 +587,7 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to remove" }),
 		}),
 		async execute(_id, params) {
+			const { engine } = await ensureInitialized();
 			const ok = engine.remove((params as { target: string }).target);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
 		},
@@ -508,6 +602,7 @@ export default function (pi: ExtensionAPI) {
 			output: Type.String({ description: "Output file path (.jsonl)" }),
 		}),
 		async execute(_id, params) {
+			const { engine } = await ensureInitialized();
 			const { target, output } = params as { target: string; output: string };
 			const count = await engine.exportKB(target, output);
 			return { content: [{ type: "text", text: `Exported ${count} chunks to ${output}` }] };
@@ -522,6 +617,7 @@ export default function (pi: ExtensionAPI) {
 			input: Type.String({ description: "Input JSONL file path" }),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
+			const { engine } = await ensureInitialized();
 			const { kb, chunkCount } = await engine.importKB(
 				(params as { input: string }).input,
 				(msg) => {
@@ -539,6 +635,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Remove all knowledge bases",
 		parameters: Type.Object({}),
 		async execute() {
+			const { engine } = await ensureInitialized();
 			engine.clear();
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
 		},

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import Database from "better-sqlite3";
+import { fileURLToPath } from "node:url";
+import type Database from "better-sqlite3";
 
 export interface KnowledgeBase {
 	id: string;
@@ -135,6 +137,80 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
 END;
 `;
 
+type DatabaseConstructor = typeof Database;
+
+const localRequire = createRequire(import.meta.url);
+let databaseConstructor: DatabaseConstructor | undefined;
+let betterSqlite3PackageRoot: string | undefined;
+
+function findBetterSqlite3PackageRoot(): string | undefined {
+	if (betterSqlite3PackageRoot) return betterSqlite3PackageRoot;
+	let current = dirname(fileURLToPath(import.meta.url));
+	while (true) {
+		const candidate = join(current, "node_modules", "better-sqlite3");
+		if (existsSync(join(candidate, "package.json"))) {
+			betterSqlite3PackageRoot = candidate;
+			return betterSqlite3PackageRoot;
+		}
+		const parent = dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function findBetterSqlite3Entry(): string | undefined {
+	const packageRoot = findBetterSqlite3PackageRoot();
+	return packageRoot ? join(packageRoot, "lib", "index.js") : undefined;
+}
+
+function findBetterSqlite3NativeBinding(): string | undefined {
+	const packageRoot = findBetterSqlite3PackageRoot();
+	if (!packageRoot) return undefined;
+	const candidate = join(packageRoot, "build", "Release", "better_sqlite3.node");
+	return existsSync(candidate) ? candidate : undefined;
+}
+
+function betterSqlite3PackageName(): string {
+	return ["better", "sqlite3"].join("-");
+}
+
+function bunSqliteModuleName(): string {
+	return ["bun", "sqlite"].join(":");
+}
+
+function isBunRuntime(): boolean {
+	return typeof (process.versions as { bun?: unknown }).bun === "string";
+}
+
+function loadDatabaseConstructor(): DatabaseConstructor {
+	if (databaseConstructor) return databaseConstructor;
+	if (isBunRuntime()) {
+		const bunSqlite = localRequire(bunSqliteModuleName()) as { Database: unknown };
+		databaseConstructor = bunSqlite.Database as DatabaseConstructor;
+		return databaseConstructor;
+	}
+	try {
+		databaseConstructor = localRequire(betterSqlite3PackageName()) as DatabaseConstructor;
+		return databaseConstructor;
+	} catch (error) {
+		const entry = findBetterSqlite3Entry();
+		if (entry) {
+			databaseConstructor = localRequire(entry) as DatabaseConstructor;
+			return databaseConstructor;
+		}
+		throw error;
+	}
+}
+
+function applyPragma(db: Database.Database, pragma: string): void {
+	const sqlite = db as Database.Database & { pragma?: (source: string) => unknown };
+	if (typeof sqlite.pragma === "function") {
+		sqlite.pragma(pragma);
+		return;
+	}
+	db.exec(`PRAGMA ${pragma}`);
+}
+
 export function getDefaultKnowledgeDir(): string {
 	const explicit = process.env.PI_KNOWLEDGE_DIR?.trim() || process.env.OMP_KNOWLEDGE_DIR?.trim();
 	if (explicit) return explicit;
@@ -176,10 +252,12 @@ export function openDatabase(knowledgeDir?: string): Database.Database {
 		mkdirSync(dir, { recursive: true });
 	}
 	const dbPath = join(dir, "knowledge.db");
-	const db = new Database(dbPath);
-	db.pragma("journal_mode = WAL");
-	db.pragma("busy_timeout = 5000");
-	db.pragma("foreign_keys = ON");
+	const Database = loadDatabaseConstructor();
+	const nativeBinding = isBunRuntime() ? undefined : findBetterSqlite3NativeBinding();
+	const db = nativeBinding ? new Database(dbPath, { nativeBinding }) : new Database(dbPath);
+	applyPragma(db, "journal_mode = WAL");
+	applyPragma(db, "busy_timeout = 5000");
+	applyPragma(db, "foreign_keys = ON");
 
 	const hasVersion = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get();
 	if (!hasVersion) {

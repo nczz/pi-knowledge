@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5] - 2026-06-24
+
+### Fixed
+- Deferred extension runtime imports so OMP plugin validation does not resolve native dependencies during install.
+- Added Bun-binary-safe `better-sqlite3` loading fallback for hoisted plugin dependencies.
+- Hardened lazy runtime shutdown so in-flight extension startup is disposed before Pi or OMP exits.
+
 ## [0.4.4] - 2026-06-23
 
 ### Fixed

@@ -75,6 +75,12 @@ node -e "import('./extension.js')"
 
 這能提早發現 package entry、dist 或 startup 依賴問題。
 
+## OMP Bun binary native dependency resolution
+
+OMP plugin install validation runs in a Bun binary path that can statically resolve literal `import()` / `require()` targets before runtime guards run. Keep `extension.js` and root `index.ts` startup-light: do not statically import modules that pull native dependencies such as `better-sqlite3`.
+
+Bun binary resolution may also fail to resolve hoisted native-package dependencies from bare package specifiers. Native loaders should first try normal resolution, then walk parent directories for the installed package entry and require that absolute path with non-literal package names so validation does not pre-resolve it.
+
 ## Biome 2 config schema
 
 Biome 2 使用 `assist.actions.source.organizeImports` 和 `files.includes`；舊的 top-level `organizeImports` 與 `files.ignore` 會讓 `npm run check` 直接失敗。每次升級 Biome 後先跑 `npm run check` 確認 gate 本身可用。
