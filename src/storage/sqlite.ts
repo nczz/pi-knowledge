@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import Database from "better-sqlite3";
 
 export interface KnowledgeBase {
@@ -136,7 +136,38 @@ END;
 `;
 
 export function getDefaultKnowledgeDir(): string {
-	return join(homedir(), ".pi", "knowledge");
+	const explicit = process.env.PI_KNOWLEDGE_DIR?.trim() || process.env.OMP_KNOWLEDGE_DIR?.trim();
+	if (explicit) return explicit;
+
+	const configuredAgentDir = process.env.PI_CODING_AGENT_DIR?.trim() || process.env.OMP_CODING_AGENT_DIR?.trim();
+	if (configuredAgentDir) return resolveHostKnowledgeDir(dirname(configuredAgentDir));
+
+	const hostRoot = join(homedir(), isOmpHost() ? ".omp" : ".pi");
+	return resolveHostKnowledgeDir(hostRoot);
+}
+
+export function resolveHostKnowledgeDir(
+	hostRoot: string,
+	options: { legacyPiDir?: string; exists?: (path: string) => boolean } = {},
+): string {
+	const pathExists = options.exists ?? existsSync;
+	const target = join(hostRoot, "knowledge");
+	const legacyPiDir = options.legacyPiDir ?? join(homedir(), ".pi", "knowledge");
+	if (
+		basename(hostRoot) === ".omp" &&
+		hostRoot.startsWith(homedir()) &&
+		!pathExists(target) &&
+		pathExists(legacyPiDir)
+	) {
+		return legacyPiDir;
+	}
+	return target;
+}
+
+function isOmpHost(): boolean {
+	if (process.env.OMP_PROFILE?.trim()) return true;
+	const candidates = [process.argv[1], process.execPath].filter((value): value is string => typeof value === "string");
+	return candidates.some((value) => basename(value).toLowerCase() === "omp");
 }
 
 export function openDatabase(knowledgeDir?: string): Database.Database {

@@ -1,4 +1,5 @@
 import { type ChildProcess, fork } from "node:child_process";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type WorkerResponse = {
@@ -23,11 +24,28 @@ function rejectPending(error: Error): void {
 	pending.clear();
 }
 
+function getWorkerPath(): string {
+	const workerFile = fileURLToPath(import.meta.url).endsWith(".js") ? "model-worker.js" : "model-worker.ts";
+	return fileURLToPath(new URL(`./${workerFile}`, import.meta.url));
+}
+
+function getWorkerExecArgv(): string[] {
+	return fileURLToPath(import.meta.url).endsWith(".js") ? [] : ["--experimental-strip-types"];
+}
+
+function getNodeExecPath(): string {
+	const configured = process.env.PI_KNOWLEDGE_NODE_PATH?.trim();
+	if (configured) return configured;
+	const execName = basename(process.execPath).toLowerCase();
+	return execName === "node" || execName === "node.exe" ? process.execPath : "node";
+}
+
 function getWorker(): ChildProcess {
 	if (worker?.connected) return worker;
-	const workerPath = fileURLToPath(new URL("./model-worker.ts", import.meta.url));
+	const workerPath = getWorkerPath();
 	worker = fork(workerPath, {
-		execArgv: ["--experimental-strip-types"],
+		execPath: getNodeExecPath(),
+		execArgv: getWorkerExecArgv(),
 		stdio: ["ignore", "ignore", "ignore", "ipc"],
 		env: process.env,
 	});

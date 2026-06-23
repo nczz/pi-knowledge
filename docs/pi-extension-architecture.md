@@ -120,7 +120,7 @@ pi install npm:pi-knowledge
   → npm install pi-knowledge --prefix ~/.pi/agent/npm/ --legacy-peer-deps
   → flat hoisted node_modules:
     ~/.pi/agent/npm/node_modules/
-      pi-knowledge/index.ts
+      pi-knowledge/extension.js  (loads dist/index.js; source fallback for local development)
       better-sqlite3/          (hoisted)
       @huggingface/transformers/ (hoisted)
       onnxruntime-node/        (transitive, hoisted)

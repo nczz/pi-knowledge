@@ -187,7 +187,7 @@ export async function chunkWithAST(
 	const Parser = (await import("tree-sitter")).default;
 	const grammar = await config.grammar();
 	const parser = new Parser();
-	parser.setLanguage(grammar);
+	parser.setLanguage(grammar as Parameters<typeof parser.setLanguage>[0]);
 	const tree = parser.parse(content);
 	const fns = collectChunks(tree.rootNode as unknown as ASTNode, config);
 	if (fns.length === 0) return [];

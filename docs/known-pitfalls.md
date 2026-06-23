@@ -66,13 +66,14 @@ JSONL export 是分享格式，不是原機器 source manifest。不要把本機
 
 ## Pi virtual modules vs Node import
 
-Pi binary 會以 virtual modules 提供 `@earendil-works/pi-*` 和 `typebox`，但裸 Node / CI 不會。根 `index.ts` 應避免 runtime import 這些 module，或把它們列入 dependency。至少要通過：
+Pi binary 會以 virtual modules 提供 `@earendil-works/pi-*` 和 `typebox`，但裸 Node / CI 不會。Package entry 應避免 runtime import 這些 module，或把它們列入 dependency。pi-knowledge 透過 `extension.js` shim 載入已 build 的 `dist/index.js`，並在本地未 build 時 fallback 到 source `index.ts`。至少要通過：
 
 ```bash
-node --experimental-strip-types -e "import('./index.ts')"
+npm run build
+node -e "import('./extension.js')"
 ```
 
-這能提早發現 extension startup 依賴問題。
+這能提早發現 package entry、dist 或 startup 依賴問題。
 
 ## Biome 2 config schema
 

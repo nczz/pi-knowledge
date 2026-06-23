@@ -13,9 +13,9 @@
   "name": "pi-my-extension",
   "version": "0.1.0",
   "type": "module",
-  "main": "index.ts",
-  "pi": { "extensions": ["./index.ts"] },
-  "files": ["index.ts", "src/", ".pi/", "README.md", "LICENSE"],
+  "main": "dist/index.js",
+  "pi": { "extensions": ["./extension.js"] },
+  "files": ["extension.js", "dist/", ".pi/", "README.md", "LICENSE"],
   "keywords": ["pi", "pi-extension"],
   "dependencies": {},
   "devDependencies": { "@types/node": "22.19.19" },
@@ -59,15 +59,15 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-> pi-knowledge 的根 `index.ts` 目前避免 runtime import `typebox` / `@earendil-works/pi-tui`，以便裸 Node strip-only import 也能驗證 startup。新 extension 若依賴 Pi virtual modules，請至少同時用 `pi -e ./index.ts` 和裸 Node import 檢查載入行為。
+> pi-knowledge 使用 `extension.js` 作為 package entry shim：已 build 時載入 `dist/index.js`，本地開發尚未 build 時 fallback 到 `index.ts`。請同時用 `node -e "import('./extension.js')"` 和 `pi -e ./extension.js` 檢查載入行為。
 
 ### 測試
 
 ```bash
 npm install
-node --experimental-strip-types -e "import('./index.ts')"  # startup dependency smoke test
-pi -e ./index.ts            # 直接載入測試
-pi -e ./index.ts -p "use my_tool with input hello"  # one-shot 測試
+node -e "import('./extension.js')"  # startup dependency smoke test
+pi -e ./extension.js            # 直接載入測試
+pi -e ./extension.js -p "use my_tool with input hello"  # one-shot 測試
 ```
 
 ---
@@ -88,7 +88,9 @@ pi.on("session_shutdown", async () => {});             // 清理
 
 ```typescript
 pi.on("before_agent_start", (event) => {
-  event.systemPromptOptions.promptGuidelines?.push("Your custom instruction here");
+  return {
+    systemPrompt: `${event.systemPrompt}\n\nYour custom instruction here`,
+  };
 });
 ```
 
@@ -203,8 +205,8 @@ Pi binary 會提供 virtual modules：
 
 但這些不會自動出現在一般 Node / CI module resolution 中。商用品質要求：
 
-- 根 `index.ts` 應能被 `node --experimental-strip-types -e "import('./index.ts')"` 載入，除非文件明確說明只能在 Pi runtime 載入。
-- Runtime import Pi virtual modules 時，要用 `pi -e ./index.ts` dogfood 驗證。
+- Package entry `extension.js` 應能被 `node -e "import('./extension.js')"` 載入；若專案有 build，必須優先驗證 `dist/` 路徑。
+- Runtime import Pi virtual modules 時，要用 `pi -e ./extension.js` dogfood 驗證。
 - Type-only imports from Pi packages are acceptable when they are erased by Node strip-only TypeScript.
 - Heavy/optional dependencies 可用 dynamic import 延遲載入，但要在 AGENTS.md 記錄為例外。
 
@@ -266,8 +268,10 @@ pi.on("session_shutdown", async () => {
 ### 開發測試
 
 ```bash
-pi -e ./index.ts              # 載入測試
-pi install ./                  # 模擬 npm install (全域安裝)
+npm run build
+node -e "import('./extension.js')" # packaged entry shim smoke test
+pi -e ./extension.js              # 載入測試
+pi install ./                      # 模擬 npm install (全域安裝)
 pi remove ./my-extension       # 移除本地安裝
 ```
 
@@ -275,11 +279,13 @@ pi remove ./my-extension       # 移除本地安裝
 
 ```bash
 # 1. 確認 package.json
-#    - "pi": { "extensions": ["./index.ts"] }
-#    - "files": [...] 排除 test/docs/spike
+#    - "pi": { "extensions": ["./extension.js"] }
+#    - "files": [...] 包含 extension.js + dist/，排除 test/docs/spike
 #    - version 正確
 
 # 2. Dry run
+npm run typecheck
+npm run build
 npm pack --dry-run             # 確認只包含 production 檔案
 
 # 3. Login + Publish
@@ -310,9 +316,11 @@ npm publish
 
 - [ ] `npm test` 通過
 - [ ] `npm run check` 通過（包含 Biome config 本身）
-- [ ] `node --experimental-strip-types -e "import('./index.ts')"` 通過
-- [ ] `npm pack --dry-run` package contents 正確
-- [ ] `pi -e ./index.ts -p "use my_tool"` dogfood 通過
+- [ ] `npm run typecheck` 通過
+- [ ] `npm run build` 通過，且 `dist/index.js` 和 `dist/src/model-worker.js` 已產生
+- [ ] `node -e "import('./extension.js')"` 通過
+- [ ] `npm pack --dry-run` package contents 正確，包含 `extension.js` 和 `dist/`
+- [ ] `pi -e ./extension.js -p "use my_tool"` dogfood 通過
 - [ ] `npm run test:e2e` smoke 通過，且明確記錄 skipped cases
 - [ ] 帶外部 `PI_KNOWLEDGE_E2E_PDF` / `PI_KNOWLEDGE_E2E_DOCX` 的 release-grade e2e 通過（若 extension 支援 PDF/DOCX）
 - [ ] README 描述和實作對齊（不 overclaim）
@@ -355,8 +363,9 @@ npm publish
 
 ```
 my-extension/
-├── index.ts              ← Extension entry (ExtensionFactory default export)
-├── package.json          ← "pi" field + "files" field
+├── extension.js          ← Package entry shim (dist first, source fallback)
+├── index.ts              ← Extension source entry (ExtensionFactory default export)
+├── dist/                 ← Build output included in npm package
 ├── src/                  ← 實作模組
 ├── test/unit/            ← vitest 測試
 ├── .pi/skills/           ← Pi Skills (隨 extension 一起分發)

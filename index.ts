@@ -1,10 +1,34 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { KnowledgeEngine } from "./src/engine.ts";
 import { getDefaultKnowledgeDir } from "./src/storage/sqlite.ts";
 import { getActiveWatcherCount, startWatcher, stopAllWatchers } from "./src/watcher/file-watcher.ts";
 
+type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
+type ToolUpdate = (result: ToolResult) => void;
+type ToolDefinition = {
+	name: string;
+	label: string;
+	description: string;
+	promptSnippet?: string;
+	promptGuidelines?: string[];
+	parameters: Schema;
+	execute?: (
+		toolCallId: string,
+		params: Record<string, unknown>,
+		signal: AbortSignal | undefined,
+		onUpdate: ToolUpdate | undefined,
+		ctx: unknown,
+	) => ToolResult | Promise<ToolResult>;
+};
+type ContextEvent = { messages: Array<{ role: string; content?: unknown }> };
+type BeforeAgentStartEvent = { systemPrompt: string };
+type ExtensionAPI = {
+	on(event: "context", handler: (event: ContextEvent, ctx: unknown) => unknown): void;
+	on(event: "before_agent_start", handler: (event: BeforeAgentStartEvent, ctx: unknown) => unknown): void;
+	on(event: "session_start" | "session_shutdown", handler: (event: unknown, ctx: unknown) => unknown): void;
+	registerTool(tool: ToolDefinition): void;
+};
+
 type Schema = Record<string, unknown> & { optional?: true };
-type ContextMessage = { role: string; content: string };
 
 const Type = {
 	Object(properties: Record<string, Schema>): Schema {
@@ -79,8 +103,9 @@ export default function (pi: ExtensionAPI) {
 				const results = await engine.search(text, { mode: "fast", limit: 3 });
 				if (results.results.length === 0) return;
 				const context = results.results.map((r) => `[${r.file_path}]: ${r.snippet}`).join("\n\n");
-				const messages = event.messages as ContextMessage[];
-				messages.unshift({ role: "user", content: `[Knowledge context]\n${context}` });
+				return {
+					messages: [{ role: "user" as const, content: `[Knowledge context]\n${context}` }, ...event.messages],
+				};
 			} catch {
 				/* silent fail */
 			}
@@ -89,12 +114,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event) => {
 		const kbs = engine.list();
-		if (kbs.length > 0) {
-			const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
-			event.systemPromptOptions.promptGuidelines?.push(
-				`Available knowledge bases: ${desc}. Use knowledge_search before answering domain questions.`,
-			);
-		}
+		if (kbs.length === 0) return undefined;
+		const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
+		const guidance = `Available knowledge bases: ${desc}. Use knowledge_search before answering domain questions.`;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
+		};
 	});
 
 	pi.registerTool({
@@ -130,7 +155,12 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		execute(_id, params) {
-			const { source, include_suggested_text, include_paths, exclude_paths } = params;
+			const { source, include_suggested_text, include_paths, exclude_paths } = params as {
+				source: string;
+				include_suggested_text?: boolean;
+				include_paths?: unknown;
+				exclude_paths?: unknown;
+			};
 			const plan = engine.plan(source, {
 				include_suggested_text: include_suggested_text === true,
 				include_paths: Array.isArray(include_paths)
@@ -198,7 +228,13 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params, _signal, onUpdate) {
-			const { source, name, include_suggested_text, include_paths, exclude_paths } = params;
+			const { source, name, include_suggested_text, include_paths, exclude_paths } = params as {
+				source: string;
+				name: string;
+				include_suggested_text?: boolean;
+				include_paths?: unknown;
+				exclude_paths?: unknown;
+			};
 			const { kb, chunkCount } = await engine.add(
 				source,
 				name,
@@ -270,7 +306,16 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params) {
-			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params;
+			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params as {
+				query: string;
+				mode?: "auto" | "fast" | "semantic" | "hybrid" | "deep" | "adaptive";
+				limit?: number;
+				kb_id?: string;
+				offset?: number;
+				file_type?: string;
+				diversity?: "off" | "balanced" | "strong";
+				diagnostics?: boolean;
+			};
 			const filters = file_type ? { file_type } : undefined;
 			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity });
 			if (response.results.length === 0) {
@@ -319,7 +364,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, onUpdate) {
 			const { added, removed, unchanged } = await engine.update(
-				params.target,
+				(params as { target: string }).target,
 				(msg) => {
 					onUpdate?.({ content: [{ type: "text", text: msg }] });
 				},
@@ -449,7 +494,7 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to remove" }),
 		}),
 		async execute(_id, params) {
-			const ok = engine.remove(params.target);
+			const ok = engine.remove((params as { target: string }).target);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
 		},
 	});
@@ -463,8 +508,9 @@ export default function (pi: ExtensionAPI) {
 			output: Type.String({ description: "Output file path (.jsonl)" }),
 		}),
 		async execute(_id, params) {
-			const count = await engine.exportKB(params.target, params.output);
-			return { content: [{ type: "text", text: `Exported ${count} chunks to ${params.output}` }] };
+			const { target, output } = params as { target: string; output: string };
+			const count = await engine.exportKB(target, output);
+			return { content: [{ type: "text", text: `Exported ${count} chunks to ${output}` }] };
 		},
 	});
 
@@ -477,7 +523,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, onUpdate) {
 			const { kb, chunkCount } = await engine.importKB(
-				params.input,
+				(params as { input: string }).input,
 				(msg) => {
 					onUpdate?.({ content: [{ type: "text", text: msg }] });
 				},

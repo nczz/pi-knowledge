@@ -578,6 +578,7 @@ export class KnowledgeEngine {
 		options: AddOptions = {},
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
+		const db = this.db;
 		const resolvedSource = resolve(source);
 		const isUrl = source.startsWith("http://") || source.startsWith("https://");
 		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
@@ -585,28 +586,29 @@ export class KnowledgeEngine {
 		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
 		const scanOptions = toScanOptions(options);
 
-		const existingKB = getKBByName(this.db, name);
+		const existingKB = getKBByName(db, name);
 		if (existingKB) {
 			throw new Error(
 				`Knowledge base "${name}" already exists. Use knowledge_update to refresh it, or knowledge_remove before adding a replacement.`,
 			);
 		}
 
-		const kb = createKB(this.db, {
+		const kb = createKB(db, {
 			name,
 			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
 			source_type: sourceType,
 			source_options: serializeAddOptions(options),
 		});
-		updateKBStatus(this.db, kb.id, "indexing");
-		startIndexingJob(this.db, kb.id, "add", `Starting indexing for "${name}"`);
+		updateKBStatus(db, kb.id, "indexing");
+		startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
 
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
 		try {
 			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
 			tempVectorFile = tempVectorPath(vectorPath);
-			vectorWriter = openVectorWriter(tempVectorFile);
+			const writer = openVectorWriter(tempVectorFile);
+			vectorWriter = writer;
 			let chunkCount = 0;
 			let fileCount = 0;
 			const pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
@@ -628,7 +630,7 @@ export class KnowledgeEngine {
 				}
 				if (skippedTotal > 0) suffix = `${suffix}, skipped ${skippedTotal}`;
 				const message = `${phase}: ${suffix}`;
-				updateIndexingJob(this.db, kb.id, {
+				updateIndexingJob(db, kb.id, {
 					phase,
 					message,
 					processed_files: processedFiles,
@@ -641,7 +643,7 @@ export class KnowledgeEngine {
 			};
 
 			const flushPending = async (processedFiles?: number, totalFiles?: number): Promise<void> => {
-				if (!this.db || pendingChunks.length === 0) return;
+				if (pendingChunks.length === 0) return;
 				if (signal?.aborted) throw new Error("Cancelled");
 				const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
 				reportProgress(`Embedding batch of ${batch.length}`, processedFiles, totalFiles);
@@ -650,10 +652,10 @@ export class KnowledgeEngine {
 					signal,
 				);
 				if (signal?.aborted) throw new Error("Cancelled");
-				insertChunks(this.db, kb.id, batch);
-				vectorWriter.append(vectors);
+				insertChunks(db, kb.id, batch);
+				writer.append(vectors);
 				chunkCount += batch.length;
-				updateKBCounts(this.db, kb.id, chunkCount, fileCount);
+				updateKBCounts(db, kb.id, chunkCount, fileCount);
 				reportProgress("Stored batch", processedFiles, totalFiles);
 			};
 

@@ -1,17 +1,18 @@
 {
 	"name": "pi-knowledge",
-	"version": "0.4.2",
+	"version": "0.4.3",
 	"description": "Local-first RAG knowledge base for Pi agents with hybrid code/doc search, reranking, diagnostics, and large-project indexing",
 	"type": "module",
-	"main": "index.ts",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
 	"pi": {
 		"extensions": [
-			"./index.ts"
+			"./extension.js"
 		]
 	},
 	"files": [
-		"index.ts",
-		"src/",
+		"extension.js",
+		"dist/",
 		".pi/",
 		"README.md",
 		"CHANGELOG.md",
@@ -36,9 +37,12 @@
 		"embeddings"
 	],
 	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
 		"check": "biome check --write --error-on-warnings .",
+		"prepack": "npm run typecheck && npm run build",
 		"test": "vitest --run test/unit/",
 		"test:e2e": "vitest --run test/e2e/",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"bench": "vitest bench test/bench/"
 	},
 	"dependencies": {
@@ -58,6 +62,7 @@
 		"@biomejs/biome": "2.3.5",
 		"@types/better-sqlite3": "7.6.13",
 		"@types/node": "22.19.19",
+		"typescript": "5.9.3",
 		"vitest": "3.2.4"
 	},
 	"engines": {

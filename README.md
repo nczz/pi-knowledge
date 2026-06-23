@@ -176,12 +176,14 @@ Before publishing, update `package.json`, `package-lock.json`, and `CHANGELOG.md
 
 ```bash
 npm run check
+npm run typecheck
 npm test
+npm run build
 npm run test:e2e
 PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
-node --experimental-strip-types -e "import('./index.ts')"
+node -e "import('./extension.js')"
 npm pack --dry-run
-pi -e ./index.ts
+pi -e ./extension.js
 git push origin main
 gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /path/to/release-notes.md
 npm publish

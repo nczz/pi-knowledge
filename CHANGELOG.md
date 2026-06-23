@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.3] - 2026-06-23
+
+### Fixed
+- Added a packaged `extension.js` entry shim that loads built `dist/` output when available and falls back to source during local development.
+- Fixed packaged model-worker startup so built JavaScript loads `dist/src/model-worker.js` without TypeScript strip flags while source development still uses `model-worker.ts`.
+- Added OMP-aware knowledge storage path resolution with explicit `PI_KNOWLEDGE_DIR` / `OMP_KNOWLEDGE_DIR` overrides and legacy Pi knowledge-dir preservation for the default home OMP root.
+- Fixed strict TypeScript build issues in the extension entry, engine indexing path, AST chunker, and model worker.
+
+### Changed
+- Added a real `typecheck` release gate and made `prepack` run typecheck plus build before npm packaging.
+- Updated contributor and architecture docs for the packaged `extension.js` entry, `dist/` package contents, and release validation flow.
+
 ## [0.4.2] - 2026-06-18
 
 ### Changed

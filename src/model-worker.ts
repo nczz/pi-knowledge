@@ -10,6 +10,7 @@ type RerankerPipeline = (input: {
 	text: string;
 	text_pair: string;
 }) => Promise<{ score?: number } | Array<{ score?: number }>>;
+type PipelineFactory = (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown>;
 
 type EmbedRequest = {
 	id: number;
@@ -39,19 +40,23 @@ async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	if (embeddingPipeline) return embeddingPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = getModelCacheDir();
-	embeddingPipeline = await pipeline("feature-extraction", "Xenova/multilingual-e5-small", {
+	const createPipeline = pipeline as PipelineFactory;
+	const loaded = (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
 		quantized: true,
 		dtype: "fp32",
-	});
-	return embeddingPipeline;
+	})) as FeatureExtractionPipeline;
+	embeddingPipeline = loaded;
+	return loaded;
 }
 
 async function loadRerankerPipeline(): Promise<RerankerPipeline> {
 	if (rerankerPipeline) return rerankerPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
 	env.cacheDir = getModelCacheDir();
-	rerankerPipeline = await pipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2");
-	return rerankerPipeline;
+	const createPipeline = pipeline as PipelineFactory;
+	const loaded = (await createPipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2")) as RerankerPipeline;
+	rerankerPipeline = loaded;
+	return loaded;
 }
 
 async function handleEmbed(request: EmbedRequest): Promise<number[][]> {

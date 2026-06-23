@@ -294,11 +294,11 @@ api.on("context", async (event, ctx) => {
 // before_agent_start: inject KB metadata into system prompt
 api.on("before_agent_start", (event) => {
   const kbs = engine.listKnowledgeBases();
-  if (kbs.length > 0) {
-    event.systemPromptOptions.promptGuidelines.push(
-      `Available knowledge bases: ${kbs.map(kb => `"${kb.name}" (${kb.chunk_count} chunks)`).join(", ")}`
-    );
-  }
+  if (kbs.length === 0) return undefined;
+  const desc = kbs.map(kb => `"${kb.name}" (${kb.chunk_count} chunks)`).join(", ");
+  return {
+    systemPrompt: `${event.systemPrompt}\n\nAvailable knowledge bases: ${desc}`,
+  };
 });
 ```
 
@@ -473,7 +473,9 @@ Current vector search uses exact streamed scan from the per-KB binary vector fil
 
 ```
 pi-knowledge/
-├── index.ts              ← Extension entry (ExtensionFactory)
+├── extension.js          ← Package entry shim (loads dist first, source fallback)
+├── index.ts              ← Extension source entry (ExtensionFactory)
+├── dist/                 ← Build output included in npm package
 ├── package.json
 ├── tsconfig.json
 ├── biome.json
