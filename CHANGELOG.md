@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Split oversized Markdown paragraphs and code blocks into bounded chunks so external embedding servers do not receive single over-context Markdown chunks.
+- Added OpenAI-compatible embedding base URL support via `PI_KNOWLEDGE_EMBEDDING_BASE_URL` / `OPENAI_BASE_URL`.
+- Added configurable API embedding input truncation via `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` as a final context-window safety guard.
+- Surfaced embedding API failures by default instead of silently falling back to local embeddings; explicit local fallback is available with `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`.
+- Included model worker stderr in startup/exit failures to make `knowledge_add` worker crashes diagnosable.
+
 ## [0.4.5] - 2026-06-24
 
 ### Fixed

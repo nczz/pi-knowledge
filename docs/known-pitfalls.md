@@ -36,6 +36,14 @@ PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx 
 
 `ctx.modelRegistry` 只管 chat model auth。沒有 `getApiKey(provider)`。Extension 用 `process.env.OPENAI_API_KEY`。這是 Pi 的設計，不是 bug。
 
+## OpenAI-compatible embedding 設定錯誤不能靜默降級
+
+自架 embedding server（例如 llama-server 的 OpenAI-compatible `/v1/embeddings`）需要可設定 base URL。產品支援 `PI_KNOWLEDGE_EMBEDDING_BASE_URL`，也相容常見的 `OPENAI_BASE_URL`。兩者都應指向包含 `/embeddings` 的 API root，例如 `http://127.0.0.1:8080/v1`。
+
+API embedding 失敗時，預設必須把 HTTP status 與短錯誤內容回報給使用者。不要靜默 fallback 到 local ONNX，否則 API key、base URL、model name、context window 等設定錯誤會被藏起來，使用者只會得到較慢或不同模型產生的 KB。只有使用者明確設定 `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local` 時才允許 fallback，且必須輸出 warning。
+
+即使 chunker 已避免產生巨大 Markdown/text chunk，API provider 仍應保留最後一道 input 長度保護，避免外部 OpenAI-compatible server 因 model context window 較小而回 400。預設 `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS=20000`，使用不同 context window 的 self-hosted model 時可調整。這是 safety cap，不應取代 chunker 的 bounded chunk 修復。
+
 ## @huggingface/transformers 一站式
 
 不要分開裝 onnxruntime-node + tokenizer。`@huggingface/transformers` 包含：WASM tokenizer + ONNX inference + model download + progress callback。
@@ -135,9 +143,9 @@ locale/i18n/translation catalog 只應在查詢明確包含 translation、locale
 
 專案內若含 Playwright、Chromium、Electron、BrowseForge、瀏覽器 profile/cache 或 `.app` bundle，目錄檔案數可能暴增，而且許多 `.pak`、`.asar`、locale bundle、snapshot 檔小於單檔大小上限，會讓索引器在 binary detection / scanning 階段大量耗 CPU 與 GC，甚至在 KB 建立後、chunk 寫入前長時間卡住。
 
-另一個同類陷阱是 `knowledge-backup.jsonl`、export JSONL、壓縮過的單行資料檔。若文字 chunker 只按空行切分，單行 1MB JSONL 會變成單一巨大 chunk，embedding 前的 text assembly 會造成 V8 large object allocation 與 GC 壓力。
+另一個同類陷阱是 `knowledge-backup.jsonl`、export JSONL、壓縮過的單行資料檔，或 Markdown 內的巨大 code block / 單一長段落。若文字或 Markdown chunker 只按空行切分，單行 1MB JSONL 或大型 `.md` 段落會變成單一巨大 chunk，embedding 前的 text assembly 會造成 V8 large object allocation、GC 壓力，或超出外部 embedding server 的 context window。
 
-預設 ignore 必須排除明確的 browser/runtime artifacts，例如 `.browser(s)/`、`ms-playwright`、`playwright-report`、`test-results`、`.app`、`.pak`、`.asar`、knowledge export JSONL 等產物。不要用 `chromium`、`chrome`、`firefox`、`webkit`、`browsers` 這類領域名稱做全域排除，否則會誤傷 Playwright、Chromium、Electron 或瀏覽器工具本身的 source tree。文字 chunker 也必須對超大段落做硬切分，不能產生 MB 級 chunk。驗證大型專案索引卡住時，先比較:
+預設 ignore 必須排除明確的 browser/runtime artifacts，例如 `.browser(s)/`、`ms-playwright`、`playwright-report`、`test-results`、`.app`、`.pak`、`.asar`、knowledge export JSONL 等產物。不要用 `chromium`、`chrome`、`firefox`、`webkit`、`browsers` 這類領域名稱做全域排除，否則會誤傷 Playwright、Chromium、Electron 或瀏覽器工具本身的 source tree。文字與 Markdown chunker 也必須對超大段落做硬切分，不能產生 MB 級 chunk。驗證大型專案索引卡住時，先比較:
 
 ```bash
 find <project> -type f | wc -l

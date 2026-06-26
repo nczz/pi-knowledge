@@ -81,6 +81,13 @@ describe("chunkMarkdown", () => {
 		expect(chunks.length).toBeGreaterThan(1);
 		expect(chunks.every((chunk) => chunk.metadata_json.includes("Big Section"))).toBe(true);
 	});
+	it("splits oversized single paragraphs into bounded chunks", () => {
+		const chunks = chunkMarkdown(`## Big Section\n\nLongMarkdownToken ${"x".repeat(20_000)}`, "big.md");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+		expect(chunks[0].content).toContain("## Big Section");
+		expect(chunks.every((chunk) => chunk.metadata_json.includes("Big Section"))).toBe(true);
+	});
 	it("skips short sections", () => {
 		const md = "## A\n\nHi\n\n## B\n\nThis section passes the fifty character minimum threshold for valid chunks.";
 		const chunks = chunkMarkdown(md, "t.md");

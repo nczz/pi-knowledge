@@ -128,6 +128,33 @@ Search results use balanced diversity reranking by default so near-duplicate chu
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
 
+## Embedding Configuration
+
+Local embeddings are the default and require no API key:
+
+```bash
+PI_KNOWLEDGE_EMBEDDING=local:multilingual-e5-small
+```
+
+OpenAI or OpenAI-compatible embedding APIs can be selected with `PI_KNOWLEDGE_EMBEDDING`:
+
+```bash
+export PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small
+export OPENAI_API_KEY=...
+```
+
+For self-hosted OpenAI-compatible servers, set either `PI_KNOWLEDGE_EMBEDDING_BASE_URL` or `OPENAI_BASE_URL` to the API root that contains `/embeddings`:
+
+```bash
+export PI_KNOWLEDGE_EMBEDDING=openai:Qwen3-Embedding-8B
+export PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_API_KEY=local-placeholder
+```
+
+API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow a local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`.
+
+API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window.
+
 ## Large Project Indexing
 
 Indexing is designed as a stable long-running operation, not a quick background trick. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in hard-capped batches, stream vector files to disk, and report progress with file/chunk counts, chunks/sec, skipped file counts, elapsed time, and file ETA where available. Directory indexing starts with a metadata-only planning scan so large repositories can show total scannable files and skipped counts before expensive embedding starts.

@@ -9,6 +9,9 @@ const idleWaiters: Array<() => void> = [];
 const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_000);
 const EMBEDDING_CONFIG = process.env.PI_KNOWLEDGE_EMBEDDING ?? "local:multilingual-e5-small";
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
+const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK === "local";
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_API_MAX_EMBED_CHARS = 20_000;
 
 function clearIdleTimer(): void {
 	if (disposeTimer) clearTimeout(disposeTimer);
@@ -58,17 +61,29 @@ export async function prepareForShutdown(): Promise<void> {
 
 async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
 	const [provider, model] = EMBEDDING_CONFIG.split(":");
+	const configuredMaxChars = Number(process.env.PI_KNOWLEDGE_EMBEDDING_MAX_CHARS ?? DEFAULT_API_MAX_EMBED_CHARS);
+	const maxChars =
+		Number.isFinite(configuredMaxChars) && configuredMaxChars > 0 ? configuredMaxChars : DEFAULT_API_MAX_EMBED_CHARS;
 	const prefixedTexts = texts.map((t) => `${prefix}: ${t}`);
+	const safeTexts = prefixedTexts.map((text) => (text.length > maxChars ? text.slice(0, maxChars) : text));
 
 	if (provider === "openai") {
 		const apiKey = process.env.OPENAI_API_KEY;
 		if (!apiKey) throw new Error("OPENAI_API_KEY required for openai embedding");
-		const res = await fetch("https://api.openai.com/v1/embeddings", {
+		const baseUrl =
+			process.env.PI_KNOWLEDGE_EMBEDDING_BASE_URL?.trim() ||
+			process.env.OPENAI_BASE_URL?.trim() ||
+			DEFAULT_OPENAI_BASE_URL;
+		const endpoint = new URL("embeddings", `${baseUrl.replace(/\/+$/, "")}/`);
+		const res = await fetch(endpoint, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-			body: JSON.stringify({ input: prefixedTexts, model: model || "text-embedding-3-small" }),
+			body: JSON.stringify({ input: safeTexts, model: model || "text-embedding-3-small" }),
 		});
-		if (!res.ok) throw new Error(`OpenAI API error: ${res.status}`);
+		if (!res.ok) {
+			const detail = await res.text().catch(() => "");
+			throw new Error(`OpenAI embedding API error: ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
+		}
 		const data = (await res.json()) as { data: Array<{ embedding: number[] }> };
 		return data.data.map((d) => new Float32Array(d.embedding));
 	}
@@ -84,8 +99,11 @@ export async function embedTexts(
 	if (!EMBEDDING_CONFIG.startsWith("local")) {
 		try {
 			return await embedViaAPI(texts, prefix);
-		} catch {
-			/* fallback to local */
+		} catch (error) {
+			if (!API_FALLBACK_TO_LOCAL) throw error;
+			console.warn(
+				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
+			);
 		}
 	}
 	beginRun();

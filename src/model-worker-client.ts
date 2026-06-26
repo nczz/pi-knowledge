@@ -16,6 +16,7 @@ type PendingRequest = {
 let worker: ChildProcess | null = null;
 let nextRequestId = 1;
 const pending = new Map<number, PendingRequest>();
+const WORKER_STDERR_TAIL_CHARS = 4_000;
 
 function rejectPending(error: Error): void {
 	for (const request of pending.values()) {
@@ -40,16 +41,33 @@ function getNodeExecPath(): string {
 	return execName === "node" || execName === "node.exe" ? process.execPath : "node";
 }
 
+function appendWorkerStderr(current: string, chunk: Buffer): string {
+	const next = `${current}${chunk.toString("utf-8")}`;
+	return next.length > WORKER_STDERR_TAIL_CHARS ? next.slice(-WORKER_STDERR_TAIL_CHARS) : next;
+}
+
+function formatWorkerExitError(code: number | null, signal: NodeJS.Signals | null, stderrTail: string): Error {
+	const reason = `Model worker exited before responding (code ${code ?? "null"}, signal ${signal ?? "null"})`;
+	const stderr = stderrTail.trim();
+	if (!stderr)
+		return new Error(`${reason}. Set PI_KNOWLEDGE_NODE_PATH to a working Node binary if Pi is not running under Node.`);
+	return new Error(`${reason}. Worker stderr:\n${stderr}`);
+}
+
 function getWorker(): ChildProcess {
 	if (worker?.connected) return worker;
 	const workerPath = getWorkerPath();
 	worker = fork(workerPath, {
 		execPath: getNodeExecPath(),
 		execArgv: getWorkerExecArgv(),
-		stdio: ["ignore", "ignore", "ignore", "ipc"],
+		stdio: ["ignore", "ignore", "pipe", "ipc"],
 		env: process.env,
 	});
 	const child = worker;
+	let stderrTail = "";
+	child.stderr?.on("data", (chunk: Buffer) => {
+		stderrTail = appendWorkerStderr(stderrTail, chunk);
+	});
 	worker.on("message", (message: WorkerResponse) => {
 		const request = pending.get(message.id);
 		if (!request) return;
@@ -64,9 +82,7 @@ function getWorker(): ChildProcess {
 		if (worker !== child) return;
 		worker = null;
 		if (pending.size > 0) {
-			rejectPending(
-				new Error(`Model worker exited before responding (code ${code ?? "null"}, signal ${signal ?? "null"})`),
-			);
+			rejectPending(formatWorkerExitError(code, signal, stderrTail));
 		}
 	});
 	worker.on("error", (error) => {

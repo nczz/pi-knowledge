@@ -484,6 +484,19 @@ export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInse
 		);
 	}
 
+	function pushOversizedMarkdownParagraph(para: string, start: number): void {
+		let offset = 0;
+		let sliceStart = start;
+		while (offset < para.length) {
+			const slice = para.slice(offset, offset + MAX_TEXT_CHUNK_CHARS).trim();
+			if (slice.length >= 50) {
+				pushMarkdownChunk(slice, sliceStart, sliceStart + slice.split("\n").length);
+			}
+			sliceStart += slice.split("\n").length;
+			offset += MAX_TEXT_CHUNK_CHARS;
+		}
+	}
+
 	function flush(endLine: number): void {
 		const text = sectionLines.join("\n").trim();
 		if (text.length < 50) return;
@@ -494,6 +507,16 @@ export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInse
 		let bufferStart = startLine;
 
 		for (const para of paragraphs) {
+			if (para.length > MAX_TEXT_CHUNK_CHARS) {
+				const oversizedText = buffer.length > 0 ? [...buffer, para].join("\n\n") : para;
+				const oversizedStart = buffer.length > 0 ? bufferStart : endLine;
+				if (buffer.length > 0) {
+					buffer = [];
+				}
+				pushOversizedMarkdownParagraph(oversizedText, oversizedStart);
+				bufferStart = endLine;
+				continue;
+			}
 			const next = [...buffer, para].join("\n\n");
 			if (estimateTokens(next) > MARKDOWN_TARGET_TOKENS && buffer.length > 0) {
 				pushMarkdownChunk(buffer.join("\n\n"), bufferStart, endLine);
