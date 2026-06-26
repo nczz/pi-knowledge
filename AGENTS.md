@@ -111,3 +111,4 @@
 - Commit messages: English
 - Documentation: 繁體中文 or English (match existing file)
 - User-facing tool descriptions: English (Pi convention)
+- Runtime environment variables and host compatibility behavior must be documented in `docs/configuration.md`; README should keep a concise user-facing summary. Pi/OMP compatibility changes must also update `docs/technical-decisions.md` or `docs/known-pitfalls.md` when they affect entry loading, native dependency resolution, storage paths, model-worker startup, or shutdown.

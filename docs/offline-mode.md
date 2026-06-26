@@ -15,13 +15,16 @@
 
 ```bash
 export PI_KNOWLEDGE_OFFLINE=true
+# Optional: point at a pre-populated model cache
+export PI_KNOWLEDGE_MODEL_CACHE_DIR=/path/to/models
 ```
 
 Extension 行為:
 ```typescript
 import { env } from '@huggingface/transformers';
+env.cacheDir = process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? '<knowledge-dir>/models';
 env.allowRemoteModels = false;
-env.localModelPath = '~/.pi/knowledge/models/';
+env.localModelPath = env.cacheDir;
 ```
 
 ---
@@ -40,7 +43,8 @@ export NODE_EXTRA_CA_CERTS=/path/to/corp-ca.pem
 
 ```bash
 # Build machine (有網路): 觸發下載，打包 ~/.pi/knowledge/models/
-# Target machine: 解壓到同路徑 + PI_KNOWLEDGE_OFFLINE=true
+# Target machine: 解壓到同路徑，或設定 PI_KNOWLEDGE_MODEL_CACHE_DIR 指向解壓後路徑
+export PI_KNOWLEDGE_OFFLINE=true
 ```
 
 ---

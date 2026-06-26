@@ -44,6 +44,7 @@ Format: `feat|fix|docs|refactor|test: <description>`
 - Integration smoke: `npm run test:e2e`
 - Release-grade integration: `PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e`
 - Pi dogfood: `pi -e ./extension.js` or a one-shot `pi -e ./extension.js -p "..."`
+- OMP dogfood: `omp -e ./extension.js` or a one-shot `omp -e ./extension.js -p "..."`
 - Package contents: `npm pack --dry-run`
 - New features require tests in `test/unit/`
 
@@ -69,5 +70,6 @@ PDF/DOCX fixtures must stay outside the repository. Do not commit private docume
 8. Run `node -e "import('./extension.js')"`.
 9. Run `npm pack --dry-run` and inspect the package contents, including `extension.js`, `dist/index.js`, and `dist/src/model-worker.js`.
 10. Dogfood with `pi -e ./extension.js` or a one-shot prompt.
-11. Commit with the project commit convention, push `main`, create a GitHub release tag, then run `npm publish`.
-12. Report the final git commit, tag, npm version, and every verification gate, including skipped or unverified gates.
+11. Dogfood with `omp -e ./extension.js` or a one-shot prompt when the change touches entry shims, native dependencies, storage path resolution, model-worker startup, lifecycle shutdown, or packaging.
+12. Commit with the project commit convention, push `main`, create a GitHub release tag, then run `npm publish`.
+13. Report the final git commit, tag, npm version, and every verification gate, including skipped or unverified gates.

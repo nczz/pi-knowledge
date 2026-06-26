@@ -11,6 +11,11 @@ type RerankerPipeline = (input: {
 	text_pair: string;
 }) => Promise<{ score?: number } | Array<{ score?: number }>>;
 type PipelineFactory = (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown>;
+type TransformersEnv = {
+	cacheDir?: string;
+	allowRemoteModels?: boolean;
+	localModelPath?: string;
+};
 
 type EmbedRequest = {
 	id: number;
@@ -36,10 +41,19 @@ function getModelCacheDir(): string {
 	return process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? join(getDefaultKnowledgeDir(), "models");
 }
 
+function configureTransformersEnv(env: TransformersEnv): void {
+	const cacheDir = getModelCacheDir();
+	env.cacheDir = cacheDir;
+	if (process.env.PI_KNOWLEDGE_OFFLINE === "true") {
+		env.allowRemoteModels = false;
+		env.localModelPath = cacheDir;
+	}
+}
+
 async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	if (embeddingPipeline) return embeddingPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
-	env.cacheDir = getModelCacheDir();
+	configureTransformersEnv(env as TransformersEnv);
 	const createPipeline = pipeline as PipelineFactory;
 	const loaded = (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
 		quantized: true,
@@ -52,7 +66,7 @@ async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 async function loadRerankerPipeline(): Promise<RerankerPipeline> {
 	if (rerankerPipeline) return rerankerPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
-	env.cacheDir = getModelCacheDir();
+	configureTransformersEnv(env as TransformersEnv);
 	const createPipeline = pipeline as PipelineFactory;
 	const loaded = (await createPipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2")) as RerankerPipeline;
 	rerankerPipeline = loaded;

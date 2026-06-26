@@ -155,6 +155,27 @@ API embedding failures are surfaced by default so configuration and context-wind
 
 API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window.
 
+## Configuration
+
+Full configuration details are in [docs/configuration.md](docs/configuration.md).
+
+| Area | Environment variables |
+|------|-----------------------|
+| Storage path | `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR`, `OMP_PROFILE` |
+| Model worker and cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
+| Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
+| Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
+| Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE` |
+| Release fixtures | `PI_KNOWLEDGE_E2E_PDF`, `PI_KNOWLEDGE_E2E_DOCX` |
+
+## Pi and OMP Support
+
+`pi-knowledge` supports Pi and OMP-compatible extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
+
+Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
+
+OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, and idempotent shutdown. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
+
 ## Large Project Indexing
 
 Indexing is designed as a stable long-running operation, not a quick background trick. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in hard-capped batches, stream vector files to disk, and report progress with file/chunk counts, chunks/sec, skipped file counts, elapsed time, and file ETA where available. Directory indexing starts with a metadata-only planning scan so large repositories can show total scannable files and skipped counts before expensive embedding starts.
@@ -167,11 +188,11 @@ Update and diagnostics paths are also streaming-oriented: changed chunks are emb
 
 ## Architecture
 
-See [DESIGN.md](DESIGN.md) for the full technical design document.
+See [DESIGN.md](DESIGN.md) for the full technical design document and [docs/configuration.md](docs/configuration.md) for runtime configuration.
 
 ## Data Storage
 
-All data is stored globally at `~/.pi/knowledge/` (never in your project directory):
+All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/` under OMP unless overridden (never in your project directory):
 
 ```
 ~/.pi/knowledge/
@@ -180,8 +201,9 @@ All data is stored globally at `~/.pi/knowledge/` (never in your project directo
 └── models/           ← Downloaded ONNX models (~32MB, cached)
 ```
 
-- **Backup**: copy `~/.pi/knowledge/` directory
-- **Reset**: delete `~/.pi/knowledge/` to start fresh
+- **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`
+- **Reset**: delete the active knowledge directory to start fresh
+- **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
 - **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
 - **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
 
@@ -193,6 +215,7 @@ npm test          # Unit tests
 npm run test:e2e # Smoke integration tests; PDF/DOCX cases skip unless fixture env vars are set
 PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
 npm run bench     # Indexing/search benchmarks
+node --experimental-strip-types -e "import('./index.ts')" # Startup-light source import smoke
 ```
 
 PDF/DOCX fixtures should be real local files outside the repository. Do not commit private fixture files, extracted fixture text, snapshots, or machine-specific fixture paths. A release-grade e2e pass requires both fixture env vars; a run with skipped PDF/DOCX cases is only a smoke pass.
@@ -209,8 +232,10 @@ npm run build
 npm run test:e2e
 PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
 node -e "import('./extension.js')"
+node --experimental-strip-types -e "import('./index.ts')"
 npm pack --dry-run
 pi -e ./extension.js
+omp -e ./extension.js
 git push origin main
 gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /path/to/release-notes.md
 npm publish

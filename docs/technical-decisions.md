@@ -266,3 +266,33 @@
 - 工具層 hard block 應用在技術不可索引與穩定性底線；文字內容是否值得索引是產品/agent/user 的範圍決策。
 - 將模糊決策移到 prompt、scan suggestions 與 user confirmation，可以保留完整性，同時讓使用者對隱私與精準度風險有最後決定權。
 - 這比針對單一測試專案調整 ignore 更通用，適用於 .NET、Node、Java、cloud-native、browser tooling 等不同專案型態。
+
+---
+
+## ADR-017: Pi/OMP 相容性與環境變數覆蓋合約
+
+**狀態**: 已決定
+
+**背景**: `pi-knowledge` 需要同時支援 Pi extension 直載、npm package install、以及 OMP 這類 Pi fork/runtime。OMP install validation 可能在 Bun binary 內靜態解析 literal imports；若 extension entry 在啟動時直接碰 native dependency，就會在工具尚未使用前失敗。不同 runtime 也需要不同預設資料根目錄，但既有 Pi 使用者的 `~/.pi/knowledge` 不應在 OMP migration 時突然不可見。
+
+**決策**:
+- `extension.js` 是 package entry shim；build 後優先載入 `dist/index.js`，本地開發未 build 時 fallback 到 source `index.ts`。
+- root `index.ts` 保持 startup-light；Pi virtual modules 只允許 type-only 或本地 shim，不在 import 時解析 native runtime。
+- engine、storage、watcher 等 runtime modules 由 `ensureInitialized()` lazy import，只有 lifecycle/tool 實際需要時才載入。
+- 本地 embedding/reranker 透過 model worker 子程序載入 `@huggingface/transformers` / `onnxruntime-node`，不讓 Pi/OMP TUI 主程序直接載入 ONNX native backend。
+- `better-sqlite3` 載入先走一般 resolution，再在 Bun/hoisted dependency 情境用非 literal package name 和 parent walk fallback，避免 install-time pre-resolution 誤判。
+- storage path resolution 順序是 `PI_KNOWLEDGE_DIR`、`OMP_KNOWLEDGE_DIR`、`PI_CODING_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 推導 root、再依 OMP detection 選 `~/.omp` 或 `~/.pi`。
+- OMP detection 的最低合約是 `OMP_PROFILE` 或 executable basename 為 `omp`。這避免依賴未驗證的 OMP host internals。
+- 在預設 home OMP root 且 `~/.omp/knowledge` 不存在時，若 legacy `~/.pi/knowledge` 存在，繼續使用 legacy Pi knowledge dir，避免 OMP migration 時看不到既有 KB。
+- 所有 runtime override 必須集中記錄在 `docs/configuration.md`，README 保留使用者入口摘要。
+
+**理由**:
+- Install-time validation 應能檢查 extension metadata 和 tool schema，不應因 native module resolution 或 model runtime 提前失敗。
+- Lazy runtime + worker isolation 讓 Pi/OMP 在不使用 knowledge tools 的 session 保持低風險、低成本。
+- 明確 env overrides 讓 release dogfood、Docker smoke、Pi/OMP isolated install、使用者 migration 都能用可重現方式指定資料與模型位置。
+- OMP 支援應記錄最低可驗證 contract，不 overclaim fork host internals。
+
+**驗證要求**:
+- entry/package 變更需跑 `npm run build`、`node -e "import('./extension.js')"`、`node --experimental-strip-types -e "import('./index.ts')"`、`npm pack --dry-run`。
+- OMP-sensitive 變更需至少跑 OMP install 或 `omp -e ./extension.js` dogfood；若本機無法取得 OMP runtime，release handoff 必須明確標示未驗證。
+- native dependency、model worker、storage path 或 shutdown 變更需補 async lifecycle review 與 targeted regression tests。
