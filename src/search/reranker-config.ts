@@ -159,6 +159,7 @@ export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): Rer
 	if (!modelSource) throw new Error("PI_KNOWLEDGE_RERANKER requires a model id or URL");
 	const resolved = resolveHfModel(modelSource);
 	const revision = cleanEnv(env.PI_KNOWLEDGE_RERANKER_REVISION) ?? resolved.revision ?? DEFAULT_RERANKER_REVISION;
+	const rawLogits = cleanEnv(env.PI_KNOWLEDGE_RERANKER_RAW_LOGITS) === "true";
 	return {
 		provider: "hf",
 		model: resolved.model,
@@ -166,7 +167,7 @@ export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): Rer
 		dtype: cleanEnv(env.PI_KNOWLEDGE_RERANKER_DTYPE),
 		remoteHost: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_HOST) ?? resolved.remoteHost,
 		remotePathTemplate: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE),
-		rawLogits: cleanEnv(env.PI_KNOWLEDGE_RERANKER_RAW_LOGITS) === "true",
+		...(rawLogits ? { rawLogits: true } : {}),
 	};
 }
 

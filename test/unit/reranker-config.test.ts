@@ -34,6 +34,19 @@ describe("reranker config", () => {
 		});
 	});
 
+	it("enables raw logits only when explicitly requested", () => {
+		const config = resolveRerankerConfig({
+			PI_KNOWLEDGE_RERANKER: "Xenova/bge-reranker-base",
+			PI_KNOWLEDGE_RERANKER_RAW_LOGITS: "true",
+		});
+
+		expect(config).toMatchObject({
+			provider: "hf",
+			model: "Xenova/bge-reranker-base",
+			rawLogits: true,
+		});
+	});
+
 	it("normalizes Hugging Face model URLs and revisions", () => {
 		const config = resolveRerankerConfig({
 			PI_KNOWLEDGE_RERANKER: "https://huggingface.co/Xenova/ms-marco-MiniLM-L-12-v2/tree/custom-rev",
@@ -127,9 +140,16 @@ describe("reranker config", () => {
 			PI_KNOWLEDGE_RERANKER: "Xenova/ms-marco-MiniLM-L-4-v2",
 			PI_KNOWLEDGE_RERANKER_REVISION: "other",
 		});
-		if (first.provider !== "hf" || second.provider !== "hf") throw new Error("Expected hf configs");
+		const raw = resolveRerankerConfig({
+			PI_KNOWLEDGE_RERANKER: "Xenova/ms-marco-MiniLM-L-4-v2",
+			PI_KNOWLEDGE_RERANKER_RAW_LOGITS: "true",
+		});
+		if (first.provider !== "hf" || second.provider !== "hf" || raw.provider !== "hf") {
+			throw new Error("Expected hf configs");
+		}
 
 		expect(rerankerCacheKey(first)).not.toBe(rerankerCacheKey(second));
+		expect(rerankerCacheKey(first)).not.toBe(rerankerCacheKey(raw));
 		expect(rerankerCacheKey(first)).toContain(DEFAULT_RERANKER_MODEL);
 	});
 

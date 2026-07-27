@@ -1,5 +1,15 @@
 # Changelog
 
+
+## [0.7.0] - 2026-07-28
+
+### Added
+- Added `PI_KNOWLEDGE_RERANKER_RAW_LOGITS` for trusted single-logit local/Hugging Face cross-encoder rerankers whose sigmoid scores flatten near 1.0.
+
+### Fixed
+- Preserved the default reranker config shape when raw logits are unset.
+- Rejected multi-logit and non-finite raw reranker outputs instead of guessing a relevance score.
+
 ## [0.6.0] - 2026-07-25
 
 ### Added

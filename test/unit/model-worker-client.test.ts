@@ -198,6 +198,7 @@ describe("model worker client", () => {
 			model: "Xenova/ms-marco-MiniLM-L-2-v2",
 			revision: "test-revision",
 			dtype: "fp32",
+			rawLogits: true,
 		});
 		if (!child.send) throw new Error("Fake IPC child missing send");
 		const sendMock = vi.mocked(child.send);
@@ -214,6 +215,7 @@ describe("model worker client", () => {
 				model: "Xenova/ms-marco-MiniLM-L-2-v2",
 				revision: "test-revision",
 				dtype: "fp32",
+				rawLogits: true,
 			},
 		});
 		await expect(request).resolves.toEqual([{ chunkId: "chunk-1", score: 0.9 }]);

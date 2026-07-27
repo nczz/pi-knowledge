@@ -103,7 +103,7 @@ const output = await extractor('query: 認證流程', { pooling: 'mean', normali
 
 ## 6. Cross-Encoder Reranking (Phase 3)
 
-`deep` search uses a local Transformers.js text-classification cross-encoder after hybrid retrieval has selected candidate chunks. Configure the local artifact with `PI_KNOWLEDGE_RERANKER`; supported forms are a bare model id such as `Xenova/ms-marco-MiniLM-L-2-v2`, `hf:<model>`, or a Hugging Face model URL. `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, and `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE` tune the artifact source. Offline mode requires the selected reranker to already be in the local cache.
+`deep` search uses a local Transformers.js text-classification cross-encoder after hybrid retrieval has selected candidate chunks. Configure the local artifact with `PI_KNOWLEDGE_RERANKER`; supported forms are a bare model id such as `Xenova/ms-marco-MiniLM-L-2-v2`, `hf:<model>`, or a Hugging Face model URL. `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, and `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE` tune the artifact source. `PI_KNOWLEDGE_RERANKER_RAW_LOGITS=true` is available for trusted single-logit reranker models whose sigmoid scores flatten near 1.0; multi-logit classifiers are rejected instead of guessing which class is relevant. Offline mode requires the selected reranker to already be in the local cache.
 
 | 模型 | 大小 | 來源 | 取捨 |
 |------|------|------|------|
