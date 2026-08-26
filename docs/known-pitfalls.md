@@ -149,7 +149,7 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 
 修正時必須同時檢查四層:
 
-1. index-time searchable text 是否包含 file path、file type、heading breadcrumbs、code symbols。
+1. index-time searchable text 是否包含 file path、file type、heading breadcrumbs、code symbols、scope、parent symbol 與 signature。
 2. query normalization 是否處理 camelCase、punctuation、常見 typo、plural/stem 與 CJK token。
 3. query-time ranking 是否區分 source/doc/test/setup intent，並提供 diagnostics。
 4. confidence gate 是否能讓低證據查詢回傳 0 結果。
@@ -168,7 +168,7 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 
 `auto` mode 是工具層 fallback，不是單純 prompt 建議。它必須回傳實際 `mode_used` 與 `retry_modes`，並避免 exact lookup 查不到後接受零 lexical evidence 的 semantic 假陽性。
 
-`knowledge_symbol_search` 是 exact lookup 的第一層，不是完整 code graph。它應索引 lightweight、可重建的 metadata: function/class/interface/type/variable、Markdown heading、config key、env var。不要為了 symbol lookup 在 root entry 或一般啟動路徑引入 LSP、tree-sitter 或大型 parser；如果需要更完整的 caller/callee graph，應作為後續明確設計，而不是塞進 Pi/OMP 外掛的 startup path。
+`knowledge_symbol_search` 是 exact lookup 的第一層，不是完整 code graph。它應索引 lightweight、可重建的 metadata: AST-backed function/method/class/interface/type/variable、Markdown heading、config key、env var。不要為了 symbol lookup 在 root entry 或一般啟動路徑引入 LSP、tree-sitter 或大型 parser；tree-sitter 只能在 indexing/chunking 路徑 lazy-load。如果需要 caller/callee graph 或 rename 語意，應作為後續明確設計，而不是塞進 Pi/OMP 外掛的 startup path。
 
 `knowledge_search` 的 `path_pattern` 是 substring filter，不是 glob/LSP path query。Agent 若需要鎖定檔案或目錄，可以搭配 `file_type` 使用；若需要 code symbol 的 caller/callee 或 rename 語意，這不是此工具的責任。
 
@@ -217,6 +217,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - vector file 要 streaming append，最後回寫 header；不要在索引路徑用單一巨大 `Buffer.alloc`。
 - update 不能建立 `newChunks`、`chunksToAdd`、`finalChunks` 這類大型全量陣列後才開始處理。新增向量應寫入 temporary vector file，刪除應分批，正式 vector file 應依 DB iterator 重建。
 - chunk identity 不能只看 content。大型 codebase 常有重複模板、空函式、產生器輸出或同名設定片段；若 hash 不含 path/line/metadata，update 會把不同檔案的相同內容當同一個 chunk，刪除其中一個檔案時會留下 stale/orphan chunk。
+- AST chunk identity 必須用 normalized metadata；如果直接 hash 原始 AST node text 或只 hash symbol 名稱，重複方法、同名 class 或 update 後移動的 code 會造成 stale chunk 或錯誤 vector reuse。
 - progress 必須包含目前 phase、已處理量、elapsed 與 chunks/sec，能估算檔案總量時要回報 file ETA。大型檔案會讓 file ETA 偏樂觀，所以不能只顯示 files processed；同一檔案內 chunks 持續增加時，使用者也必須看得出仍有進展。
 - progress 不能只靠 `onUpdate`。大型索引常跨越多個 prompt 或 TUI render；phase、last message、last progress time、processed counts、skipped、added/removed/unchanged 與 error/cancelled state 必須持久化，讓 `knowledge_status` 可以判斷正在進展還是真的卡死。
 - progress 與 diagnostics 必須揭露 skipped file count/reasons/samples，否則使用者無法判斷是索引器漏掉還是安全排除。

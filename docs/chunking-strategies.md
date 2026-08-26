@@ -6,7 +6,7 @@
 
 | 優先 | 策略 | 適用 | Chunk 大小 |
 |------|------|------|-----------|
-| 1 | AST-based (Phase 3) | TS/JS/Python/Go/Rust/Java | 500-2000 tokens |
+| 1 | Recursive AST-based | TS/JS/Python/Go/Rust/Java | declaration-first; bounded fallback at ~6,000 chars |
 | 2 | Markdown-aware | .md files | heading 為單位 |
 | 3 | Semantic boundary | 其他文字檔 | 300-1000 tokens |
 | 4 | Fixed-size | 未知格式 fallback | 512 tokens, 64 overlap |
@@ -92,15 +92,22 @@ function isBinary(path: string): boolean {
 
 ---
 
-## 7. AST-Based (Phase 3)
+## 7. AST-Based
 
 | 語言 | 切分單位 | Metadata |
 |------|---------|----------|
-| TS/JS | function, class, interface | name, exports |
-| Python | function, class, method | name, decorators |
-| Go | func, type, method | name, receiver |
+| TS/JS | class, interface, type, function, exported arrow/function-valued variables, class field methods | `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, `exported`, `ast_path`, `start_line`, `end_line` |
+| Python | class, function, method | 同上，並保留 decorators |
+| Go/Rust/Java | function/method/type/class/interface declarations supported by tree-sitter grammar | 同上 |
 
-原則: 每個 function 一個 chunk（含 signature+body），class 太大拆 method-level。
+原則:
+
+- 小型 class/type/function 以完整 declaration 為 chunk，保留可讀原始內容。
+- 超過 token 上限的 parent declaration 會遞迴下降到 child declarations；例如大型 class 會拆成 method-level chunks。
+- 相鄰且同 parent 的小 child declarations 可 pack 成 sibling group chunk，以減少碎片化。
+- 沒有可用 child declaration 的巨大節點用行與固定字元上限切分，避免產生 MB 級 chunk。
+- Chunk identity 包含 file path、file type、line range、metadata 和 content；不能只看 content。
+- Symbol index 來自同一次 AST analysis；method symbols 可以獨立於 retrieval chunk 存在。
 
 ---
 

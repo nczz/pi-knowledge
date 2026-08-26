@@ -2,6 +2,7 @@ import { rmSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
+import { analyzeIndexableContent } from "../../src/indexer/chunker.ts";
 import { extractSymbols } from "../../src/indexer/symbols.ts";
 import { createKB, insertSymbols, openDatabase, searchSymbols, updateKBStatus } from "../../src/storage/sqlite.ts";
 
@@ -67,6 +68,31 @@ describe("lightweight symbol index", () => {
 		);
 
 		expect(symbols.filter((symbol) => symbol.kind === "function").map((symbol) => symbol.name)).toEqual([]);
+	});
+
+	it("extracts AST-backed method symbols independently from retrieval chunks", async () => {
+		const analysis = await analyzeIndexableContent(
+			[
+				"export class AuthenticationService {",
+				"  authenticate(): boolean { return true; }",
+				"  refreshToken(): string { return 'token'; }",
+				"}",
+			].join("\n"),
+			"src/auth.ts",
+			"typescript",
+		);
+
+		const method = analysis.symbols.find((symbol) => symbol.name === "refreshToken");
+		expect(analysis.chunks).toHaveLength(1);
+		expect(method).toMatchObject({
+			kind: "function",
+			container_name: "AuthenticationService",
+			signature: "refreshToken(): string",
+		});
+		expect(JSON.parse(method?.metadata_json ?? "{}")).toMatchObject({
+			symbol_kind: "method",
+			scope: ["AuthenticationService", "refreshToken"],
+		});
 	});
 
 	it("stores and searches symbols by exact or substring match", () => {

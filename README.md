@@ -23,8 +23,8 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
-- **Code-aware indexing**: AST-aware chunking for TypeScript/JavaScript, Python, Go, Rust, and Java.
-- **Lightweight symbol lookup**: indexes functions, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
+- **Code-aware indexing**: recursive AST chunking for TypeScript/JavaScript, Python, Go, Rust, and Java, with bounded fallback chunks for oversized declarations.
+- **Lightweight symbol lookup**: indexes functions, methods, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
 - **Private by default**: local embeddings run without an API key.
@@ -64,7 +64,7 @@ TUI rendering currently uses Pi's stable default tool rendering plus targeted re
 
 - **RAG-native project memory**: follows the Retrieval-Augmented Generation pattern from Lewis et al. 2020: keep source truth outside the model, retrieve it at answer time, and inject only relevant context.
 - **Dense semantic recall**: uses multilingual dense embeddings in the spirit of Dense Passage Retrieval (Karpukhin et al. 2020), so conceptual queries can find code/docs even when wording differs.
-- **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and code symbols with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
+- **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and AST-derived code structure such as symbols, scope, parent symbol, and signatures with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
 - **Hybrid retrieval with diagnosable scores**: combines lexical BM25 anchors and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
 - **MMR-style diversity**: uses Maximal Marginal Relevance ideas (Goldstein and Carbonell 1998), file interleaving, vector redundancy checks, and adaptive-window overlap collapse so repeated README or same-file chunks do not dominate top results.
 - **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
@@ -138,8 +138,8 @@ Mode selection contract:
 
 Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, and source freshness where available.
 
-For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
-Symbol/config/heading metadata is also rebuilt during `knowledge_update`; older KBs created before this feature may show a doctor action recommending update.
+For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and AST-derived code structure such as symbol names, scopes, parent symbols, and signatures while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, classes, methods, or functions, and reduces duplicate-looking chunk hits.
+Symbol/config/heading metadata is also rebuilt during `knowledge_update`; code symbol metadata includes AST-backed methods for supported languages. Older KBs created before this feature may show a doctor action recommending update.
 
 ## Embedding Configuration
 
@@ -224,7 +224,7 @@ All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/
 - **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
 - **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
 - **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
-- **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
+- **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. Supported code files use the same AST analysis as chunking, so method symbols can be looked up even when their parent class remains one retrieval chunk. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
 
 ## Development
 

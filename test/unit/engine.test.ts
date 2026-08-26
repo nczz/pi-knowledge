@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
+import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
 import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
 const mammothMock = vi.hoisted(() => ({
@@ -339,6 +340,40 @@ describe("KnowledgeEngine", () => {
 			await engine.update("Confirmed Scope");
 			const updated = await engine.search("UPDATED_CONFIRMED_SECRET", { mode: "fast" });
 			expect(updated.total_count).toBeGreaterThan(0);
+		});
+
+		it("indexes AST-backed method symbols and structural chunk context", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-ast-symbols-"));
+			try {
+				writeFileSync(
+					join(projectDir, "auth.ts"),
+					[
+						"export class AuthenticationService {",
+						"  authenticate(): boolean { return true; }",
+						"  refreshToken(): string { return 'token'; }",
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "AST Symbols");
+				const method = engine.symbolSearch("refreshToken", { exact: true, kb_id: "AST Symbols" });
+				const db = openDatabase(TEST_DIR);
+				const kbId = engine.list().find((kb) => kb.name === "AST Symbols")?.id ?? "";
+				const [chunk] = getChunksByKB(db, kbId);
+				db.close();
+
+				expect(method.total_count).toBe(1);
+				expect(method.results[0]).toMatchObject({
+					kind: "function",
+					container_name: "AuthenticationService",
+					file_path: "auth.ts",
+				});
+				expect(buildChunkEmbeddingText(chunk)).toContain("Scope: AuthenticationService");
+				expect(chunk.content).toContain("export class AuthenticationService");
+				expect(chunk.content).not.toContain("Scope:");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
 		});
 	});
 

@@ -298,3 +298,30 @@
 - entry/package 變更需跑 `npm run build`、`node -e "import('./extension.js')"`、`node --experimental-strip-types -e "import('./index.ts')"`、`npm pack --dry-run`。
 - OMP-sensitive 變更需至少跑 OMP install 或 `omp -e ./extension.js` dogfood；若本機無法取得 OMP runtime，release handoff 必須明確標示未驗證。
 - native dependency、model worker、storage path 或 shutdown 變更需補 async lifecycle review 與 targeted regression tests。
+
+---
+
+## ADR-018: Recursive AST chunking and AST-backed symbol metadata
+
+**狀態**: 已決定
+
+**背景**: Flat function-level chunking made large classes either too coarse or too fragmented, and `knowledge_symbol_search` relied on declaration regexes that missed common method syntax. Search also needed deterministic structural context richer than one `function_name` field without mutating returned chunk content.
+
+**決策**:
+- Supported code files use a normalized tree-sitter structure for TypeScript/JavaScript, Python, Go, Rust, and Java during indexing.
+- Small declarations remain whole chunks; oversized declarations recursively descend to child declarations; same-parent small declarations can be packed; nodes with no child declarations use bounded line/character fallback chunks.
+- Chunk metadata records deterministic structure: `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, export/decorator flags, AST path, and source line range.
+- Embedding/FTS searchable text prepends structural metadata, but stored `content` remains the original source slice.
+- `knowledge_symbol_search` uses symbols emitted from the same AST analysis so methods can be exact-looked-up even when the parent class is one retrieval chunk.
+- Add/update parse each code file once for chunks and symbols; fallback keeps existing text/regex behavior when AST parsing is unsupported or fails.
+- Tree-sitter imports stay lazy in indexing/chunking paths; root `index.ts` remains startup-light.
+
+**理由**:
+- Recursive splitting preserves semantic units while bounding worst-case chunk size for large classes, generated declarations, or huge methods.
+- Structural metadata improves exact and contextual retrieval for class/method queries without LLM-generated context or private-source egress.
+- Shared AST analysis avoids duplicate parser work and keeps chunk/symbol metadata aligned.
+- Fallback preserves existing KB behavior for unsupported languages and short code files where AST emits only symbols.
+
+**重建索引邊界**:
+- This changes chunk boundaries, chunk identity metadata, searchable text, and symbol metadata. Existing KBs must run `knowledge_update` or be rebuilt to get full benefit.
+- Query-time ranking changes still apply immediately, but AST-backed symbol lookup and structural embedding context require re-indexing.

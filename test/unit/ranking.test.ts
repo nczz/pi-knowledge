@@ -138,4 +138,25 @@ describe("ranking heuristics", () => {
 		const coverage = queryCoverage(buildChunkEmbeddingText(item), tokenizeForSearch("billing refunds"));
 		expect(coverage).toBe(1);
 	});
+
+	it("computes coverage from structural code metadata", () => {
+		const item = chunk({
+			file_path: "src/auth/service.ts",
+			file_type: "typescript",
+			content: "refreshToken(token: string): string { return token; }",
+			metadata_json: JSON.stringify({
+				language: "typescript",
+				symbol: "refreshToken",
+				symbol_kind: "method",
+				scope: ["AuthenticationService", "refreshToken"],
+				parent_symbol: "AuthenticationService",
+				signature: "refreshToken(token: string): string",
+			}),
+		});
+		const coverage = queryCoverage(
+			buildChunkEmbeddingText(item),
+			tokenizeForSearch("AuthenticationService refreshToken"),
+		);
+		expect(coverage).toBe(1);
+	});
 });

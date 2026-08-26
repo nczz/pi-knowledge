@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { closeSync, type Dirent, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 import ignore from "ignore";
-import type { ChunkInsert } from "../storage/sqlite.ts";
+import type { ChunkInsert, KnowledgeSymbolInsert } from "../storage/sqlite.ts";
+import { extractSymbols } from "./symbols.ts";
+
+type ChunkMetadataValue = string | number | boolean | string[] | number[] | boolean[] | null | undefined;
+type ChunkMetadata = Record<string, ChunkMetadataValue>;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -424,27 +428,38 @@ function normalizeHeading(heading: string): string {
 	return heading.replace(/^#{1,6}\s+/, "").trim();
 }
 
-function buildContextPrefix(
-	filePath: string,
-	fileType: string,
-	metadata: Record<string, string | number | null | undefined>,
-): string {
+function buildContextPrefix(filePath: string, fileType: string, metadata: ChunkMetadata): string {
 	const parts = [`File: ${filePath}`, `Type: ${fileType}`];
 	const heading = typeof metadata.heading === "string" ? metadata.heading : "";
 	const breadcrumb = typeof metadata.breadcrumb === "string" ? metadata.breadcrumb : "";
-	const symbol = typeof metadata.function_name === "string" ? metadata.function_name : "";
+	const language = typeof metadata.language === "string" ? metadata.language : "";
+	const symbol =
+		typeof metadata.symbol === "string"
+			? metadata.symbol
+			: typeof metadata.function_name === "string"
+				? metadata.function_name
+				: "";
+	const symbolKind = typeof metadata.symbol_kind === "string" ? metadata.symbol_kind : "";
+	const parentSymbol = typeof metadata.parent_symbol === "string" ? metadata.parent_symbol : "";
+	const signature = typeof metadata.signature === "string" ? metadata.signature : "";
+	const scope = Array.isArray(metadata.scope) ? metadata.scope.filter((item) => typeof item === "string") : [];
 	if (breadcrumb) parts.push(`Section: ${breadcrumb}`);
 	else if (heading) parts.push(`Section: ${normalizeHeading(heading)}`);
+	if (language) parts.push(`Language: ${language}`);
+	if (scope.length > 0) parts.push(`Scope: ${scope.join(" > ")}`);
+	else if (parentSymbol) parts.push(`Parent: ${parentSymbol}`);
+	if (symbolKind) parts.push(`Kind: ${symbolKind}`);
 	if (symbol) parts.push(`Symbol: ${symbol}`);
+	if (signature) parts.push(`Signature: ${signature}`);
 	return parts.join("\n");
 }
 
 export function buildChunkEmbeddingText(
 	chunk: Pick<ChunkInsert, "content" | "file_path" | "file_type" | "metadata_json">,
 ): string {
-	let metadata: Record<string, string | number | null | undefined> = {};
+	let metadata: ChunkMetadata = {};
 	try {
-		metadata = JSON.parse(chunk.metadata_json) as Record<string, string | number | null | undefined>;
+		metadata = JSON.parse(chunk.metadata_json) as ChunkMetadata;
 	} catch {
 		metadata = {};
 	}
@@ -457,7 +472,7 @@ function makeChunk(
 	fileType: string,
 	startLine: number,
 	endLine: number,
-	metadata: Record<string, string | number | null | undefined> = {},
+	metadata: ChunkMetadata = {},
 ): Omit<ChunkInsert, "kb_id"> {
 	const metadata_json = JSON.stringify(metadata);
 	const chunk = {
@@ -620,13 +635,59 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 	return chunks;
 }
 
+export function isCodeFileType(fileType: string): boolean {
+	return ["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType);
+}
+
+export async function analyzeIndexableContent(
+	content: string,
+	filePath: string,
+	fileType = detectFileType(filePath),
+): Promise<{
+	chunks: Omit<ChunkInsert, "kb_id">[];
+	symbols: KnowledgeSymbolInsert[];
+}> {
+	const detectedFileType = detectFileType(filePath);
+	const analysisFileType = isCodeFileType(detectedFileType) ? detectedFileType : fileType;
+	if (isCodeFileType(analysisFileType)) {
+		try {
+			const { analyzeCodeWithAST } = await import("./chunkers/code-ast.ts");
+			const analysis = await analyzeCodeWithAST(content, filePath, analysisFileType);
+			const chunks = analysis.chunks.length > 0 ? analysis.chunks : await chunkFile(content, filePath);
+			const symbols = dedupeSymbols([...analysis.symbols, ...extractSymbols(content, filePath, analysisFileType)]);
+			return { chunks, symbols };
+		} catch {
+			/* fallback below */
+		}
+	}
+	return { chunks: await chunkFile(content, filePath), symbols: extractSymbols(content, filePath, analysisFileType) };
+}
+
+function dedupeSymbols(symbols: KnowledgeSymbolInsert[]): KnowledgeSymbolInsert[] {
+	const seen = new Set<string>();
+	const deduped: KnowledgeSymbolInsert[] = [];
+	for (const symbol of symbols) {
+		const key = [
+			symbol.kind,
+			symbol.name,
+			symbol.file_path,
+			String(symbol.start_line),
+			symbol.container_name ?? "",
+		].join("\0");
+		if (seen.has(key)) continue;
+		seen.add(key);
+		deduped.push(symbol);
+	}
+	return deduped;
+}
+
 export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
 	const fileType = detectFileType(filePath);
 	let chunks: Omit<ChunkInsert, "kb_id">[] = [];
 
 	if (fileType === "markdown") {
 		chunks = chunkMarkdown(content, filePath);
-	} else if (["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType)) {
+	} else if (isCodeFileType(fileType)) {
 		try {
 			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
 			chunks = await chunkWithAST(content, filePath, fileType);

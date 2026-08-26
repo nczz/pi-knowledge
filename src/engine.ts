@@ -15,6 +15,7 @@ import {
 import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import {
 	addSkippedScanEntry,
+	analyzeIndexableContent,
 	buildChunkEmbeddingText,
 	chunkFile,
 	chunkIdentityHash,
@@ -1016,6 +1017,15 @@ export class KnowledgeEngine {
 			const addSymbols = (content: string, filePath: string, fileType: string): void => {
 				insertSymbols(db, kb.id, extractSymbols(content, filePath, fileType));
 			};
+			const analyzeAndAddSymbols = async (
+				content: string,
+				filePath: string,
+				fileType: string,
+			): Promise<Omit<ChunkInsert, "kb_id">[]> => {
+				const analysis = await analyzeIndexableContent(content, filePath, fileType);
+				insertSymbols(db, kb.id, analysis.symbols);
+				return analysis.chunks;
+			};
 
 			if (isUrl) {
 				const message = `Fetching ${source}...`;
@@ -1028,8 +1038,8 @@ export class KnowledgeEngine {
 			} else if (isFile) {
 				const extracted = await extractSourceFileContent(resolvedSource, signal);
 				fileCount = 1;
-				addSymbols(extracted.content, resolvedSource, extracted.fileType);
-				await addChunks(await chunkFile(extracted.content, resolvedSource));
+				const chunks = await analyzeAndAddSymbols(extracted.content, resolvedSource, extracted.fileType);
+				await addChunks(chunks);
 			} else if (isDir) {
 				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
@@ -1059,11 +1069,10 @@ export class KnowledgeEngine {
 						latestSkippedTotal = skipped.total;
 						continue;
 					}
-					const chunks = await chunkFile(extracted.content, file.relPath);
+					const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
 					processedFiles++;
 					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
-					addSymbols(extracted.content, file.relPath, extracted.fileType);
 					await addChunks(chunks, processedFiles, plan.files);
 					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
@@ -1082,8 +1091,8 @@ export class KnowledgeEngine {
 				onProgress?.(finalizingMessage);
 			} else {
 				fileCount = 1;
-				addSymbols(source, "inline-text", "text");
-				await addChunks(await chunkFile(source, "inline-text"));
+				const chunks = await analyzeAndAddSymbols(source, "inline-text", "text");
+				await addChunks(chunks);
 			}
 
 			await flushPending();
@@ -1316,9 +1325,10 @@ export class KnowledgeEngine {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
 					if (!extracted) continue;
+					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
 					scannedFiles++;
-					stagedSymbols.push(...extractSymbols(extracted.content, file.relPath, extracted.fileType));
-					await processChunks(await chunkFile(extracted.content, file.relPath));
+					stagedSymbols.push(...analysis.symbols);
+					await processChunks(analysis.chunks);
 					if (scannedFiles % 25 === 0) {
 						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
 						updateIndexingJob(this.db, kb.id, {
@@ -1351,8 +1361,9 @@ export class KnowledgeEngine {
 			} else {
 				const extracted = await extractSourceFileContent(kb.source_path, signal);
 				scannedFiles = 1;
-				stagedSymbols.push(...extractSymbols(extracted.content, kb.source_path, extracted.fileType));
-				await processChunks(await chunkFile(extracted.content, kb.source_path));
+				const analysis = await analyzeIndexableContent(extracted.content, kb.source_path, extracted.fileType);
+				stagedSymbols.push(...analysis.symbols);
+				await processChunks(analysis.chunks);
 			}
 			await flushPending();
 			addedVectorWriter.close();
