@@ -492,6 +492,78 @@ function buildQuerySnippet(content: string, query: string, maxLength = 240): str
 	return `${prefix}${content.slice(start, end)}${suffix}`;
 }
 
+interface AdaptiveChunkMetadata {
+	symbol?: string;
+	symbolKind?: string;
+	parentSymbol?: string;
+	scope: string[];
+	startLine?: number;
+	endLine?: number;
+}
+
+function metadataString(record: Record<string, unknown>, key: string): string | undefined {
+	const value = record[key];
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function metadataNumber(record: Record<string, unknown>, key: string): number | undefined {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function metadataStringArray(record: Record<string, unknown>, key: string): string[] {
+	const value = record[key];
+	return Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+		: [];
+}
+
+function parseAdaptiveMetadata(chunk: Chunk): AdaptiveChunkMetadata {
+	try {
+		const parsed = JSON.parse(chunk.metadata_json) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { scope: [] };
+		const record = parsed as Record<string, unknown>;
+		return {
+			symbol: metadataString(record, "symbol") ?? metadataString(record, "function_name"),
+			symbolKind: metadataString(record, "symbol_kind"),
+			parentSymbol: metadataString(record, "parent_symbol"),
+			scope: metadataStringArray(record, "scope"),
+			startLine: metadataNumber(record, "start_line"),
+			endLine: metadataNumber(record, "end_line"),
+		};
+	} catch {
+		return { scope: [] };
+	}
+}
+
+function hasAdaptiveStructure(metadata: AdaptiveChunkMetadata): boolean {
+	return Boolean(metadata.symbol || metadata.symbolKind || metadata.parentSymbol || metadata.scope.length > 0);
+}
+
+function parentScope(scope: string[]): string[] {
+	return scope.length > 1 ? scope.slice(0, -1) : [];
+}
+
+function sameScope(left: string[], right: string[]): boolean {
+	return left.length > 0 && left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function isScopePrefix(parent: string[], child: string[]): boolean {
+	return parent.length > 0 && parent.length < child.length && parent.every((item, index) => item === child[index]);
+}
+
+function adaptiveRelationBoost(seed: AdaptiveChunkMetadata, candidate: AdaptiveChunkMetadata): number {
+	if (!hasAdaptiveStructure(seed) || !hasAdaptiveStructure(candidate)) return 0;
+	const seedParentScope = parentScope(seed.scope);
+	const candidateParentScope = parentScope(candidate.scope);
+	if (sameScope(seedParentScope, candidateParentScope)) return seed.symbol === candidate.symbol ? 0.35 : 1.35;
+	if (seed.parentSymbol && seed.parentSymbol === candidate.parentSymbol) {
+		return seed.symbol === candidate.symbol ? 0.35 : 1.2;
+	}
+	if (isScopePrefix(seed.scope, candidate.scope) || isScopePrefix(candidate.scope, seed.scope)) return 0.9;
+	return 0;
+}
+
 function buildAdaptiveContext(
 	seed: Chunk,
 	chunks: Chunk[],
@@ -503,6 +575,7 @@ function buildAdaptiveContext(
 	endLine: number;
 	sourceChunkIds: string[];
 } {
+	const seedMetadata = parseAdaptiveMetadata(seed);
 	const scored = chunks
 		.map((chunk) => {
 			const distance =
@@ -512,9 +585,11 @@ function buildAdaptiveContext(
 			const proximity = 1 / (1 + distance / 20);
 			const coverage = queryCoverage(chunk.content, queryTokens);
 			const seedBoost = chunk.id === seed.id ? 2 : 0;
-			return { chunk, score: seedBoost + proximity + coverage };
+			const relationBoost =
+				chunk.id === seed.id ? 0 : adaptiveRelationBoost(seedMetadata, parseAdaptiveMetadata(chunk));
+			return { chunk, score: seedBoost + relationBoost + proximity + coverage };
 		})
-		.sort((a, b) => b.score - a.score)
+		.sort((a, b) => b.score - a.score || a.chunk.start_line - b.chunk.start_line || a.chunk.end_line - b.chunk.end_line)
 		.slice(0, options.neighborTarget);
 	if (!scored.some((item) => item.chunk.id === seed.id)) scored.push({ chunk: seed, score: Number.MAX_SAFE_INTEGER });
 
@@ -524,6 +599,7 @@ function buildAdaptiveContext(
 		.sort((a, b) => a.start_line - b.start_line || a.end_line - b.end_line);
 	const parts: string[] = [];
 	const sourceChunkIds: string[] = [];
+	const includedChunks: Chunk[] = [];
 	let totalLength = 0;
 	for (const chunk of ordered) {
 		if (totalLength >= options.maxContextChars) break;
@@ -531,12 +607,13 @@ function buildAdaptiveContext(
 		const text = chunk.content.slice(0, remaining);
 		parts.push(text);
 		sourceChunkIds.push(chunk.id);
+		includedChunks.push(chunk);
 		totalLength += text.length + 2;
 	}
 	return {
 		content: parts.join("\n\n"),
-		startLine: Math.min(...ordered.map((chunk) => chunk.start_line)),
-		endLine: Math.max(...ordered.map((chunk) => chunk.end_line)),
+		startLine: Math.min(...includedChunks.map((chunk) => chunk.start_line)),
+		endLine: Math.max(...includedChunks.map((chunk) => chunk.end_line)),
 		sourceChunkIds,
 	};
 }

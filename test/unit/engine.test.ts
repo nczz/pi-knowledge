@@ -795,6 +795,100 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("adaptive mode prefers AST sibling methods over unrelated nearby classes", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-adaptive-ast-"));
+			try {
+				vi.stubEnv("PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET", "2");
+				const filler = "x".repeat(3_000);
+				writeFileSync(
+					join(projectDir, "auth.ts"),
+					[
+						"export class AuthenticationService {",
+						`  authenticate(): string { return "AuthSiblingToken ${filler}"; }`,
+						`  refreshToken(): string { return "RefreshAdaptiveToken ${filler}"; }`,
+						"}",
+						"export class UnrelatedService {",
+						`  unrelated(): string { return "UnrelatedNearbyToken ${filler}"; }`,
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "Adaptive AST");
+				const result = await engine.search("RefreshAdaptiveToken", {
+					mode: "adaptive",
+					limit: 1,
+					diversity: "off",
+				});
+
+				expect(result.results[0].content).toContain("RefreshAdaptiveToken");
+				expect(result.results[0].content).toContain("AuthSiblingToken");
+				expect(result.results[0].content).not.toContain("UnrelatedNearbyToken");
+				expect(result.results[0].provenance?.source_chunk_ids?.length).toBe(2);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("adaptive mode falls back to neighbor scoring when metadata is invalid", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-adaptive-invalid-meta-"));
+			try {
+				writeFileSync(
+					join(projectDir, "guide.md"),
+					[
+						"# Invalid Metadata Seed",
+						"InvalidMetaSeedToken explains the indexed adaptive fallback trigger.",
+						"# Invalid Metadata Neighbor",
+						"InvalidMetaNeighborToken explains nearby context that should still be selected.",
+					].join("\n\n"),
+				);
+
+				await engine.add(projectDir, "Adaptive Invalid Metadata");
+				const db = openDatabase(TEST_DIR);
+				try {
+					const kbId = engine.list().find((kb) => kb.name === "Adaptive Invalid Metadata")?.id ?? "";
+					for (const chunk of getChunksByKB(db, kbId)) {
+						db.prepare("UPDATE chunks SET metadata_json = ? WHERE id = ?").run("{invalid-json", chunk.id);
+					}
+				} finally {
+					db.close();
+				}
+
+				const result = await engine.search("InvalidMetaSeedToken", { mode: "adaptive", limit: 1 });
+
+				expect(result.results[0].content).toContain("InvalidMetaSeedToken");
+				expect(result.results[0].content).toContain("InvalidMetaNeighborToken");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("adaptive mode applies neighbor and character hard caps", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-adaptive-caps-"));
+			try {
+				vi.stubEnv("PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET", "1");
+				vi.stubEnv("PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS", "1000");
+				const filler = "x".repeat(3_000);
+				writeFileSync(
+					join(projectDir, "auth.ts"),
+					[
+						"export class AuthenticationService {",
+						`  authenticate(): string { return "CapSiblingToken ${filler}"; }`,
+						`  refreshToken(): string { return "CapSeedToken ${filler}"; }`,
+						"}",
+					].join("\n"),
+				);
+
+				await engine.add(projectDir, "Adaptive Caps");
+				const result = await engine.search("CapSeedToken", { mode: "adaptive", limit: 1 });
+
+				expect(result.results[0].content).toContain("CapSeedToken");
+				expect(result.results[0].content.length).toBeLessThanOrEqual(1_000);
+				expect(result.results[0].provenance?.source_chunk_ids).toHaveLength(1);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("search can use indexed file context after rebuild", async () => {
 			const projectDir = mkdtempSync(join(tmpdir(), "pk-contextual-index-"));
 			try {

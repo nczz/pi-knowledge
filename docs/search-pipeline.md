@@ -147,12 +147,13 @@ Adaptive mode starts from hybrid seed chunks and expands context at query time. 
 
 - Keep the matched seed chunk.
 - Prefer nearby chunks with stronger query coverage.
+- For code chunks that have AST metadata, prefer same-file chunks with the same parent symbol, compatible scope prefix, or parent/child structural relation.
 - Collapse overlapping context windows from the same file.
-- Use lexical, line-proximity, vector-redundancy, and file-level diversity so repeated README or overview chunks do not dominate top results.
+- Use lexical, line-proximity, AST metadata, vector-redundancy, and file-level diversity so repeated README or overview chunks do not dominate top results.
 
 Index-time contextual retrieval is also used for embeddings and FTS: file path, file type, Markdown heading breadcrumbs, and AST-derived code structure (`symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`) are included in the searchable representation, while returned content stays as the original chunk text.
 
-Existing KBs should be rebuilt or updated after search-quality changes that affect indexing text. Query-time ranking changes apply immediately to existing KBs.
+Existing KBs should be rebuilt or updated after search-quality changes that affect indexing text or structural metadata. Query-time ranking changes apply immediately to existing KBs, but AST-aware adaptive sibling expansion only has structure to use after the KB contains AST metadata.
 
 ## 7. Metadata Filtering (Post-retrieval)
 
@@ -194,10 +195,10 @@ This search pipeline is based on retrieval research and production RAG guidance,
 | [Karpukhin et al. 2020, Dense Passage Retrieval](https://arxiv.org/abs/2004.04906) | Dense vectors improve semantic passage retrieval beyond sparse lexical matching alone. | `semantic` mode and vector side of `hybrid` mode use local embeddings. |
 | [Anthropic 2024, Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval) | Prepending chunk-specific context to embeddings and BM25 improves retrieval; combining contextual embeddings, contextual BM25, and reranking gives the largest gains. | Index-time searchable text prepends file path, file type, Markdown breadcrumbs, and AST-derived code structure to embeddings/FTS while returned content remains the original chunk. |
 | [Cormack et al. 2009, Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) | RRF is a strong zero-training rank-fusion baseline. | Retained as a tested utility, but not the default hybrid scoring because project dogfood showed excessive score compression for this product's diagnostics. |
-| [Goldstein and Carbonell 1998, MMR diversity reranking](https://aclanthology.org/X98-1025/) | Reranking can trade off relevance and novelty to reduce redundant top results. | Diversity reranking uses relevance plus lexical, same-file line proximity, adaptive-window overlap, and vector-redundancy signals. |
+| [Goldstein and Carbonell 1998, MMR diversity reranking](https://aclanthology.org/X98-1025/) | Reranking can trade off relevance and novelty to reduce redundant top results. | Diversity reranking uses relevance plus lexical, same-file line proximity, adaptive-window overlap, AST parent/sibling metadata when indexed, and vector-redundancy signals. |
 | [Khattab and Zaharia 2020, ColBERT](https://arxiv.org/abs/2004.12832) | Late interaction can improve retrieval quality while precomputing document representations. | Not implemented in this release: it would add larger model/index complexity. Current approach uses lighter local embeddings plus optional cross-encoder reranking. |
 
-The current implementation intentionally does not generate LLM-written per-chunk context like Anthropic's full Contextual Retrieval recipe. Instead, it uses deterministic context available locally from the indexed artifact: path, type, heading, symbol, scope, parent symbol, and signature metadata. This keeps indexing private, repeatable, offline-capable, and suitable for commercial local development workflows.
+The current implementation intentionally does not generate LLM-written per-chunk context like Anthropic's full Contextual Retrieval recipe. Instead, it uses deterministic context available locally from the indexed artifact: path, type, heading, symbol, scope, parent symbol, and signature metadata. Adaptive mode may use that metadata to prefer bounded same-file parent/sibling context, but it does not infer caller/callee relationships. This keeps indexing private, repeatable, offline-capable, and suitable for commercial local development workflows.
 
 
 ---

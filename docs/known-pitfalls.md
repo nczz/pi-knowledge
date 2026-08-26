@@ -161,7 +161,7 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 - `hybrid`: 預設模式，適合有明確 lexical anchor 的多數專案問題；它不是 vector-only semantic recall，低 keyword evidence 會被 gate 掉。
 - `fast`: 精確 symbol、檔名、指令、錯誤碼、API、config key、quoted string。
 - `semantic`: 概念問題，使用者用語可能和文件/程式碼字面不同，或 `hybrid` 沒有 lexical match 但 KB 理論上應該有答案。
-- `adaptive`: 需要鄰近脈絡、相關 section、或準備改 code。
+- `adaptive`: 需要鄰近脈絡、相關 section、準備改 code，或需要同檔案 AST parent/sibling context。它是 bounded metadata-driven expansion，不是 caller/callee graph。
 - `deep`: 高風險答案、top results 模糊、或最後驗證。
 
 如果結果空或明顯弱，但 KB 理論上應該有答案，agent 應該換 mode 重試一次；如果結果重複，先用 `diversity: "strong"` 或 `adaptive`，不要只提高 limit。
@@ -169,6 +169,8 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 `auto` mode 是工具層 fallback，不是單純 prompt 建議。它必須回傳實際 `mode_used` 與 `retry_modes`，並避免 exact lookup 查不到後接受零 lexical evidence 的 semantic 假陽性。
 
 `knowledge_symbol_search` 是 exact lookup 的第一層，不是完整 code graph。它應索引 lightweight、可重建的 metadata: AST-backed function/method/class/interface/type/variable、Markdown heading、config key、env var。不要為了 symbol lookup 在 root entry 或一般啟動路徑引入 LSP、tree-sitter 或大型 parser；tree-sitter 只能在 indexing/chunking 路徑 lazy-load。如果需要 caller/callee graph 或 rename 語意，應作為後續明確設計，而不是塞進 Pi/OMP 外掛的 startup path。
+
+`knowledge_search` adaptive mode 可以用 AST metadata 偏好 same-parent/sibling chunks，但它仍只在 bounded same-file candidate window 內做 retrieval-time context selection。不要把這描述成 full code graph、caller/callee、reference search 或 rename-safe lookup。舊 KB 如果沒有 `scope` / `parent_symbol` / `symbol_kind` metadata，adaptive 會退回 line proximity + lexical coverage；需要 `knowledge_update` 或 rebuild 才有 AST-aware expansion。
 
 `knowledge_search` 的 `path_pattern` 是 substring filter，不是 glob/LSP path query。Agent 若需要鎖定檔案或目錄，可以搭配 `file_type` 使用；若需要 code symbol 的 caller/callee 或 rename 語意，這不是此工具的責任。
 

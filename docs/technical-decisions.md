@@ -325,3 +325,24 @@
 **重建索引邊界**:
 - This changes chunk boundaries, chunk identity metadata, searchable text, and symbol metadata. Existing KBs must run `knowledge_update` or be rebuilt to get full benefit.
 - Query-time ranking changes still apply immediately, but AST-backed symbol lookup and structural embedding context require re-indexing.
+
+---
+
+## ADR-019: Metadata-driven AST-aware adaptive expansion
+
+**狀態**: 已決定
+
+**背景**: Recursive AST chunking gives code chunks deterministic `scope`, `parent_symbol`, `symbol_kind`, and signature metadata. Adaptive search already expands hybrid seed chunks with bounded same-file context, but line proximity alone can choose nearby unrelated code over a structurally related sibling method.
+
+**決策**:
+- Adaptive mode remains a hybrid-seed retrieval path with same-file bounded candidate fetching.
+- Query-time expansion parses only chunk `metadata_json`; it never reparses source files and never imports tree-sitter.
+- Candidate scoring combines the existing seed boost, line proximity, and lexical coverage with AST relation boosts for same parent symbol, compatible scope prefix, and parent/child structural relation.
+- Returned content remains original chunk source joined as adaptive context; structural metadata is not prepended to returned content.
+- `source_chunk_ids` remains the provenance mechanism for expanded context.
+- Missing or invalid metadata falls back to the previous proximity/coverage behavior.
+
+**理由**:
+- This improves coding-agent context for class/method edits without turning `knowledge_search` into LSP, reference search, or caller/callee graph analysis.
+- The bounded same-file candidate window preserves adaptive latency and avoids loading whole KB chunk sets.
+- Existing KBs keep working; AST-aware expansion becomes available after update/rebuild populates structural metadata.

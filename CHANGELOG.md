@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0] - 2026-08-26
+
+### Added
+- Added recursive AST chunking for supported code files, including same-parent sibling packing, bounded oversized leaf fallback, and structural chunk metadata for language, symbol kind, scope, parent symbol, signature, export state, AST path, and source line range (#11).
+- Added AST-backed symbol extraction for supported code files so method symbols remain searchable independently from retrieval chunk boundaries (#11).
+- Added metadata-driven AST-aware adaptive context expansion so `adaptive` search can prefer same-file parent/sibling chunks while preserving bounded context and clean returned source.
+
+### Changed
+- Code indexing now analyzes supported source files once for both retrieval chunks and symbols, while preserving regex/text fallbacks for unsupported or unparsable content.
+- Searchable embedding/FTS text now includes richer deterministic code structure; existing KBs should be updated or rebuilt to benefit from the new metadata.
+
 
 ## [0.8.1] - 2026-08-08
 
