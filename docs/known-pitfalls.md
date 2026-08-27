@@ -5,12 +5,17 @@
 ## tree-sitter 版本相容性
 
 ```
-✅ 可用: tree-sitter@0.22.4 + grammars@0.23.x
-❌ 失敗: tree-sitter@0.25.0 (gyp build error on macOS)
+✅ 可用: tree-sitter@0.25.1 + root override + current supported grammars
+✅ 舊基準: tree-sitter@0.22.4 + grammars@0.23.x (Node 22+/24 source build may fail)
+❌ 失敗: tree-sitter@0.25.0 (Node 22+/24 source build still uses too old C++ standard)
+❌ 失敗: tree-sitter@0.25.1 without root override (TypeScript/Java/Rust peer ranges lag)
 ❌ 失敗: tree-sitter@0.21.1 + grammar@0.25.0 (nodeTypeNamesById undefined)
 ```
 
-Grammar 版本必須和 core 配對。鎖定 0.22.x core + 0.23.x grammars。
+Current parser baseline pins `tree-sitter@0.25.1`, `tree-sitter-javascript/python/go@0.25.0`,
+`tree-sitter-rust@0.24.0`, and keeps `tree-sitter-typescript@0.23.2` / `tree-sitter-java@0.23.5`.
+The root `overrides.tree-sitter` is intentional: strict npm installs otherwise reject legacy grammar peer ranges
+even though the supported AST language smoke tests pass against the 0.25.1 ABI.
 
 ## PDF/DOCX — 已解決 (v0.2.0)
 

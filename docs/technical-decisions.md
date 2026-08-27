@@ -315,6 +315,7 @@
 - `knowledge_symbol_search` uses symbols emitted from the same AST analysis so methods can be exact-looked-up even when the parent class is one retrieval chunk.
 - Add/update parse each code file once for chunks and symbols; fallback keeps existing text/regex behavior when AST parsing is unsupported or fails.
 - Tree-sitter imports stay lazy in indexing/chunking paths; root `index.ts` remains startup-light.
+- Parser baseline is `tree-sitter@0.25.1` with a root `overrides.tree-sitter` pin because several maintained grammars still publish older peer ranges while runtime parsing works against the 0.25 ABI; JavaScript uses `tree-sitter-javascript` directly instead of the legacy TypeScript package export.
 
 **理由**:
 - Recursive splitting preserves semantic units while bounding worst-case chunk size for large classes, generated declarations, or huge methods.

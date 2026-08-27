@@ -70,8 +70,8 @@ const LANGS: Record<string, LangConfig> = {
 	},
 	javascript: {
 		grammar: async () => {
-			const m = await import("tree-sitter-typescript");
-			return moduleField(m, "typescript") ?? moduleField(moduleDefault(m), "typescript");
+			const m = await import("tree-sitter-javascript");
+			return moduleDefault(m) ?? m;
 		},
 		fileType: "javascript",
 	},

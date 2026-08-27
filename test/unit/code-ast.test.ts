@@ -98,4 +98,54 @@ describe("AST code analysis", () => {
 		expect(embeddingText).toContain("Kind: class");
 		expect(embeddingText).toContain("Symbol: Auth");
 	});
+
+	it("loads the tree-sitter baseline for every supported AST language", async () => {
+		const cases = [
+			{
+				language: "typescript",
+				filePath: "src/service.ts",
+				code: "export class Service { run(): number { return 1; } }",
+				symbols: ["Service", "run"],
+			},
+			{
+				language: "javascript",
+				filePath: "src/service.js",
+				code: "export class Service { run() { return 1; } }",
+				symbols: ["Service", "run"],
+			},
+			{
+				language: "python",
+				filePath: "service.py",
+				code: "class Service:\n    def run(self):\n        return 1\n",
+				symbols: ["Service", "run"],
+			},
+			{
+				language: "go",
+				filePath: "service.go",
+				code: "package service\nfunc Run() int { return 1 }\n",
+				symbols: ["Run"],
+			},
+			{
+				language: "rust",
+				filePath: "service.rs",
+				code: "pub fn run() -> i32 { 1 }\n",
+				symbols: ["run"],
+			},
+			{
+				language: "java",
+				filePath: "Service.java",
+				code: "class Service { int run() { return 1; } }",
+				symbols: ["Service", "run"],
+			},
+		];
+
+		for (const item of cases) {
+			const analysis = await analyzeCodeWithAST(item.code, item.filePath, item.language);
+			const names = analysis.symbols.map((symbol) => symbol.name);
+
+			expect(analysis.chunks.length, item.language).toBeGreaterThan(0);
+			for (const symbol of item.symbols) expect(names, item.language).toContain(symbol);
+			expect(metadata(analysis.chunks[0]).language).toBe(item.language);
+		}
+	});
 });
