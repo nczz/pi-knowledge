@@ -23,6 +23,7 @@ type JsonMetadata = Record<string, string | number | boolean | string[] | number
 type StructureKind =
 	| "module"
 	| "namespace"
+	| "import"
 	| "class"
 	| "interface"
 	| "type"
@@ -30,6 +31,11 @@ type StructureKind =
 	| "method"
 	| "constructor"
 	| "destructor"
+	| "property"
+	| "signal"
+	| "handler"
+	| "id"
+	| "binding"
 	| "variable";
 
 export interface CodeStructureNode {
@@ -140,9 +146,18 @@ const LANGS: Record<string, LangConfig> = {
 		fileType: "cpp",
 		fallbackOnParseError: true,
 	},
+	qml: {
+		grammar: async () => {
+			const m = await import("tree-sitter-qmljs");
+			return moduleDefault(m) ?? m;
+		},
+		fileType: "qml",
+		fallbackOnParseError: true,
+	},
 };
 
 const NAMESPACE_TYPES = new Set(["namespace_definition"]);
+const QML_TYPES = new Set(["ui_binding", "ui_import", "ui_object_definition", "ui_property", "ui_signal"]);
 const CLASS_TYPES = new Set([
 	"abstract_class_declaration",
 	"class_declaration",
@@ -276,8 +291,26 @@ function nameFromDeclarator(node: ASTNode | null | undefined): string | undefine
 		.find((name): name is string => Boolean(name));
 }
 
+function firstNamedChildText(node: ASTNode, type: string): string | undefined {
+	const match = nodeChildren(node).find((child) => child.type === type);
+	const text = match?.text.trim();
+	return text || undefined;
+}
+
+function qmlBindingName(node: ASTNode): string | undefined {
+	const key = node.childForFieldName("name")?.text.trim() ?? firstNamedChildText(node, "identifier");
+	if (key !== "id") return key || undefined;
+	const value = node.childForFieldName("value");
+	return value ? (firstNamedChildText(value, "identifier") ?? value.text.trim()) : key;
+}
+
 function getName(node: ASTNode): string | undefined {
 	if (node.type === "constructor_declaration") return "constructor";
+	if (node.type === "ui_object_definition") return firstNamedChildText(node, "identifier");
+	if (node.type === "ui_import") {
+		return firstNamedChildText(node, "nested_identifier") ?? firstNamedChildText(node, "identifier");
+	}
+	if (node.type === "ui_binding") return qmlBindingName(node);
 	if (
 		node.type === "type_definition" ||
 		node.type === "declaration" ||
@@ -324,6 +357,7 @@ function parentFromQualifiedName(name: string | undefined): string | undefined {
 
 function isStructuralCandidate(node: ASTNode): boolean {
 	return (
+		QML_TYPES.has(node.type) ||
 		NAMESPACE_TYPES.has(node.type) ||
 		CLASS_TYPES.has(node.type) ||
 		INTERFACE_TYPES.has(node.type) ||
@@ -335,6 +369,15 @@ function isStructuralCandidate(node: ASTNode): boolean {
 }
 
 function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | undefined {
+	if (node.type === "ui_import") return "import";
+	if (node.type === "ui_object_definition") return "class";
+	if (node.type === "ui_property") return "property";
+	if (node.type === "ui_signal") return "signal";
+	if (node.type === "ui_binding") {
+		const key = node.childForFieldName("name")?.text.trim() ?? firstNamedChildText(node, "identifier");
+		if (key === "id") return "id";
+		return key?.startsWith("on") ? "handler" : "binding";
+	}
 	if (node.type === "preproc_def" || node.type === "preproc_function_def") return "variable";
 	if (
 		(node.type === "declaration" || node.type === "field_declaration") &&
@@ -534,7 +577,8 @@ function scanChildren(node: ASTNode, context: BuildContext, map: ByteIndexMap): 
 			child.type === "class_body" ||
 			child.type === "block" ||
 			child.type === "declaration_list" ||
-			child.type === "field_declaration_list"
+			child.type === "field_declaration_list" ||
+			child.type === "ui_object_initializer"
 		) {
 			nodes.push(...scanChildren(child, nextContext, map));
 		}
@@ -734,9 +778,17 @@ function buildDrafts(nodes: CodeStructureNode[], map: ByteIndexMap): ChunkDraft[
 function symbolKindForNode(node: CodeStructureNode): KnowledgeSymbolInsert["kind"] | undefined {
 	if (!node.name) return undefined;
 	if (node.kind === "class") return "class";
-	if (node.kind === "namespace" || node.kind === "type") return "type";
-	if (node.kind === "variable") return "variable";
-	if (node.kind === "function" || node.kind === "method" || node.kind === "constructor" || node.kind === "destructor")
+	if (node.kind === "namespace" || node.kind === "import" || node.kind === "type") return "type";
+	if (node.kind === "variable" || node.kind === "property" || node.kind === "id" || node.kind === "binding")
+		return "variable";
+	if (
+		node.kind === "function" ||
+		node.kind === "method" ||
+		node.kind === "constructor" ||
+		node.kind === "destructor" ||
+		node.kind === "signal" ||
+		node.kind === "handler"
+	)
 		return "function";
 	return undefined;
 }

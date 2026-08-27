@@ -23,7 +23,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
-- **Code-aware indexing**: recursive AST chunking for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, and C++, with bounded fallback chunks for oversized declarations.
+- **Code-aware indexing**: recursive AST chunking for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML, with bounded fallback chunks for oversized declarations.
 - **Lightweight symbol lookup**: indexes functions, methods, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
@@ -43,7 +43,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Diversity reranking** | ✅ | ❌ | ❌ |
 | **Incremental re-indexing** | ✅ | ❌ | ❌ |
 | **File watcher (auto-update)** | ✅ | ❌ | ❌ |
-| **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java/Bash/C/C++) | ❌ | ❌ |
+| **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java/Bash/C/C++/QML) | ❌ | ❌ |
 | **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
 | **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
 | **Index quality diagnostics** | ✅ | ❌ | ❌ |

@@ -320,6 +320,82 @@ describe("AST code analysis", () => {
 		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
 	});
 
+	it("extracts QML component hierarchy, properties, signals, handlers, ids, imports, and functions", async () => {
+		const code = [
+			"import QtQuick 2.15",
+			"ApplicationWindow {",
+			"  id: root",
+			"  property bool sidebarVisible: true",
+			"  signal opened(string path)",
+			"  ListView {",
+			"    id: documentList",
+			"    delegate: Item {",
+			"      property string title: model.title",
+			"      function openDocument(path) {",
+			"        root.opened(path)",
+			"      }",
+			"      onVisibleChanged: console.log(visible)",
+			"    }",
+			"  }",
+			"}",
+		].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "ui/Main.qml", "qml");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		const openDocument = analysis.symbols.find((symbol) => symbol.name === "openDocument");
+		const handler = analysis.symbols.find((symbol) => symbol.name === "onVisibleChanged");
+
+		expect(names).toContain("QtQuick");
+		expect(names).toContain("ApplicationWindow");
+		expect(names).toContain("root");
+		expect(names).toContain("sidebarVisible");
+		expect(names).toContain("opened");
+		expect(names).toContain("ListView");
+		expect(names).toContain("documentList");
+		expect(names).toContain("delegate");
+		expect(names).toContain("Item");
+		expect(names).toContain("title");
+		expect(names).toContain("openDocument");
+		expect(names).toContain("onVisibleChanged");
+		expect(metadata(openDocument ?? { metadata_json: "{}" }).parent_symbol).toBe("Item");
+		expect(metadata(handler ?? { metadata_json: "{}" }).symbol_kind).toBe("handler");
+		expect(metadata(analysis.chunks[0]).language).toBe("qml");
+	});
+
+	it("detects .qml files as QML AST code", async () => {
+		const analysis = await analyzeIndexableContent("Item { id: root; property string title: 'Demo' }\n", "ui/Item.qml");
+
+		expect(analysis.chunks[0].file_type).toBe("qml");
+		expect(analysis.symbols.map((symbol) => symbol.name)).toContain("root");
+		expect(analysis.symbols.map((symbol) => symbol.name)).toContain("title");
+	});
+
+	it("recursively splits oversized QML components", async () => {
+		const code = [
+			"ApplicationWindow {",
+			"  Item {",
+			`    property string hugeText: "${"x".repeat(7_000)}"`,
+			"  }",
+			"  function openDocument(path) { return path }",
+			"}",
+		].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "ui/Large.qml", "qml");
+		const allMetadata = analysis.chunks.map(metadata);
+
+		expect(allMetadata.some((item) => item.symbol === "ApplicationWindow")).toBe(false);
+		expect(allMetadata.some((item) => item.symbol === "hugeText")).toBe(true);
+		expect(allMetadata.some((item) => item.symbol === "openDocument")).toBe(true);
+		expect(analysis.chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+	});
+
+	it("falls back to text chunks for malformed QML", async () => {
+		const code = "ApplicationWindow {\n  property bool visible:\n";
+		const analysis = await analyzeIndexableContent(code, "ui/Broken.qml");
+
+		expect(analysis.chunks.length).toBeGreaterThan(0);
+		expect(analysis.chunks[0].file_type).toBe("qml");
+		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
+	});
+
 	it("loads the tree-sitter baseline for every supported AST language", async () => {
 		const cases = [
 			{
@@ -375,6 +451,12 @@ describe("AST code analysis", () => {
 				filePath: "src/service.cpp",
 				code: "class Service { public: void run() {} };\n",
 				symbols: ["Service", "run"],
+			},
+			{
+				language: "qml",
+				filePath: "ui/Service.qml",
+				code: "Item { id: root; function run() { return 1 } }\n",
+				symbols: ["Item", "root", "run"],
 			},
 		];
 
