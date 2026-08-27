@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
+import { analyzeIndexableContent, buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
 import { analyzeCodeWithAST, chunkWithAST, parseCodeStructure } from "../../src/indexer/chunkers/code-ast.ts";
 
 function metadata(chunk: { metadata_json: string }) {
@@ -99,6 +99,72 @@ describe("AST code analysis", () => {
 		expect(embeddingText).toContain("Symbol: Auth");
 	});
 
+	it("extracts Bash function chunks and symbols", async () => {
+		const code = [
+			"build_package() {",
+			'  local name="$1"',
+			'  if [[ -n "$name" ]]; then',
+			'    echo "$name"',
+			"  fi",
+			"}",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "scripts/build.sh", "bash");
+		const chunkMetadata = metadata(analysis.chunks[0]);
+
+		expect(analysis.chunks).toHaveLength(1);
+		expect(analysis.chunks[0].content).toBe(code);
+		expect(analysis.symbols.map((symbol) => symbol.name)).toContain("build_package");
+		expect(chunkMetadata.language).toBe("bash");
+		expect(chunkMetadata.symbol).toBe("build_package");
+		expect(chunkMetadata.symbol_kind).toBe("function");
+		expect(chunkMetadata.signature).toBe("build_package()");
+	});
+
+	it("detects .sh files as Bash AST code", async () => {
+		const analysis = await analyzeIndexableContent("run_service() { echo ok; }\n", "scripts/service.sh");
+
+		expect(analysis.chunks[0].file_type).toBe("bash");
+		expect(metadata(analysis.chunks[0]).language).toBe("bash");
+		expect(analysis.symbols.map((symbol) => symbol.name)).toContain("run_service");
+	});
+
+	it("supports Bash function keyword declarations", async () => {
+		const code = [
+			"function deploy {",
+			"  source ./env.sh",
+			"  for target in prod; do",
+			'    echo "$target"',
+			"  done",
+			"}",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "scripts/deploy.bash", "bash");
+
+		expect(analysis.symbols.map((symbol) => symbol.name)).toContain("deploy");
+		expect(metadata(analysis.chunks[0]).symbol).toBe("deploy");
+	});
+
+	it("bounds oversized Bash function fallback chunks", async () => {
+		const code = ["build_package() {", `  echo "${"x".repeat(7_000)}"`, "}"].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "scripts/build.sh", "bash");
+		const allMetadata = analysis.chunks.map(metadata);
+
+		expect(analysis.chunks.length).toBeGreaterThan(1);
+		expect(analysis.chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+		expect(allMetadata.every((item) => item.symbol === "build_package")).toBe(true);
+		expect(allMetadata.some((item) => item.chunk_part === 1)).toBe(true);
+	});
+
+	it("falls back to text chunks for malformed Bash", async () => {
+		const code = 'broken() {\n  if [[ -n "$name" ]]; then\n    echo "$name"\n';
+		const analysis = await analyzeIndexableContent(code, "scripts/broken.sh");
+
+		expect(analysis.chunks.length).toBeGreaterThan(0);
+		expect(analysis.chunks[0].file_type).toBe("bash");
+		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
+	});
+
 	it("loads the tree-sitter baseline for every supported AST language", async () => {
 		const cases = [
 			{
@@ -136,6 +202,12 @@ describe("AST code analysis", () => {
 				filePath: "Service.java",
 				code: "class Service { int run() { return 1; } }",
 				symbols: ["Service", "run"],
+			},
+			{
+				language: "bash",
+				filePath: "scripts/service.sh",
+				code: "run_service() { echo ok; }\n",
+				symbols: ["run_service"],
 			},
 		];
 

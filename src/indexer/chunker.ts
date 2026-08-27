@@ -204,8 +204,8 @@ function detectFileType(filePath: string): string {
 		".html": "html",
 		".css": "css",
 		".scss": "css",
-		".sh": "shell",
-		".bash": "shell",
+		".sh": "bash",
+		".bash": "bash",
 		".zsh": "shell",
 		".sql": "sql",
 		".graphql": "graphql",
@@ -636,7 +636,7 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 }
 
 export function isCodeFileType(fileType: string): boolean {
-	return ["typescript", "javascript", "python", "go", "rust", "java"].includes(fileType);
+	return ["typescript", "javascript", "python", "go", "rust", "java", "bash"].includes(fileType);
 }
 
 export async function analyzeIndexableContent(

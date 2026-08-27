@@ -43,6 +43,7 @@ describe("ranking heuristics", () => {
 	it("normalizes file type aliases", () => {
 		expect(normalizeFileTypeFilter("md")).toBe("markdown");
 		expect(normalizeFileTypeFilter("ts")).toBe("typescript");
+		expect(normalizeFileTypeFilter("sh")).toBe("bash");
 	});
 
 	it("detects common test paths across ecosystems", () => {

@@ -49,6 +49,7 @@ export interface CodeAnalysisResult {
 type LangConfig = {
 	grammar: () => Promise<unknown>;
 	fileType: string;
+	fallbackOnParseError?: boolean;
 };
 
 function moduleField(moduleValue: unknown, field: string): unknown {
@@ -102,6 +103,14 @@ const LANGS: Record<string, LangConfig> = {
 			return moduleDefault(m) ?? m;
 		},
 		fileType: "java",
+	},
+	bash: {
+		grammar: async () => {
+			const m = await import("tree-sitter-bash");
+			return moduleDefault(m) ?? m;
+		},
+		fileType: "bash",
+		fallbackOnParseError: true,
 	},
 };
 
@@ -675,7 +684,8 @@ async function parseStructure(
 	const parser = new Parser();
 	parser.setLanguage(grammar as Parameters<typeof parser.setLanguage>[0]);
 	const tree = parser.parse(content);
-	const rootNode = tree.rootNode as unknown as ASTNode;
+	const rootNode = tree.rootNode as unknown as ASTNode & { hasError?: boolean };
+	if (config.fallbackOnParseError && rootNode.hasError) throw new Error(`AST parse failed for ${language}`);
 	const map = buildByteIndexMap(content);
 	const root: CodeStructureNode = {
 		kind: "module",

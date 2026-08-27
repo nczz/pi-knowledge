@@ -16,13 +16,14 @@ export const FILE_TYPE_ALIASES: Record<string, string> = {
 	php: "php",
 	py: "python",
 	rb: "ruby",
-	sh: "shell",
+	sh: "bash",
 	ts: "typescript",
 	tsx: "typescript",
 	yml: "yaml",
 };
 
 const SOURCE_FILE_TYPES = new Set([
+	"bash",
 	"c",
 	"cpp",
 	"csharp",

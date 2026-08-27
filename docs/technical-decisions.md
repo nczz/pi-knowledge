@@ -308,7 +308,7 @@
 **背景**: Flat function-level chunking made large classes either too coarse or too fragmented, and `knowledge_symbol_search` relied on declaration regexes that missed common method syntax. Search also needed deterministic structural context richer than one `function_name` field without mutating returned chunk content.
 
 **決策**:
-- Supported code files use a normalized tree-sitter structure for TypeScript/JavaScript, Python, Go, Rust, and Java during indexing.
+- Supported code files use a normalized tree-sitter structure for TypeScript/JavaScript, Python, Go, Rust, Java, and Bash during indexing.
 - Small declarations remain whole chunks; oversized declarations recursively descend to child declarations; same-parent small declarations can be packed; nodes with no child declarations use bounded line/character fallback chunks.
 - Chunk metadata records deterministic structure: `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, export/decorator flags, AST path, and source line range.
 - Embedding/FTS searchable text prepends structural metadata, but stored `content` remains the original source slice.
