@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0] - 2026-08-27
+
+### Added
+- Added Bash AST indexing for `.sh` and `.bash` scripts, including both `name() {}` and `function name {}` forms with bounded fallback chunking (#12).
+- Added GNU C AST indexing for `.c` source files, covering functions, prototypes, structs, unions, enums, typedefs, reliable preprocessor symbols, and `static` metadata (#12).
+- Added C++ AST indexing for `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx` files, covering namespaces, classes, methods, constructors, destructors, enums, templates, and access visibility where the parser reports it reliably (#12).
+- Added QML AST indexing for `.qml` files, covering imports, component/object hierarchy, ids, properties, signals, handlers, bindings, and embedded JavaScript functions (#12).
+
+### Changed
+- Kept ambiguous `.h` headers classified as text by default; use typed C++ header extensions for C++ AST indexing (#12).
+- Parser errors in Bash, C, C++, and QML now intentionally fall back to existing text chunking instead of indexing partial structural claims (#12).
+
 ## [0.9.0] - 2026-08-26
 
 ### Added
