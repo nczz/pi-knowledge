@@ -20,7 +20,17 @@ interface ASTNode {
 
 type JsonMetadata = Record<string, string | number | boolean | string[] | number[] | boolean[] | null | undefined>;
 
-type StructureKind = "module" | "class" | "interface" | "type" | "function" | "method" | "constructor" | "variable";
+type StructureKind =
+	| "module"
+	| "namespace"
+	| "class"
+	| "interface"
+	| "type"
+	| "function"
+	| "method"
+	| "constructor"
+	| "destructor"
+	| "variable";
 
 export interface CodeStructureNode {
 	kind: StructureKind;
@@ -35,6 +45,7 @@ export interface CodeStructureNode {
 	exported: boolean;
 	decorators: string[];
 	modifiers: string[];
+	visibility?: string;
 	parentSymbol?: string;
 	scope: string[];
 	astPath: string[];
@@ -121,12 +132,22 @@ const LANGS: Record<string, LangConfig> = {
 		fileType: "c",
 		fallbackOnParseError: true,
 	},
+	cpp: {
+		grammar: async () => {
+			const m = await import("tree-sitter-cpp");
+			return moduleDefault(m) ?? m;
+		},
+		fileType: "cpp",
+		fallbackOnParseError: true,
+	},
 };
 
+const NAMESPACE_TYPES = new Set(["namespace_definition"]);
 const CLASS_TYPES = new Set([
 	"abstract_class_declaration",
 	"class_declaration",
 	"class_definition",
+	"class_specifier",
 	"enum_declaration",
 ]);
 const INTERFACE_TYPES = new Set(["interface_declaration"]);
@@ -144,6 +165,7 @@ const TYPE_TYPES = new Set([
 ]);
 const FUNCTION_TYPES = new Set([
 	"declaration",
+	"field_declaration",
 	"function_declaration",
 	"function_definition",
 	"function_item",
@@ -152,7 +174,7 @@ const FUNCTION_TYPES = new Set([
 ]);
 const METHOD_TYPES = new Set(["method_definition"]);
 const CONSTRUCTOR_TYPES = new Set(["constructor_declaration"]);
-const DECLARATION_WRAPPERS = new Set(["export_statement", "decorated_definition"]);
+const DECLARATION_WRAPPERS = new Set(["export_statement", "decorated_definition", "template_declaration"]);
 const VARIABLE_DECLARATOR_TYPES = new Set(["variable_declarator"]);
 const FIELD_DEFINITION_TYPES = new Set(["public_field_definition", "field_definition", "property_declaration"]);
 const FUNCTION_VALUE_TYPES = new Set([
@@ -171,6 +193,7 @@ interface BuildContext {
 	language: string;
 	exported: boolean;
 	decorators: string[];
+	visibility?: string;
 	scope: string[];
 	parentSymbol?: string;
 	astPath: string[];
@@ -236,6 +259,10 @@ function nodeChildren(node: ASTNode): ASTNode[] {
 
 function nameFromDeclarator(node: ASTNode | null | undefined): string | undefined {
 	if (!node) return undefined;
+	if (node.type === "qualified_identifier" || node.type === "destructor_name") {
+		const text = node.text.trim();
+		return text || undefined;
+	}
 	const direct = node.childForFieldName("name")?.text;
 	if (direct?.trim()) return direct.trim();
 	const nested = node.childForFieldName("declarator");
@@ -251,7 +278,12 @@ function nameFromDeclarator(node: ASTNode | null | undefined): string | undefine
 
 function getName(node: ASTNode): string | undefined {
 	if (node.type === "constructor_declaration") return "constructor";
-	if (node.type === "type_definition" || node.type === "declaration" || node.type === "function_definition") {
+	if (
+		node.type === "type_definition" ||
+		node.type === "declaration" ||
+		node.type === "field_declaration" ||
+		node.type === "function_definition"
+	) {
 		const declaratorName = nameFromDeclarator(node.childForFieldName("declarator"));
 		if (declaratorName) return declaratorName;
 	}
@@ -267,7 +299,6 @@ function nodeHasFunctionValue(node: ASTNode): boolean {
 function firstStructuralChild(node: ASTNode): ASTNode | undefined {
 	return nodeChildren(node).find((child) => isStructuralCandidate(child) || child.type === "lexical_declaration");
 }
-
 function decoratorsFor(node: ASTNode, inherited: string[] = []): string[] {
 	const decorators = node.children.filter((child) => child.type === "decorator").map((child) => child.text.trim());
 	return [...inherited, ...decorators].filter(Boolean);
@@ -280,8 +311,20 @@ function modifiersFor(node: ASTNode): string[] {
 		.filter(Boolean);
 }
 
+function leafName(name: string | undefined): string | undefined {
+	if (!name) return undefined;
+	return name.split("::").at(-1);
+}
+
+function parentFromQualifiedName(name: string | undefined): string | undefined {
+	if (!name?.includes("::")) return undefined;
+	const parts = name.split("::");
+	return parts.length > 1 ? parts.at(-2) : undefined;
+}
+
 function isStructuralCandidate(node: ASTNode): boolean {
 	return (
+		NAMESPACE_TYPES.has(node.type) ||
 		CLASS_TYPES.has(node.type) ||
 		INTERFACE_TYPES.has(node.type) ||
 		TYPE_TYPES.has(node.type) ||
@@ -291,17 +334,31 @@ function isStructuralCandidate(node: ASTNode): boolean {
 	);
 }
 
-function kindForNode(node: ASTNode): StructureKind | undefined {
+function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | undefined {
 	if (node.type === "preproc_def" || node.type === "preproc_function_def") return "variable";
-	if (node.type === "declaration" && !nodeChildren(node).some((child) => child.type === "function_declarator")) {
+	if (
+		(node.type === "declaration" || node.type === "field_declaration") &&
+		!nodeChildren(node).some((child) => child.type === "function_declarator")
+	) {
 		return undefined;
 	}
+	if (NAMESPACE_TYPES.has(node.type)) return "namespace";
 	if (CLASS_TYPES.has(node.type)) return "class";
 	if (INTERFACE_TYPES.has(node.type)) return "interface";
 	if (TYPE_TYPES.has(node.type)) return "type";
 	if (METHOD_TYPES.has(node.type) || node.type === "method_declaration") return "method";
 	if (CONSTRUCTOR_TYPES.has(node.type)) return "constructor";
-	if (FUNCTION_TYPES.has(node.type)) return "function";
+	if (FUNCTION_TYPES.has(node.type)) {
+		const name = getName(node);
+		const leaf = leafName(name);
+		if ((context?.parentSymbol && leaf === context.parentSymbol) || parentFromQualifiedName(name) === leaf) {
+			return "constructor";
+		}
+		if (leaf?.startsWith("~")) return "destructor";
+		if (node.type === "field_declaration" || (context?.parentSymbol && node.type === "declaration")) return "method";
+		if (name?.includes("::")) return leaf?.startsWith("~") ? "destructor" : "method";
+		return "function";
+	}
 	return undefined;
 }
 
@@ -309,7 +366,7 @@ function signatureFromText(text: string, kind: StructureKind): string | undefine
 	const normalized = text.trim();
 	if (!normalized) return undefined;
 	const bodyMarkers =
-		kind === "function" || kind === "method" || kind === "constructor"
+		kind === "function" || kind === "method" || kind === "constructor" || kind === "destructor"
 			? normalized.startsWith("def ") || normalized.startsWith("async def ")
 				? [":"]
 				: ["{", "=>"]
@@ -331,7 +388,11 @@ function createStructureNode(
 	map: ByteIndexMap,
 ): CodeStructureNode {
 	const span = context.spanNode ?? node;
-	const scope = name ? [...context.scope, name] : [...context.scope];
+	const qualifiedParent = parentFromQualifiedName(name);
+	const parentSymbol = qualifiedParent ?? context.parentSymbol;
+	const baseScope =
+		qualifiedParent && context.scope.at(-1) !== qualifiedParent ? [...context.scope, qualifiedParent] : context.scope;
+	const scope = name ? [...baseScope, name] : [...baseScope];
 	const text = sliceByBytes(map, span.startIndex, span.endIndex);
 	const astPath = [...context.astPath, node.type];
 	return {
@@ -347,7 +408,8 @@ function createStructureNode(
 		exported: context.exported,
 		decorators: decoratorsFor(span, context.decorators),
 		modifiers: modifiersFor(span),
-		parentSymbol: context.parentSymbol,
+		visibility: context.visibility,
+		parentSymbol,
 		scope,
 		astPath,
 		children: [],
@@ -361,6 +423,7 @@ function childContext(parent: CodeStructureNode, context: BuildContext): BuildCo
 		decorators: [],
 		scope: parent.scope,
 		parentSymbol: parent.name ?? context.parentSymbol,
+		visibility: undefined,
 		astPath: parent.astPath,
 	};
 }
@@ -434,7 +497,7 @@ function collectStructureNodes(node: ASTNode, context: BuildContext, map: ByteIn
 		if (field) return [field];
 	}
 
-	const kind = kindForNode(node);
+	const kind = kindForNode(node, context);
 	if (kind) {
 		const structural = createStructureNode(node, kind, getName(node), context, map);
 		const nested = scanChildren(node, childContext(structural, context), map);
@@ -449,7 +512,13 @@ function collectStructureNodes(node: ASTNode, context: BuildContext, map: ByteIn
 
 function scanChildren(node: ASTNode, context: BuildContext, map: ByteIndexMap): CodeStructureNode[] {
 	const nodes: CodeStructureNode[] = [];
+	let visibility = context.visibility;
 	for (const child of nodeChildren(node)) {
+		if (child.type === "access_specifier") {
+			visibility = child.text.trim();
+			continue;
+		}
+		const nextContext = { ...context, visibility };
 		if (
 			DECLARATION_WRAPPERS.has(child.type) ||
 			FIELD_DEFINITION_TYPES.has(child.type) ||
@@ -458,11 +527,16 @@ function scanChildren(node: ASTNode, context: BuildContext, map: ByteIndexMap): 
 			child.type === "preproc_function_def" ||
 			child.type.includes("declaration")
 		) {
-			nodes.push(...collectStructureNodes(child, { ...context, spanNode: undefined }, map));
+			nodes.push(...collectStructureNodes(child, { ...nextContext, spanNode: undefined }, map));
 			continue;
 		}
-		if (child.type === "class_body" || child.type === "block" || child.type === "declaration_list") {
-			nodes.push(...scanChildren(child, context, map));
+		if (
+			child.type === "class_body" ||
+			child.type === "block" ||
+			child.type === "declaration_list" ||
+			child.type === "field_declaration_list"
+		) {
+			nodes.push(...scanChildren(child, nextContext, map));
 		}
 	}
 	return nodes.sort((a, b) => a.startByte - b.startByte || a.endByte - b.endByte);
@@ -483,6 +557,7 @@ function metadataForNode(node: CodeStructureNode): JsonMetadata {
 		ast_path: node.astPath.join("/"),
 		decorators: node.decorators.length > 0 ? node.decorators : undefined,
 		modifiers: node.modifiers.length > 0 ? node.modifiers : undefined,
+		visibility: node.visibility ?? undefined,
 		static: node.modifiers.includes("static") ? true : undefined,
 		start_line: node.startLine,
 		end_line: node.endLine,
@@ -521,7 +596,8 @@ function draftForNode(node: CodeStructureNode, map: ByteIndexMap): ChunkDraft {
 		endByte: node.endByte,
 		metadata: metadataForNode(node),
 		packable:
-			["function", "method", "constructor", "variable"].includes(node.kind) && estimateTokens(text) < AST_TARGET_TOKENS,
+			["function", "method", "constructor", "destructor", "variable"].includes(node.kind) &&
+			estimateTokens(text) < AST_TARGET_TOKENS,
 		packKey: node.parentSymbol ?? "module",
 		symbols: node.name ? [node.name] : [],
 	};
@@ -636,6 +712,10 @@ function packDrafts(drafts: ChunkDraft[], map: ByteIndexMap): ChunkDraft[] {
 function buildDrafts(nodes: CodeStructureNode[], map: ByteIndexMap): ChunkDraft[] {
 	const drafts: ChunkDraft[] = [];
 	for (const node of nodes.sort((a, b) => a.startByte - b.startByte || a.endByte - b.endByte)) {
+		if (node.kind === "namespace" && node.children.length > 0) {
+			drafts.push(...buildDrafts(node.children, map));
+			continue;
+		}
 		const text = sliceByBytes(map, node.startByte, node.endByte).trim();
 		if (!text) continue;
 		if (estimateTokens(text) <= AST_MAX_TOKENS) {
@@ -654,10 +734,10 @@ function buildDrafts(nodes: CodeStructureNode[], map: ByteIndexMap): ChunkDraft[
 function symbolKindForNode(node: CodeStructureNode): KnowledgeSymbolInsert["kind"] | undefined {
 	if (!node.name) return undefined;
 	if (node.kind === "class") return "class";
-	if (node.kind === "interface") return "interface";
-	if (node.kind === "type") return "type";
+	if (node.kind === "namespace" || node.kind === "type") return "type";
 	if (node.kind === "variable") return "variable";
-	if (node.kind === "function" || node.kind === "method" || node.kind === "constructor") return "function";
+	if (node.kind === "function" || node.kind === "method" || node.kind === "constructor" || node.kind === "destructor")
+		return "function";
 	return undefined;
 }
 
@@ -672,6 +752,7 @@ function symbolMetadataForNode(node: CodeStructureNode): JsonMetadata {
 		ast_path: node.astPath.join("/"),
 		modifiers: node.modifiers.length > 0 ? node.modifiers : undefined,
 		static: node.modifiers.includes("static") ? true : undefined,
+		visibility: node.visibility ?? undefined,
 		decorators: node.decorators.length > 0 ? node.decorators : undefined,
 	};
 }
@@ -750,6 +831,7 @@ async function parseStructure(
 		exported: false,
 		decorators: [],
 		modifiers: [],
+		visibility: undefined,
 		scope: [],
 		astPath: [rootNode.type],
 		children: [],

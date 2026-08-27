@@ -229,6 +229,97 @@ describe("AST code analysis", () => {
 		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
 	});
 
+	it("extracts C++ namespaces, classes, methods, templates, enums, and implementations", async () => {
+		const code = [
+			"namespace App {",
+			"class MainWindow {",
+			"public:",
+			"  MainWindow();",
+			"  ~MainWindow();",
+			"  void openFile();",
+			"};",
+			"",
+			"enum Mode { Read, Write };",
+			"",
+			"template <typename T>",
+			"T identity(T value) { return value; }",
+			"",
+			"MainWindow::MainWindow() {}",
+			"MainWindow::~MainWindow() {}",
+			"void MainWindow::openFile() {}",
+			"void handle_event(int event) {}",
+			"}",
+		].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "src/main.cpp", "cpp");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		const openFile = analysis.symbols.find((symbol) => symbol.name === "openFile");
+		const implementation = analysis.symbols.find((symbol) => symbol.name === "MainWindow::openFile");
+		const classChunk = analysis.chunks.find((chunk) => metadata(chunk).symbol === "MainWindow");
+
+		expect(names).toContain("App");
+		expect(names).toContain("MainWindow");
+		expect(names).toContain("~MainWindow");
+		expect(names).toContain("openFile");
+		expect(names).toContain("MainWindow::MainWindow");
+		expect(names).toContain("MainWindow::~MainWindow");
+		expect(names).toContain("MainWindow::openFile");
+		expect(names).toContain("Mode");
+		expect(names).toContain("identity");
+		expect(names).toContain("handle_event");
+		expect(metadata(openFile ?? { metadata_json: "{}" }).visibility).toBe("public");
+		expect(metadata(implementation ?? { metadata_json: "{}" }).parent_symbol).toBe("MainWindow");
+		expect(classChunk).toBeDefined();
+		expect(metadata(classChunk ?? { metadata_json: "{}" }).language).toBe("cpp");
+	});
+
+	it("detects C++ source and header extensions while keeping .h conservative", async () => {
+		const sourceAnalysis = await analyzeIndexableContent("void run_service() {}\n", "src/service.cc");
+		const headerAnalysis = await analyzeIndexableContent("class Service { void run(); };\n", "include/service.hpp");
+		const ambiguousHeader = await analyzeIndexableContent("void run_service(void);\n", "include/service.h");
+
+		expect(sourceAnalysis.chunks[0].file_type).toBe("cpp");
+		expect(sourceAnalysis.symbols.map((symbol) => symbol.name)).toContain("run_service");
+		expect(headerAnalysis.chunks[0].file_type).toBe("cpp");
+		expect(headerAnalysis.symbols.map((symbol) => symbol.name)).toContain("Service");
+		expect(ambiguousHeader.chunks[0].file_type).toBe("text");
+	});
+
+	it("recursively splits oversized C++ classes into methods", async () => {
+		const code = [
+			"class LargeService {",
+			"public:",
+			`  int hugeMethod() { return ${"1 + ".repeat(2_000)}0; }`,
+			"  int smallMethod() { return 1; }",
+			"};",
+		].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "src/large.cpp", "cpp");
+		const allMetadata = analysis.chunks.map(metadata);
+
+		expect(allMetadata.some((item) => item.symbol_kind === "class")).toBe(false);
+		expect(allMetadata.some((item) => item.symbol === "hugeMethod")).toBe(true);
+		expect(allMetadata.some((item) => item.symbol === "smallMethod")).toBe(true);
+		expect(analysis.chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+	});
+
+	it("falls back to text chunks for Qt macro C++ parser errors", async () => {
+		const code = [
+			"class MainWindow : public QWidget {",
+			"  Q_OBJECT",
+			"public:",
+			"  MainWindow();",
+			"signals:",
+			"  void opened(QString path);",
+			"private slots:",
+			"  void onWaylandEvent(int event);",
+			"};",
+		].join("\n");
+		const analysis = await analyzeIndexableContent(code, "include/MainWindow.hpp");
+
+		expect(analysis.chunks.length).toBeGreaterThan(0);
+		expect(analysis.chunks[0].file_type).toBe("cpp");
+		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
+	});
+
 	it("loads the tree-sitter baseline for every supported AST language", async () => {
 		const cases = [
 			{
@@ -278,6 +369,12 @@ describe("AST code analysis", () => {
 				filePath: "src/service.c",
 				code: "int run_service(void) { return 0; }\n",
 				symbols: ["run_service"],
+			},
+			{
+				language: "cpp",
+				filePath: "src/service.cpp",
+				code: "class Service { public: void run() {} };\n",
+				symbols: ["Service", "run"],
 			},
 		];
 
