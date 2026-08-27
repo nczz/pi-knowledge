@@ -308,7 +308,7 @@
 **背景**: Flat function-level chunking made large classes either too coarse or too fragmented, and `knowledge_symbol_search` relied on declaration regexes that missed common method syntax. Search also needed deterministic structural context richer than one `function_name` field without mutating returned chunk content.
 
 **決策**:
-- Supported code files use a normalized tree-sitter structure for TypeScript/JavaScript, Python, Go, Rust, Java, and Bash during indexing.
+- Supported code files use a normalized tree-sitter structure for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, and `.c` GNU C source during indexing.
 - Small declarations remain whole chunks; oversized declarations recursively descend to child declarations; same-parent small declarations can be packed; nodes with no child declarations use bounded line/character fallback chunks.
 - Chunk metadata records deterministic structure: `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, export/decorator flags, AST path, and source line range.
 - Embedding/FTS searchable text prepends structural metadata, but stored `content` remains the original source slice.
@@ -316,6 +316,7 @@
 - Add/update parse each code file once for chunks and symbols; fallback keeps existing text/regex behavior when AST parsing is unsupported or fails.
 - Tree-sitter imports stay lazy in indexing/chunking paths; root `index.ts` remains startup-light.
 - Parser baseline is `tree-sitter@0.25.1` with a root `overrides.tree-sitter` pin because several maintained grammars still publish older peer ranges while runtime parsing works against the 0.25 ABI; JavaScript uses `tree-sitter-javascript` directly instead of the legacy TypeScript package export.
+- `.h` headers remain conservatively classified as text until the C/C++ adapter phase documents a header disambiguation rule; this avoids overclaiming C or C++ semantics for ambiguous headers.
 
 **理由**:
 - Recursive splitting preserves semantic units while bounding worst-case chunk size for large classes, generated declarations, or huge methods.

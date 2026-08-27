@@ -6,7 +6,7 @@
 
 | 優先 | 策略 | 適用 | Chunk 大小 |
 |------|------|------|-----------|
-| 1 | Recursive AST-based | TS/JS/Python/Go/Rust/Java/Bash | declaration-first; bounded fallback at ~6,000 chars |
+| 1 | Recursive AST-based | TS/JS/Python/Go/Rust/Java/Bash/C | declaration-first; bounded fallback at ~6,000 chars |
 | 2 | Markdown-aware | .md files | heading 為單位 |
 | 3 | Semantic boundary | 其他文字檔 | 300-1000 tokens |
 | 4 | Fixed-size | 未知格式 fallback | 512 tokens, 64 overlap |
@@ -100,6 +100,7 @@ function isBinary(path: string): boolean {
 | Python | class, function, method | 同上，並保留 decorators |
 | Go/Rust/Java | function/method/type/class/interface declarations supported by tree-sitter grammar | 同上 |
 | Bash | function declarations in `name() {}` and `function name {}` forms | 同上；parse errors fall back to text chunking |
+| GNU C | `.c` function definitions/prototypes, structs, unions, enums, typedefs, reliable preprocessor definitions | 同上，並保留 `static` storage metadata when present; `.h` remains text until the C/C++ header decision |
 
 原則:
 

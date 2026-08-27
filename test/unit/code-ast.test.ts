@@ -165,6 +165,70 @@ describe("AST code analysis", () => {
 		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
 	});
 
+	it("extracts GNU C functions, types, enums, typedefs, and macros", async () => {
+		const code = [
+			"#define MAX_ITEMS 16",
+			"",
+			"typedef struct wl_connection {",
+			"  int fd;",
+			"  unsigned flags;",
+			"} wl_connection;",
+			"",
+			"enum state { STATE_INIT, STATE_READY };",
+			"",
+			"static int handle_event(struct wl_connection *conn, int event) {",
+			"  if (__builtin_expect(event > 0, 1)) {",
+			"    return conn->fd + event;",
+			"  }",
+			"  return -1;",
+			"}",
+			"",
+			"int initialize(struct wl_connection *conn);",
+		].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "src/protocol.c", "c");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		const handleEvent = analysis.symbols.find((symbol) => symbol.name === "handle_event");
+		const handleMetadata = handleEvent ? metadata(handleEvent) : {};
+
+		expect(names).toContain("MAX_ITEMS");
+		expect(names).toContain("wl_connection");
+		expect(names).toContain("state");
+		expect(names).toContain("handle_event");
+		expect(names).toContain("initialize");
+		expect(handleEvent?.kind).toBe("function");
+		expect(handleMetadata.static).toBe(true);
+		expect(analysis.chunks.some((chunk) => metadata(chunk).language === "c")).toBe(true);
+	});
+
+	it("detects .c files while leaving ambiguous .h headers conservative", async () => {
+		const cAnalysis = await analyzeIndexableContent("int initialize(void) { return 0; }\n", "src/init.c");
+		const headerAnalysis = await analyzeIndexableContent("int initialize(void);\n", "include/init.h");
+
+		expect(cAnalysis.chunks[0].file_type).toBe("c");
+		expect(cAnalysis.symbols.map((symbol) => symbol.name)).toContain("initialize");
+		expect(headerAnalysis.chunks[0].file_type).toBe("text");
+		expect(metadata(headerAnalysis.chunks[0]).language).toBeUndefined();
+	});
+
+	it("bounds oversized C function fallback chunks", async () => {
+		const code = ["int handle_event(void) {", `  return ${"1 + ".repeat(2_000)}0;`, "}"].join("\n");
+		const analysis = await analyzeCodeWithAST(code, "src/protocol.c", "c");
+		const allMetadata = analysis.chunks.map(metadata);
+
+		expect(analysis.chunks.length).toBeGreaterThan(1);
+		expect(analysis.chunks.every((chunk) => chunk.content.length <= 6_000)).toBe(true);
+		expect(allMetadata.every((item) => item.symbol === "handle_event")).toBe(true);
+	});
+
+	it("falls back to text chunks for malformed C", async () => {
+		const code = "int handle_event(void) {\n  if (\n";
+		const analysis = await analyzeIndexableContent(code, "src/broken.c");
+
+		expect(analysis.chunks.length).toBeGreaterThan(0);
+		expect(analysis.chunks[0].file_type).toBe("c");
+		expect(metadata(analysis.chunks[0]).language).toBeUndefined();
+	});
+
 	it("loads the tree-sitter baseline for every supported AST language", async () => {
 		const cases = [
 			{
@@ -207,6 +271,12 @@ describe("AST code analysis", () => {
 				language: "bash",
 				filePath: "scripts/service.sh",
 				code: "run_service() { echo ok; }\n",
+				symbols: ["run_service"],
+			},
+			{
+				language: "c",
+				filePath: "src/service.c",
+				code: "int run_service(void) { return 0; }\n",
 				symbols: ["run_service"],
 			},
 		];

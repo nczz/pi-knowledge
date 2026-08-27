@@ -34,6 +34,7 @@ export interface CodeStructureNode {
 	endByte: number;
 	exported: boolean;
 	decorators: string[];
+	modifiers: string[];
 	parentSymbol?: string;
 	scope: string[];
 	astPath: string[];
@@ -112,6 +113,14 @@ const LANGS: Record<string, LangConfig> = {
 		fileType: "bash",
 		fallbackOnParseError: true,
 	},
+	c: {
+		grammar: async () => {
+			const m = await import("tree-sitter-c");
+			return moduleDefault(m) ?? m;
+		},
+		fileType: "c",
+		fallbackOnParseError: true,
+	},
 };
 
 const CLASS_TYPES = new Set([
@@ -124,12 +133,17 @@ const INTERFACE_TYPES = new Set(["interface_declaration"]);
 const TYPE_TYPES = new Set([
 	"annotation_type_declaration",
 	"enum_item",
+	"enum_specifier",
 	"struct_item",
+	"struct_specifier",
 	"trait_item",
 	"type_alias_declaration",
 	"type_declaration",
+	"type_definition",
+	"union_specifier",
 ]);
 const FUNCTION_TYPES = new Set([
+	"declaration",
 	"function_declaration",
 	"function_definition",
 	"function_item",
@@ -220,11 +234,30 @@ function nodeChildren(node: ASTNode): ASTNode[] {
 	return node.namedChildren && node.namedChildren.length > 0 ? node.namedChildren : node.children;
 }
 
+function nameFromDeclarator(node: ASTNode | null | undefined): string | undefined {
+	if (!node) return undefined;
+	const direct = node.childForFieldName("name")?.text;
+	if (direct?.trim()) return direct.trim();
+	const nested = node.childForFieldName("declarator");
+	if (nested && nested !== node) return nameFromDeclarator(nested);
+	if (["field_identifier", "identifier", "type_identifier", "variable_name", "word"].includes(node.type)) {
+		const text = node.text.trim();
+		return text || undefined;
+	}
+	return nodeChildren(node)
+		.map(nameFromDeclarator)
+		.find((name): name is string => Boolean(name));
+}
+
 function getName(node: ASTNode): string | undefined {
+	if (node.type === "constructor_declaration") return "constructor";
+	if (node.type === "type_definition" || node.type === "declaration" || node.type === "function_definition") {
+		const declaratorName = nameFromDeclarator(node.childForFieldName("declarator"));
+		if (declaratorName) return declaratorName;
+	}
 	const name = node.childForFieldName("name")?.text ?? node.childForFieldName("type")?.text;
 	if (name?.trim()) return name.trim();
-	if (node.type === "constructor_declaration") return "constructor";
-	return undefined;
+	return nameFromDeclarator(node.childForFieldName("declarator"));
 }
 
 function nodeHasFunctionValue(node: ASTNode): boolean {
@@ -240,6 +273,13 @@ function decoratorsFor(node: ASTNode, inherited: string[] = []): string[] {
 	return [...inherited, ...decorators].filter(Boolean);
 }
 
+function modifiersFor(node: ASTNode): string[] {
+	return node.children
+		.filter((child) => child.type === "storage_class_specifier")
+		.map((child) => child.text.trim())
+		.filter(Boolean);
+}
+
 function isStructuralCandidate(node: ASTNode): boolean {
 	return (
 		CLASS_TYPES.has(node.type) ||
@@ -252,6 +292,10 @@ function isStructuralCandidate(node: ASTNode): boolean {
 }
 
 function kindForNode(node: ASTNode): StructureKind | undefined {
+	if (node.type === "preproc_def" || node.type === "preproc_function_def") return "variable";
+	if (node.type === "declaration" && !nodeChildren(node).some((child) => child.type === "function_declarator")) {
+		return undefined;
+	}
 	if (CLASS_TYPES.has(node.type)) return "class";
 	if (INTERFACE_TYPES.has(node.type)) return "interface";
 	if (TYPE_TYPES.has(node.type)) return "type";
@@ -302,6 +346,7 @@ function createStructureNode(
 		endByte: span.endIndex,
 		exported: context.exported,
 		decorators: decoratorsFor(span, context.decorators),
+		modifiers: modifiersFor(span),
 		parentSymbol: context.parentSymbol,
 		scope,
 		astPath,
@@ -409,6 +454,8 @@ function scanChildren(node: ASTNode, context: BuildContext, map: ByteIndexMap): 
 			DECLARATION_WRAPPERS.has(child.type) ||
 			FIELD_DEFINITION_TYPES.has(child.type) ||
 			isStructuralCandidate(child) ||
+			child.type === "preproc_def" ||
+			child.type === "preproc_function_def" ||
 			child.type.includes("declaration")
 		) {
 			nodes.push(...collectStructureNodes(child, { ...context, spanNode: undefined }, map));
@@ -435,6 +482,8 @@ function metadataForNode(node: CodeStructureNode): JsonMetadata {
 		ast_depth: Math.max(0, node.scope.length - 1),
 		ast_path: node.astPath.join("/"),
 		decorators: node.decorators.length > 0 ? node.decorators : undefined,
+		modifiers: node.modifiers.length > 0 ? node.modifiers : undefined,
+		static: node.modifiers.includes("static") ? true : undefined,
 		start_line: node.startLine,
 		end_line: node.endLine,
 	};
@@ -621,6 +670,8 @@ function symbolMetadataForNode(node: CodeStructureNode): JsonMetadata {
 		exported: node.exported,
 		ast_depth: Math.max(0, node.scope.length - 1),
 		ast_path: node.astPath.join("/"),
+		modifiers: node.modifiers.length > 0 ? node.modifiers : undefined,
+		static: node.modifiers.includes("static") ? true : undefined,
 		decorators: node.decorators.length > 0 ? node.decorators : undefined,
 	};
 }
@@ -668,6 +719,7 @@ function emptyStructure(language: string): CodeStructureNode {
 		endByte: 0,
 		exported: false,
 		decorators: [],
+		modifiers: [],
 		scope: [],
 		astPath: ["program"],
 		children: [],
@@ -697,6 +749,7 @@ async function parseStructure(
 		endByte: rootNode.endIndex,
 		exported: false,
 		decorators: [],
+		modifiers: [],
 		scope: [],
 		astPath: [rootNode.type],
 		children: [],

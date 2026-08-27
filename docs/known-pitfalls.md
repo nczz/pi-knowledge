@@ -13,10 +13,13 @@
 ```
 
 Current parser baseline pins `tree-sitter@0.25.1`, `tree-sitter-bash@0.25.1`,
-`tree-sitter-javascript/python/go@0.25.0`, `tree-sitter-rust@0.24.0`, and keeps
-`tree-sitter-typescript@0.23.2` / `tree-sitter-java@0.23.5`.
+`tree-sitter-c@0.24.1`, `tree-sitter-javascript/python/go@0.25.0`, `tree-sitter-rust@0.24.0`,
+and keeps `tree-sitter-typescript@0.23.2` / `tree-sitter-java@0.23.5`.
 The root `overrides.tree-sitter` is intentional: strict npm installs otherwise reject legacy grammar peer ranges
 even though the supported AST language smoke tests pass against the 0.25.1 ABI.
+
+`.h` headers are intentionally not classified as C yet. Header files are ambiguous between C and C++;
+leave them as text until the C++ adapter phase defines and tests the disambiguation rule.
 
 ## PDF/DOCX — 已解決 (v0.2.0)
 

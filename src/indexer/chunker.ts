@@ -193,7 +193,7 @@ function detectFileType(filePath: string): string {
 		".java": "java",
 		".c": "c",
 		".cpp": "cpp",
-		".h": "c",
+		".h": "text",
 		".hpp": "cpp",
 		".md": "markdown",
 		".mdx": "markdown",
@@ -636,7 +636,7 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 }
 
 export function isCodeFileType(fileType: string): boolean {
-	return ["typescript", "javascript", "python", "go", "rust", "java", "bash"].includes(fileType);
+	return ["typescript", "javascript", "python", "go", "rust", "java", "bash", "c"].includes(fileType);
 }
 
 export async function analyzeIndexableContent(

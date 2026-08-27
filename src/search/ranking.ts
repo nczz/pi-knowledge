@@ -7,6 +7,7 @@ export const MIN_HYBRID_SCORE = 0.18;
 export const FILE_TYPE_ALIASES: Record<string, string> = {
 	csharp: "csharp",
 	cs: "csharp",
+	c: "c",
 	cpp: "cpp",
 	hpp: "cpp",
 	js: "javascript",
