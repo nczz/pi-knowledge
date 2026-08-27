@@ -103,6 +103,15 @@ When `PI_KNOWLEDGE_E2E_PDF` or `PI_KNOWLEDGE_E2E_DOCX` is unset, `npm run test:e
 
 `pi-knowledge` supports direct Pi extension loading through `pi -e ./extension.js` and OMP-compatible loading through the same packaged entry shim. The root `extension.js` and `index.ts` stay startup-light so install-time validation can inspect the extension without resolving native runtime dependencies such as `better-sqlite3` or `onnxruntime-node`.
 
+Minimal Ubuntu/Debian servers need native build tools before `omp install npm:pi-knowledge`,
+because OMP's Bun-based npm install compiles `better-sqlite3` from source when Bun cannot use
+the package prebuild:
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential python3
+omp install npm:pi-knowledge
+```
+
 Compatibility guarantees:
 
 - The packaged `extension.js` loads built `dist/index.js` when present and falls back to source `index.ts` for local development.

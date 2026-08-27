@@ -123,6 +123,20 @@ OMP plugin install validation runs in a Bun binary path that can statically reso
 
 Bun binary resolution may also fail to resolve hoisted native-package dependencies from bare package specifiers. Native loaders should first try normal resolution, then walk parent directories for the installed package entry and require that absolute path with non-literal package names so validation does not pre-resolve it.
 
+On minimal Ubuntu/Debian servers, OMP's Bun-based npm install currently cannot use
+`better-sqlite3` prebuilds and falls back to `node-gyp rebuild`. A failure like
+`prebuild-install warn install 'better-sqlite3' is not yet supported in Bun` followed by
+`gyp ERR! stack Error: not found: make` means the host is missing native build tools, not that
+the tree-sitter peer warning is fatal. Install `build-essential` and retry:
+
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential python3
+omp install npm:pi-knowledge@latest --force
+```
+
+The `warn: incorrect peer dependency "tree-sitter@0.25.1"` line is expected under the root
+override and is safe when the AST language smoke tests pass.
+
 ## Windows OMP model-worker IPC
 
 **症狀**: Windows 上用 OMP 執行 `knowledge_add`，第一次本地 embedding batch 可能回報 `child.send is not a function`、`Model worker is not connected`，或在 host 層噴出 `ENOENT: no such file or directory, uv_spawn 'node'`。

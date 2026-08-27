@@ -83,6 +83,11 @@ pi install npm:pi-knowledge
 # Install for OMP
 omp install npm:pi-knowledge
 
+# On minimal Ubuntu/Debian servers, install native build tools first because
+# OMP's Bun-based npm install compiles better-sqlite3 from source.
+sudo apt-get update && sudo apt-get install -y build-essential python3
+omp install npm:pi-knowledge
+
 # Or from source
 pi install ./pi-knowledge
 omp install ./pi-knowledge
