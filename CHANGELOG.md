@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.0] - 2026-10-19
 
 ### Added
 - Added embedding-safe chunk finalization for add, update, URL, inline-text, and JSONL import paths. Local inputs use the existing model worker tokenizer; OpenAI-compatible inputs use the configured complete-input character cap.
