@@ -2,30 +2,35 @@
 
 ---
 
-## 1. 策略優先級
+## 1. 分層策略
 
-| 優先 | 策略 | 適用 | Chunk 大小 |
-|------|------|------|-----------|
-| 1 | Recursive AST-based | TS/JS/Python/Go/Rust/Java/Bash/C/C++/QML | declaration-first; bounded fallback at ~6,000 chars |
-| 2 | Markdown-aware | .md files | heading 為單位 |
-| 3 | Semantic boundary | 其他文字檔 | 300-1000 tokens |
-| 4 | Fixed-size | 未知格式 fallback | 512 tokens, 64 overlap |
+| 階段 | 策略 | 適用 | 目的 |
+|------|------|------|------|
+| 1 | Recursive AST-based | TS/JS/Python/Go/Rust/Java/Bash/C/C++/QML | 優先保留 declaration、parent/child 與 sibling 結構 |
+| 1 | Markdown-aware | `.md` | 優先保留 heading、breadcrumb 與段落 |
+| 1 | Paragraph-aware text | 其他文字 | 以段落組合候選 chunk |
+| 2 | Embedding-safe finalizer | 所有來源與 import | 依實際 provider budget 細分超限候選 |
+
+第一階段只決定較好的語意邊界。第二階段才是 embedding 安全保證；它會計算加入 file path、file type、heading、symbol、signature 與 `passage: ` prefix 後的完整輸入。
 
 ---
 
-## 2. Token 估算
+## 2. Token 預估與硬上限
 
-不載入 model 就估算，用 chars/token ratio:
+初步 chunker 使用 `Math.ceil(text.length / 3)` 控制一般候選大小。這只是減少 tokenizer 工作量的 heuristic，不能當成 multilingual token 上限。
 
-```typescript
-// XLM-RoBERTa tokenizer 平均:
-// 英文: ~4 chars/token, 中文: ~1.5 chars/token, 程式碼: ~3.5 chars/token
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3); // 混合內容取 ~3
-}
-```
+本地 `multilingual-e5-small` 的 finalizer 透過既有 model worker 內、embedding pipeline 自己的 tokenizer 批次計數：
 
-精確 tokenization 在 embedding 時由 @huggingface/transformers 處理。
+- tokenizer hard limit：512 tokens。
+- preferred split target：hard limit 的 87.5%，目前為 448 tokens。
+- 完整輸入為 ASCII 且字元數加特殊 tokens 仍低於 448 時，可用保守上界直接接受；其他內容才進 tokenizer，降低一般 code/docs 的 IPC 與重複 tokenization 成本。
+- 計數包含 contextual prefix 與 E5 `passage: ` prefix。
+- 超限內容依空行、換行、句子標點、空白、Unicode code point 的順序細分。
+- provider 在 embedding 前再次驗證；不得靜默 truncation。
+
+OpenAI-compatible provider 無法假設遠端 tokenizer，因此沿用 `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` 的完整輸入字元上限。超限 chunk 在送出 HTTP 前細分；直接呼叫 provider 的超限 query/document 會明確失敗。
+
+finalizer 只處理超限候選。安全 chunk 保留原 content、metadata 與 identity，避免不必要的向量重建。
 
 ---
 
@@ -68,27 +73,31 @@ function isBinary(path: string): boolean {
 
 ## 4. Markdown-Aware
 
-- 按 heading (##/###) 切分
-- 保留 heading + content 為一個 chunk
-- 跳過 <50 chars 的 section
-- >2000 tokens 的 section 再按段落切分
-- Frontmatter → 提取為 metadata，不索引 raw YAML
+- 按 heading 與 section 切分。
+- 保留 heading breadcrumb metadata。
+- 跳過 `<50` chars 的 section。
+- 一般段落先以約 450 個估算 tokens 組合。
+- 巨大單段先做 bounded fallback，再由 embedding-safe finalizer 依實際 provider budget 驗證。
 
 ---
 
-## 5. Semantic Boundary (通用文字)
+## 5. Paragraph-Aware Text
 
-- 按 `\n\n+` 分段落
-- 累積到 ~1000 tokens 時 flush
-- Overlap: 保留前一 chunk 最後一段 (2 sentences)
-- 確保不在句子中間切斷
+- 按 `\n\n+` 分段落。
+- 一般內容累積到約 550 個估算 tokens 時 flush。
+- 相鄰 chunks 不重疊，避免向量與儲存量無條件膨脹。
+- 巨大單段允許先按字元 fallback；finalizer 仍會以實際完整 embedding input 驗證。
 
 ---
 
-## 6. Fixed-Size (Fallback)
+## 6. Embedding-Safe Fallback
 
-- 512 token chunks, 64 token overlap
-- 用行為單位避免 mid-line cut
+- 只在 AST/Markdown/Text 候選超過 provider hard limit 時啟用。
+- 優先沿既有結構邊界切分，不以固定 overlap 複製內容。
+- 程式碼子 chunk 保留 symbol/scope/signature metadata 與可追溯 line range。
+- 分割後重算 chunk identity、FTS text、`chunk_part` 與 `chunk_part_count`。
+- add、update、URL、inline text 與 JSONL import 使用同一條 finalization 路徑。
+- 單一固定 context 已超過 provider limit 且無法再安全切分時，索引明確失敗，不產生截尾向量。
 
 ---
 
@@ -115,7 +124,18 @@ function isBinary(path: string): boolean {
 
 ---
 
-## 8. Code Pre-Tokenize (for FTS5)
+## 8. 索引版本與既有 KB
+
+新索引會在既有 `source_options` JSON 寫入 `embedding_input_policy: 2`，不增加資料庫欄位。`knowledge_doctor` 發現舊 KB 沒有目前版本時會回報 `reindex_for_embedding_budget`：
+
+- file/directory/URL：執行 `knowledge_update`。
+- inline text/import：由原始來源重新 add 或 import。
+
+診斷只讀取版本標記，不啟動模型，也不掃描所有 chunk。舊 KB 不會在啟動或搜尋時被強制重建。
+
+---
+
+## 9. Code Pre-Tokenize (for FTS5)
 
 ```typescript
 function preTokenizeCode(content: string): string {

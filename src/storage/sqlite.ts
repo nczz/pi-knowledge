@@ -486,6 +486,14 @@ export function updateKBCounts(db: Database.Database, id: string, chunkCount: nu
 	);
 }
 
+export function updateKBSourceOptions(db: Database.Database, id: string, sourceOptions: string): void {
+	db.prepare("UPDATE knowledge_bases SET source_options = ?, updated_at = ? WHERE id = ?").run(
+		sourceOptions,
+		Date.now(),
+		id,
+	);
+}
+
 export function updateKBEmbeddingMetadata(
 	db: Database.Database,
 	id: string,

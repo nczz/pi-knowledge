@@ -9,6 +9,7 @@ import {
 	embeddingConfigLabel,
 	embeddingSignature,
 	embedQueryWithConfig,
+	embedValidatedDocuments,
 	prepareForShutdown as prepareEmbeddingForShutdown,
 	resolveEmbeddingConfig,
 } from "./embedding/provider.ts";
@@ -79,6 +80,7 @@ import {
 	updateIndexingJob,
 	updateKBCounts,
 	updateKBEmbeddingMetadata,
+	updateKBSourceOptions,
 	updateKBStatus,
 } from "./storage/sqlite.ts";
 
@@ -148,6 +150,10 @@ export interface AddOptions {
 	exclude_paths?: string[];
 }
 
+interface StoredSourceOptions extends AddOptions {
+	embedding_input_policy?: number;
+}
+
 type UpdateableKnowledgeBase = KnowledgeBase & { source_path: string };
 
 interface ImportedChunk {
@@ -190,6 +196,7 @@ export interface DoctorIssue {
 		| "wait_for_indexing"
 		| "review_skipped_scope"
 		| "rebuild_vectors"
+		| "reindex_for_embedding_budget"
 		| "check_source"
 		| "none";
 }
@@ -234,6 +241,7 @@ export interface SymbolSearchResponse {
 	has_more: boolean;
 }
 
+export const CURRENT_EMBEDDING_INPUT_POLICY = 2;
 const DEFAULT_INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 
@@ -301,18 +309,18 @@ function toScanOptions(options: AddOptions = {}): ScanOptions {
 	};
 }
 
-function serializeAddOptions(options: AddOptions = {}): string | undefined {
-	const normalized: AddOptions = {};
+function serializeAddOptions(options: AddOptions = {}): string {
+	const normalized: StoredSourceOptions = { embedding_input_policy: CURRENT_EMBEDDING_INPUT_POLICY };
 	if (options.include_suggested_text === true) normalized.include_suggested_text = true;
 	if (options.include_paths && options.include_paths.length > 0) normalized.include_paths = options.include_paths;
 	if (options.exclude_paths && options.exclude_paths.length > 0) normalized.exclude_paths = options.exclude_paths;
-	return Object.keys(normalized).length > 0 ? JSON.stringify(normalized) : undefined;
+	return JSON.stringify(normalized);
 }
 
 function parseAddOptions(raw: string | null): AddOptions {
 	if (!raw) return {};
 	try {
-		const parsed = JSON.parse(raw) as AddOptions;
+		const parsed = JSON.parse(raw) as StoredSourceOptions;
 		return {
 			include_suggested_text: parsed.include_suggested_text === true,
 			include_paths: Array.isArray(parsed.include_paths)
@@ -324,6 +332,18 @@ function parseAddOptions(raw: string | null): AddOptions {
 		};
 	} catch {
 		return {};
+	}
+}
+
+function embeddingInputPolicyVersion(raw: string | null): number | undefined {
+	if (!raw) return undefined;
+	try {
+		const parsed = JSON.parse(raw) as StoredSourceOptions;
+		return typeof parsed.embedding_input_policy === "number" && Number.isInteger(parsed.embedding_input_policy)
+			? parsed.embedding_input_policy
+			: undefined;
+	} catch {
+		return undefined;
 	}
 }
 
@@ -1086,7 +1106,7 @@ export class KnowledgeEngine {
 				if (signal?.aborted) throw new Error("Cancelled");
 				const batch = pendingChunks.splice(0, embeddingBatchSize);
 				reportProgress(`Embedding batch of ${batch.length}`, processedFiles, totalFiles);
-				const vectors = await embedDocuments(
+				const vectors = await embedValidatedDocuments(
 					batch.map((chunk) => buildChunkEmbeddingText(chunk)),
 					signal,
 				);
@@ -1365,7 +1385,7 @@ export class KnowledgeEngine {
 					unchanged_chunks: unchanged,
 				});
 				onProgress?.(message);
-				const newVectors = await embedDocuments(
+				const newVectors = await embedValidatedDocuments(
 					batch.map((c) => buildChunkEmbeddingText(c)),
 					signal,
 				);
@@ -1585,6 +1605,7 @@ export class KnowledgeEngine {
 				finalEmbeddingDimension ?? null,
 			);
 			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
+			updateKBSourceOptions(this.db, kb.id, serializeAddOptions(parseAddOptions(kb.source_options)));
 			updateKBStatus(this.db, kb.id, "ready");
 			const skippedReadySuffix =
 				latestSkippedTotal > 0 ? `, skipped ${latestSkippedTotal} (${latestSkippedSummary})` : "";
@@ -2134,6 +2155,22 @@ export class KnowledgeEngine {
 		if (this.db) {
 			for (const kb of kbs) {
 				throwIfAborted(signal);
+				if (
+					(kb.status === "ready" || kb.status === "stale") &&
+					(embeddingInputPolicyVersion(kb.source_options) ?? 0) < CURRENT_EMBEDDING_INPUT_POLICY
+				) {
+					const canUpdate = kb.source_path !== null && kb.source_type !== "text";
+					issues.push({
+						severity: "warning",
+						kb_name: kb.name,
+						message:
+							"This KB predates embedding-safe chunk limits, so oversized chunk tails may be missing from vector retrieval.",
+						action: canUpdate
+							? "Run knowledge_update to re-chunk oversized inputs with the current embedding budget."
+							: "Re-add inline text or re-import the original source to rebuild chunks with the current embedding budget.",
+						action_code: "reindex_for_embedding_budget",
+					});
+				}
 				if (kb.status === "ready" && kb.chunk_count > 0 && getSymbolCount(this.db, kb.id) === 0) {
 					issues.push({
 						severity: "info",
@@ -2284,7 +2321,7 @@ export class KnowledgeEngine {
 				added_chunks: inserted,
 			});
 			onProgress?.(message);
-			const vectors = await embedDocuments(
+			const vectors = await embedValidatedDocuments(
 				batch.map((chunk) => buildChunkEmbeddingText(chunk)),
 				signal,
 			);
@@ -2324,6 +2361,7 @@ export class KnowledgeEngine {
 						name: header.name,
 						description: header.description,
 						source_type: "text",
+						source_options: serializeAddOptions(),
 						embedding_model: embeddingConfigLabel(embeddingConfig),
 					});
 					updateKBStatus(this.db, kb.id, "indexing");

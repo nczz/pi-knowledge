@@ -262,6 +262,21 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - `knowledge_doctor` 必須把 status/diagnostics 收斂成 health score 與 concrete actions，避免使用者看見一堆統計但不知道下一步。
 
 
+## 字元估算不能當成 embedding token 上限
+
+`text.length / 3` 只適合第一階段控制一般 chunk 大小。繁體中文、emoji、符號密集程式碼與加入 file/heading/symbol context 後的完整輸入，可能遠高於估算值。本地 Transformers pipeline 若收到超過模型上限的文字，可能成功回傳向量但靜默忽略尾端；OpenAI-compatible client 若自行 `slice()` 也會把資料損失偽裝成成功。
+
+穩定性要求:
+
+- 使用 embedding pipeline 自己的 tokenizer 計算本地模型完整 prefixed input，不另載第二套模型或在 Pi 主程序載入 ONNX。
+- tokenizer 計數透過既有 model worker 批次執行；候選 chunk 超限時才做結構化細分。
+- 短 ASCII 完整輸入可用「每個 token 至少消耗一個 ASCII 字元，加模型特殊 tokens」的保守上界直接接受；其餘 multilingual input 才要求精確 tokenizer 計數。這避免正常 code/docs 為安全檢查支付不必要的 worker IPC。
+- API provider 以設定的完整輸入字元 cap 做最後防線，超限必須細分或明確失敗，不得靜默截斷。
+- add、update、URL、inline text 與 import 必須在 hash comparison、embedding、DB/vector write 前套用同一 finalizer。
+- 舊 KB 不在啟動時自動重建。`knowledge_doctor` 只檢查 `embedding_input_policy` 版本；updateable source 執行 `knowledge_update`，inline/import 則由原始來源重建。
+- 安全 chunk 保持原 identity；只有實際超限 chunk 才增加子 chunk 與向量，避免一般索引無條件膨脹。
+
+
 ## Embedding provider changes must not mix vector spaces
 
 `PI_KNOWLEDGE_EMBEDDING` 影響 index-time document vectors 和 query-time vectors。若 add/update/import 的某些 batch 用 OpenAI-compatible API 成功、後續 batch 又因 fallback 改用 local model，同一個 KB vector file 會混入不同向量空間；搜尋時分數看似正常但語意完全不可靠。

@@ -348,3 +348,31 @@
 - This improves coding-agent context for class/method edits without turning `knowledge_search` into LSP, reference search, or caller/callee graph analysis.
 - The bounded same-file candidate window preserves adaptive latency and avoids loading whole KB chunk sets.
 - Existing KBs keep working; AST-aware expansion becomes available after update/rebuild populates structural metadata.
+
+---
+
+## ADR-020: 使用既有 model worker 做 embedding-safe finalization，不導入 Docling runtime
+
+**狀態**: 已決定
+
+**背景**: Issue #20 希望大型文件有更具語意的 chunk。專案已有 AST、Markdown heading 與 paragraph-aware 第一階段 chunking，但字元/token heuristic 無法保證完整 contextual input 符合 embedding 模型上限。繁體中文長段落可超過本地模型 512-token 上限而仍只產生一個候選 chunk；Transformers pipeline 會成功回傳截尾向量，使資料遺失不易察覺。Docling 能提供版面、表格與 OCR 管線，但會增加本專案目前不需要的 runtime、模型與維運面。
+
+**決策**:
+- 保留現有 AST/Markdown/Text chunker 作為語意邊界第一層。
+- 所有 ingestion path 在 hash comparison、embedding 與 persistence 前執行通用 embedding-safe finalizer。
+- 本地模型使用同一個 model worker、同一個 embedding pipeline tokenizer 批次計算完整 `passage` input；不在 Pi/OMP 主程序載入 Transformers/ONNX，也不啟動第二個 worker。
+- OpenAI-compatible provider 以 `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` 驗證完整 prefixed input；provider 不再靜默 `slice()`。
+- 只有超限 chunk 依段落、行、句子、空白與 Unicode code point 細分；安全 chunk identity 保持不變，不預設增加 overlap。
+- `source_options` 保存輕量 `embedding_input_policy`。`knowledge_doctor` 對舊 KB 回報機器可讀升級動作，不在啟動或搜尋時自動重建。
+
+**理由**:
+- 修正已證實的尾端向量遺失，直接改善 multilingual 與大型文件召回。
+- 重用既有 worker、provider、streamed batch 與 SQLite JSON 欄位，不新增 dependency、daemon、DB migration 或常駐模型。
+- 第一階段保留 code-first 結構品質；第二階段只負責不可違反的 provider budget。
+- Docling 的 OCR/layout/table 能力留待有實際 fixture、召回缺陷與可接受部署成本時再評估，不把可選重型能力放入預設索引路徑。
+
+**效能與升級邊界**:
+- tokenizer 計數與 embedding 都是 bounded batch；記憶體仍為當前檔案與 batch 級。
+- 完整 ASCII input 在 448-token preferred target 內時使用保守字元上界直接接受；multilingual/較長 input 才進 tokenizer，避免一般 code/docs 增加不必要的 worker round-trip。
+- 正常安全 chunk 不重建 identity；只有實際超限內容增加向量數。
+- file/directory/URL KB 可用 `knowledge_update` 升級；inline/import KB 由原始來源重新建立。

@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KnowledgeEngine } from "../../src/engine.ts";
+import { CURRENT_EMBEDDING_INPUT_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
 import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
@@ -371,6 +371,10 @@ describe("KnowledgeEngine", () => {
 			});
 
 			expect(kb.file_count).toBe(3);
+			expect(JSON.parse(engine.list().find((item) => item.id === kb.id)?.source_options ?? "{}")).toMatchObject({
+				embedding_input_policy: CURRENT_EMBEDDING_INPUT_POLICY,
+				include_paths: [".env", "node_modules/chosen/index.js"],
+			});
 			const secret = await engine.search("CONFIRMED_SECRET_TOKEN", { mode: "fast" });
 			expect(secret.total_count).toBeGreaterThan(0);
 			const vendor = await engine.search("ConfirmedVendorToken", { mode: "fast" });
@@ -1472,6 +1476,36 @@ describe("KnowledgeEngine", () => {
 			expect(report.health_score).toBeLessThan(100);
 			expect(report.issues.some((issue) => issue.severity === "blocking")).toBe(true);
 			expect(report.issues.some((issue) => issue.action.includes("remove and rebuild"))).toBe(true);
+		});
+		it("reports and clears the legacy embedding-budget migration action", async () => {
+			const filePath = join(TEST_DIR, "legacy-budget.txt");
+			writeFileSync(filePath, "Legacy embedding budget content that remains updateable from its source file.");
+			const { kb } = await engine.add(filePath, "Legacy Budget");
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET source_options = NULL WHERE id = ?").run(kb.id);
+			} finally {
+				db.close();
+			}
+
+			const legacyReport = engine.doctor();
+			const legacyIssue = legacyReport.issues.find(
+				(issue) => issue.kb_name === "Legacy Budget" && issue.action_code === "reindex_for_embedding_budget",
+			);
+			expect(legacyIssue?.severity).toBe("warning");
+			expect(legacyIssue?.action).toContain("knowledge_update");
+
+			await engine.update("Legacy Budget");
+			const updatedKB = engine.list().find((item) => item.id === kb.id);
+			const updatedOptions = JSON.parse(updatedKB?.source_options ?? "{}") as { embedding_input_policy?: number };
+			const updatedReport = engine.doctor();
+
+			expect(updatedOptions.embedding_input_policy).toBe(CURRENT_EMBEDDING_INPUT_POLICY);
+			expect(
+				updatedReport.issues.some(
+					(issue) => issue.kb_name === "Legacy Budget" && issue.action_code === "reindex_for_embedding_budget",
+				),
+			).toBe(false);
 		});
 	});
 

@@ -1,5 +1,5 @@
 import type { EmbeddingConfig, EmbeddingInputMeasurement } from "../embedding/provider.ts";
-import { measureEmbeddingInputs } from "../embedding/provider.ts";
+import { LOCAL_EMBEDDING_PREFERRED_TOKENS, measureEmbeddingInputs } from "../embedding/provider.ts";
 import type { ChunkInsert } from "../storage/sqlite.ts";
 import { buildChunkEmbeddingText, chunkIdentityHash, preTokenizeForFTS } from "./chunker.ts";
 
@@ -173,6 +173,16 @@ function withPartMetadata(chunk: IndexableChunk, part: number, partCount: number
 	return rebuilt;
 }
 
+function isProvablySafeLocalAsciiInput(text: string, config: EmbeddingConfig): boolean {
+	if (config.provider !== "local") return false;
+	const prefixLength = config.prefixes === "on" ? "passage: ".length : 0;
+	if (text.length + prefixLength + 2 > LOCAL_EMBEDDING_PREFERRED_TOKENS) return false;
+	for (let index = 0; index < text.length; index++) {
+		if (text.charCodeAt(index) > 0x7f) return false;
+	}
+	return true;
+}
+
 export async function finalizeChunksForEmbedding(
 	chunks: IndexableChunk[],
 	config: EmbeddingConfig,
@@ -183,16 +193,26 @@ export async function finalizeChunksForEmbedding(
 	const accepted: PendingPiece[] = [];
 	while (pending.length > 0) {
 		throwIfAborted(signal);
-		const texts = pending.map((piece) => buildChunkEmbeddingText(piece.chunk));
-		const measurement = await measureEmbeddingInputs(texts, "passage", config, signal);
-		if (measurement.counts.length !== pending.length) {
+		const piecesToMeasure: PendingPiece[] = [];
+		const textsToMeasure: string[] = [];
+		for (const piece of pending) {
+			const text = buildChunkEmbeddingText(piece.chunk);
+			if (isProvablySafeLocalAsciiInput(text, config)) accepted.push(piece);
+			else {
+				piecesToMeasure.push(piece);
+				textsToMeasure.push(text);
+			}
+		}
+		if (piecesToMeasure.length === 0) break;
+		const measurement = await measureEmbeddingInputs(textsToMeasure, "passage", config, signal);
+		if (measurement.counts.length !== piecesToMeasure.length) {
 			throw new Error(
-				`Embedding input measurement returned ${measurement.counts.length} counts for ${pending.length} chunks`,
+				`Embedding input measurement returned ${measurement.counts.length} counts for ${piecesToMeasure.length} chunks`,
 			);
 		}
 		const next: PendingPiece[] = [];
-		for (let index = 0; index < pending.length; index++) {
-			const piece = pending[index];
+		for (let index = 0; index < piecesToMeasure.length; index++) {
+			const piece = piecesToMeasure[index];
 			const units = measurement.counts[index];
 			if (units === undefined) throw new Error(`Missing embedding input measurement for chunk ${index}`);
 			if (units <= measurement.maximum) accepted.push(piece);

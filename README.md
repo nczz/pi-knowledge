@@ -23,7 +23,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
-- **Code-aware indexing**: recursive AST chunking for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML, with bounded fallback chunks for oversized declarations.
+- **Code- and document-aware indexing**: recursive AST chunking for supported code, heading-aware Markdown chunks, and an embedding-safe finalizer that preserves oversized multilingual tails without adding a heavy document runtime.
 - **Lightweight symbol lookup**: indexes functions, methods, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
@@ -144,8 +144,8 @@ Mode selection contract:
 
 Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. In `adaptive` mode, code chunks with AST metadata can prefer same-parent/sibling chunks inside the same bounded file window; this is metadata-driven context expansion, not caller/callee analysis. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, source freshness, and adaptive `source_chunk_ids` where available.
 
-For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and AST-derived code structure such as symbol names, scopes, parent symbols, and signatures while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, classes, methods, or functions, and reduces duplicate-looking chunk hits.
-Symbol/config/heading metadata is also rebuilt during `knowledge_update`; code symbol metadata includes AST-backed methods for supported languages. Older KBs created before this feature may show a doctor action recommending update.
+For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and AST-derived code structure such as symbol names, scopes, parent symbols, and signatures while returned results keep the original chunk text readable. Before embedding, the complete contextual input is checked against the active provider budget; only oversized chunks are split again along structural boundaries.
+Symbol/config/heading metadata and embedding-safe chunk boundaries are rebuilt during `knowledge_update`. `knowledge_doctor` reports `reindex_for_embedding_budget` for older KBs: file, directory, and URL sources can use `knowledge_update`; imported or inline-text sources should be re-imported or re-added from the original source.
 
 ## Embedding Configuration
 
@@ -170,9 +170,9 @@ export PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
 # Set PI_KNOWLEDGE_EMBEDDING_API_KEY or OPENAI_API_KEY only if your endpoint requires bearer auth.
 ```
 
-API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files.
+API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files. Inputs are never silently truncated.
 
-API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window; changing the cap changes embedding compatibility and requires `knowledge_update`.
+OpenAI-compatible embedding inputs use a 20000-character complete-input safety cap by default. Indexing splits oversized chunks before HTTP requests; direct oversized query/document calls fail explicitly. Adjust the cap with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when the remote model has a different context window. Changing the cap changes embedding compatibility and requires `knowledge_update`.
 
 For self-hosted servers with smaller request limits, set `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE` to the maximum number of chunk inputs the server accepts per embedding request.
 
@@ -231,8 +231,8 @@ All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/
 - **Reset**: delete the active knowledge directory to start fresh
 - **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
 - **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
-- **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
-- **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. Supported code files use the same AST analysis as chunking, so method symbols can be looked up even when their parent class remains one retrieval chunk. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
+- **Updates**: schema migrations run automatically, but index-time behavior changes are not applied to existing vectors at startup. `knowledge_doctor` reports actionable reindex requirements without loading the embedding model.
+- **Symbol and chunk-policy indexes**: `knowledge.db` stores lightweight symbol/config/heading metadata plus an embedding input policy version. File, directory, and URL KBs with retained source paths can rebuild them with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
 
 ## Development
 

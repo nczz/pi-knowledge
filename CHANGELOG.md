@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Added embedding-safe chunk finalization for add, update, URL, inline-text, and JSONL import paths. Local inputs use the existing model worker tokenizer; OpenAI-compatible inputs use the configured complete-input character cap.
+- Added `knowledge_doctor` action `reindex_for_embedding_budget` for KBs created before the current chunk input policy.
+
+### Fixed
+- Prevented local and OpenAI-compatible embedding inputs from silently discarding oversized multilingual or context-enriched chunk tails.
+- Kept the model worker startup single-flight and Node strip-only compatible while reusing it for batched tokenizer measurement.
+
 ## [0.11.0] - 2026-09-23
 
 ### Added

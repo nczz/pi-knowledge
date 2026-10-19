@@ -34,6 +34,8 @@ export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "multilingual-e5-small";
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+export const LOCAL_EMBEDDING_MAX_TOKENS = 512;
+export const LOCAL_EMBEDDING_PREFERRED_TOKENS = 448;
 export const DEFAULT_API_MAX_EMBED_CHARS = 20_000;
 const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_000);
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
@@ -248,12 +250,13 @@ export async function embedTextsWithConfig(
 	texts: string[],
 	prefix: EmbeddingPrefix,
 	signal?: AbortSignal,
-	options: { allowApiFallback?: boolean } = {},
+	options: { allowApiFallback?: boolean; inputValidated?: boolean } = {},
 ): Promise<{ vectors: Float32Array[]; config: EmbeddingConfig }> {
 	const config = resolveEmbeddingConfig();
 	let actualConfig = config;
+	let inputValidated = options.inputValidated === true;
 	if (config.provider === "openai") {
-		await assertEmbeddingInputsWithinBudget(texts, prefix, config, signal);
+		if (!inputValidated) await assertEmbeddingInputsWithinBudget(texts, prefix, config, signal);
 		if (signal?.aborted) throw new Error("Cancelled");
 		try {
 			return { vectors: await embedViaAPI(texts, prefix, config, signal), config };
@@ -264,9 +267,10 @@ export async function embedTextsWithConfig(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
 			);
 			actualConfig = localEmbeddingConfig(config.maxChars, config.prefixes);
+			inputValidated = false;
 		}
 	}
-	await assertEmbeddingInputsWithinBudget(texts, prefix, actualConfig, signal);
+	if (!inputValidated) await assertEmbeddingInputsWithinBudget(texts, prefix, actualConfig, signal);
 	beginRun();
 	try {
 		return { vectors: await embedInModelWorker(texts, prefix, actualConfig.prefixes, signal), config: actualConfig };
@@ -279,7 +283,7 @@ export async function embedTexts(
 	texts: string[],
 	prefix: EmbeddingPrefix,
 	signal?: AbortSignal,
-	options: { allowApiFallback?: boolean } = {},
+	options: { allowApiFallback?: boolean; inputValidated?: boolean } = {},
 ): Promise<Float32Array[]> {
 	return (await embedTextsWithConfig(texts, prefix, signal, options)).vectors;
 }
@@ -298,4 +302,8 @@ export async function embedQuery(text: string, signal?: AbortSignal): Promise<Fl
 
 export async function embedDocuments(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
 	return embedTexts(texts, "passage", signal, { allowApiFallback: false });
+}
+
+export async function embedValidatedDocuments(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
+	return embedTexts(texts, "passage", signal, { allowApiFallback: false, inputValidated: true });
 }

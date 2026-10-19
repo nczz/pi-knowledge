@@ -12,6 +12,10 @@ import { type RawLogitModel, type RawLogitTokenizer, rerankWithSingleRawLogit } 
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 type EmbeddingTokenizer = {
+	(
+		text: string[],
+		options: { add_special_tokens: true; truncation: false; padding: false; return_tensor: false },
+	): { input_ids: number[] | number[][] };
 	encode(text: string, options?: { add_special_tokens?: boolean }): number[];
 	model_max_length?: unknown;
 };
@@ -165,12 +169,23 @@ async function handleMeasureEmbeddingInput(
 	request: MeasureEmbeddingInputRequest,
 ): Promise<{ counts: number[]; maximum: number }> {
 	const pipe = await loadEmbeddingPipeline();
-	return {
-		counts: request.texts.map(
-			(text) => pipe.tokenizer.encode(applyEmbeddingPrefix(text, request.prefix, request.prefixes)).length,
-		),
-		maximum: embeddingMaximumTokens(pipe.tokenizer),
-	};
+	const texts = request.texts.map((text) => applyEmbeddingPrefix(text, request.prefix, request.prefixes));
+	const tokenized = pipe.tokenizer(texts, {
+		add_special_tokens: true,
+		truncation: false,
+		padding: false,
+		return_tensor: false,
+	});
+	const inputIds = tokenized.input_ids;
+	let counts: number[];
+	if (texts.length === 1 && inputIds.every((token) => typeof token === "number")) {
+		counts = [inputIds.length];
+	} else if (inputIds.every((tokens) => Array.isArray(tokens))) {
+		counts = inputIds.map((tokens) => tokens.length);
+	} else {
+		counts = texts.map((text) => pipe.tokenizer.encode(text, { add_special_tokens: true }).length);
+	}
+	return { counts, maximum: embeddingMaximumTokens(pipe.tokenizer) };
 }
 
 async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: string; score: number }>> {
