@@ -271,6 +271,21 @@ describe("model worker client", () => {
 		expect(stdioChild.kill).toHaveBeenCalledWith("SIGKILL");
 	});
 
+	it("rejects malformed embedding input measurements", async () => {
+		const child = createFakeChild();
+		childProcessMock.fork.mockReturnValue(child);
+		const { measureEmbeddingInputInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = measureEmbeddingInputInModelWorker(["hello"], "passage", "on");
+		if (!child.send) throw new Error("Fake IPC child missing send");
+		const sendMock = vi.mocked(child.send);
+		const message = sendMock.mock.calls[0]?.[0] as { id: number } | undefined;
+		if (!message) throw new Error("Request was not sent");
+		child.emit("message", { id: message.id, result: { counts: [5], maximum: "512" } });
+
+		await expect(request).rejects.toThrow("Invalid embedding input measurement from worker");
+	});
+
 	it("fails before spawning when no Node executable can be resolved", async () => {
 		Object.defineProperty(process, "execPath", {
 			value: "C:\\Users\\chun\\AppData\\Local\\Programs\\omp\\omp.exe",

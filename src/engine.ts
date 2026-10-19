@@ -28,6 +28,7 @@ import {
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
+import { finalizeChunksForEmbedding } from "./indexer/embedding-safe-chunks.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
@@ -1104,7 +1105,8 @@ export class KnowledgeEngine {
 				processedFiles?: number,
 				totalFiles?: number,
 			): Promise<void> => {
-				pendingChunks.push(...chunks);
+				const finalizedChunks = await finalizeChunksForEmbedding(chunks, embeddingConfig, signal);
+				pendingChunks.push(...finalizedChunks);
 				while (pendingChunks.length >= embeddingBatchSize) {
 					await flushPending(processedFiles, totalFiles);
 				}
@@ -1393,7 +1395,8 @@ export class KnowledgeEngine {
 			};
 
 			const processChunks = async (chunks: Awaited<ReturnType<typeof chunkFile>>): Promise<void> => {
-				for (const chunk of chunks) {
+				const finalizedChunks = await finalizeChunksForEmbedding(chunks, embeddingConfig, signal);
+				for (const chunk of finalizedChunks) {
 					scannedChunks++;
 					const existing = reusableHashes.get(chunk.content_hash);
 					if (existing && existing.length > 0) {
@@ -2340,9 +2343,10 @@ export class KnowledgeEngine {
 				const imported = JSON.parse(line) as ImportedChunk;
 				const chunk = importedChunkToInsert(imported);
 				chunk.content_tokenized = preTokenizeForFTS(buildChunkEmbeddingText(chunk));
-				pendingChunks.push(chunk);
+				const finalizedChunks = await finalizeChunksForEmbedding([chunk], embeddingConfig, signal);
+				pendingChunks.push(...finalizedChunks);
 				pendingSymbols.push(...extractSymbols(imported.content, imported.file_path, imported.file_type));
-				if (pendingChunks.length >= embeddingBatchSize) await flushPending();
+				while (pendingChunks.length >= embeddingBatchSize) await flushPending();
 			}
 			if (!header) throw new Error("Empty import file");
 			if (!kb || !vectorWriter || !tempVectorFile) throw new Error("Import did not create a knowledge base");

@@ -11,10 +11,15 @@ import {
 import { type RawLogitModel, type RawLogitTokenizer, rerankWithSingleRawLogit } from "./search/reranker-logits.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
-type FeatureExtractionPipeline = (
-	input: string,
-	options: { pooling: "mean"; normalize: true },
-) => Promise<{ data: ArrayLike<number> }>;
+type EmbeddingTokenizer = {
+	encode(text: string, options?: { add_special_tokens?: boolean }): number[];
+	model_max_length?: unknown;
+};
+
+type FeatureExtractionPipeline = {
+	(input: string, options: { pooling: "mean"; normalize: true }): Promise<{ data: ArrayLike<number> }>;
+	tokenizer: EmbeddingTokenizer;
+};
 
 type RerankerPipeline = (input: {
 	text: string;
@@ -37,6 +42,14 @@ type EmbedRequest = {
 	prefixes: "on" | "off";
 };
 
+type MeasureEmbeddingInputRequest = {
+	id: number;
+	type: "measure_embedding_input";
+	texts: string[];
+	prefix: "query" | "passage";
+	prefixes: "on" | "off";
+};
+
 type RerankRequest = {
 	id: number;
 	type: "rerank";
@@ -46,10 +59,11 @@ type RerankRequest = {
 	reranker: HfRerankerConfig;
 };
 
-type WorkerRequest = EmbedRequest | RerankRequest;
+type WorkerRequest = EmbedRequest | MeasureEmbeddingInputRequest | RerankRequest;
 type WorkerResponse = { id: number; result?: unknown; error?: string };
 
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let embeddingPipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
 let rerankerPipeline: { key: string; pipe: RerankerPipeline } | null = null;
 
 function getModelCacheDir(): string {
@@ -73,15 +87,22 @@ function configureEmbeddingTransformersEnv(env: TransformersEnv): void {
 
 async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	if (embeddingPipeline) return embeddingPipeline;
-	const { pipeline, env } = await import("@huggingface/transformers");
-	configureEmbeddingTransformersEnv(env as TransformersEnv);
-	const createPipeline = pipeline as PipelineFactory;
-	const loaded = (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
-		quantized: true,
-		dtype: "fp32",
-	})) as FeatureExtractionPipeline;
-	embeddingPipeline = loaded;
-	return loaded;
+	if (embeddingPipelinePromise) return embeddingPipelinePromise;
+	embeddingPipelinePromise = (async () => {
+		const { pipeline, env } = await import("@huggingface/transformers");
+		configureEmbeddingTransformersEnv(env as TransformersEnv);
+		const createPipeline = pipeline as PipelineFactory;
+		return (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
+			quantized: true,
+			dtype: "fp32",
+		})) as FeatureExtractionPipeline;
+	})();
+	try {
+		embeddingPipeline = await embeddingPipelinePromise;
+		return embeddingPipeline;
+	} finally {
+		embeddingPipelinePromise = null;
+	}
 }
 
 async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerPipeline> {
@@ -133,6 +154,25 @@ async function handleEmbed(request: EmbedRequest): Promise<number[][]> {
 	return vectors;
 }
 
+function embeddingMaximumTokens(tokenizer: EmbeddingTokenizer): number {
+	const configured = tokenizer.model_max_length;
+	return typeof configured === "number" && Number.isInteger(configured) && configured > 0 && configured <= 1_000_000
+		? configured
+		: 512;
+}
+
+async function handleMeasureEmbeddingInput(
+	request: MeasureEmbeddingInputRequest,
+): Promise<{ counts: number[]; maximum: number }> {
+	const pipe = await loadEmbeddingPipeline();
+	return {
+		counts: request.texts.map(
+			(text) => pipe.tokenizer.encode(applyEmbeddingPrefix(text, request.prefix, request.prefixes)).length,
+		),
+		maximum: embeddingMaximumTokens(pipe.tokenizer),
+	};
+}
+
 async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: string; score: number }>> {
 	const pipe = await loadRerankerPipeline(request.reranker);
 	const results: Array<{ chunkId: string; score: number }> = [];
@@ -169,17 +209,23 @@ function parseWorkerRequest(message: unknown): WorkerRequest {
 		throw new Error("Invalid worker request id");
 	}
 	if (!("type" in message)) throw new Error("Invalid worker request type");
-	if (message.type === "embed") {
-		if (!("texts" in message) || !isStringArray(message.texts)) throw new Error("Invalid embed texts");
+	if (message.type === "embed" || message.type === "measure_embedding_input") {
+		if (!("texts" in message) || !isStringArray(message.texts)) throw new Error("Invalid embedding texts");
 		if (!("prefix" in message) || (message.prefix !== "query" && message.prefix !== "passage")) {
-			throw new Error("Invalid embed prefix");
+			throw new Error("Invalid embedding prefix");
 		}
 		const prefixes =
 			"prefixes" in message && (message.prefixes === "on" || message.prefixes === "off") ? message.prefixes : "on";
 		if ("prefixes" in message && message.prefixes !== "on" && message.prefixes !== "off") {
-			throw new Error("Invalid embed prefix strategy");
+			throw new Error("Invalid embedding prefix strategy");
 		}
-		return { id: message.id, type: "embed", texts: message.texts, prefix: message.prefix, prefixes };
+		return {
+			id: message.id,
+			type: message.type,
+			texts: message.texts,
+			prefix: message.prefix,
+			prefixes,
+		};
 	}
 	if (message.type === "rerank") {
 		if (!("query" in message) || typeof message.query !== "string") throw new Error("Invalid rerank query");
@@ -209,7 +255,12 @@ async function handleRequestMessage(message: unknown): Promise<WorkerResponse> {
 			requestId = message.id;
 		}
 		const request = parseWorkerRequest(message);
-		const result = request.type === "embed" ? await handleEmbed(request) : await handleRerank(request);
+		const result =
+			request.type === "embed"
+				? await handleEmbed(request)
+				: request.type === "measure_embedding_input"
+					? await handleMeasureEmbeddingInput(request)
+					: await handleRerank(request);
 		return { id: request.id, result };
 	} catch (error) {
 		return { id: requestId, error: error instanceof Error ? error.message : String(error) };

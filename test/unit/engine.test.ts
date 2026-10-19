@@ -189,6 +189,20 @@ describe("KnowledgeEngine", () => {
 			expect(engine.list()).toHaveLength(0);
 		});
 
+		it("persists and retrieves the tail of an oversized multilingual paragraph", async () => {
+			const content = `開頭主題${"這是一段必須完整建立向量與全文索引的繁體中文內容".repeat(180)}TailBudgetToken`;
+
+			const { kb, chunkCount } = await engine.add(content, "Embedding Budget");
+			const db = openDatabase(TEST_DIR);
+			const chunks = getChunksByKB(db, kb.id);
+			db.close();
+			const result = await engine.search("TailBudgetToken", { mode: "fast", kb_id: kb.id });
+
+			expect(chunkCount).toBeGreaterThan(1);
+			expect(chunks.some((chunk) => chunk.content.includes("TailBudgetToken"))).toBe(true);
+			expect(result.total_count).toBe(1);
+		});
+
 		it("rejects overlapping adds for the same knowledge base name", async () => {
 			const first = engine.add("Original overlap content about authentication tokens and sessions.", "Overlap Add");
 			const second = engine.add("Replacement overlap content about billing invoices and payments.", "Overlap Add");
@@ -438,6 +452,22 @@ describe("KnowledgeEngine", () => {
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}
+		});
+
+		it("re-finalizes oversized chunks during source updates", async () => {
+			const filePath = join(TEST_DIR, "long-update.txt");
+			writeFileSync(filePath, `Initial${"更新前的繁體中文長段落內容".repeat(240)}InitialTailBudgetToken`);
+			await engine.add(filePath, "Long Update");
+			writeFileSync(filePath, `Changed${"更新後仍必須完整建立索引的繁體中文內容".repeat(240)}ChangedTailBudgetToken`);
+
+			const update = await engine.update("Long Update");
+			const result = await engine.search("ChangedTailBudgetToken", { mode: "fast", kb_id: "Long Update" });
+			const stale = await engine.search("InitialTailBudgetToken", { mode: "fast", kb_id: "Long Update" });
+
+			expect(update.added).toBeGreaterThan(1);
+			expect(update.removed).toBeGreaterThan(1);
+			expect(result.total_count).toBe(1);
+			expect(stale.total_count).toBe(0);
 		});
 
 		it("rebuilds unchanged vectors when legacy embedding signature metadata is missing", async () => {
@@ -1501,6 +1531,30 @@ describe("KnowledgeEngine", () => {
 			expect(() => engine.remove("Guarded Remove Import")).toThrow("A knowledge-base mutation is already running");
 			await importRun;
 			expect(engine.list()).toHaveLength(1);
+		});
+
+		it("splits oversized imported chunks before embedding without losing their tail", async () => {
+			const inputPath = join(TEST_DIR, "oversized-import.jsonl");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(
+				inputPath,
+				[
+					JSON.stringify({ name: "Oversized Import" }),
+					JSON.stringify({
+						content: `ImportedStart${"需要完整保留的匯入文件內容".repeat(300)}ImportedTailBudgetToken`,
+						file_path: "imported-long.txt",
+						file_type: "text",
+						start_line: 1,
+						end_line: 1,
+					}),
+				].join("\n"),
+			);
+
+			const { kb, chunkCount } = await engine.importKB(inputPath);
+			const result = await engine.search("ImportedTailBudgetToken", { mode: "fast", kb_id: kb.id });
+
+			expect(chunkCount).toBeGreaterThan(1);
+			expect(result.total_count).toBe(1);
 		});
 
 		it("rejects imports that would duplicate an existing knowledge base name", async () => {

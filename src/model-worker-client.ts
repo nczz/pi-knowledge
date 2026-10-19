@@ -225,11 +225,13 @@ function isWorkerResponse(message: unknown): message is WorkerResponse {
 
 abstract class ModelWorkerTransport {
 	protected readonly pending = new Map<number, PendingRequest>();
+	protected readonly child: ChildProcess;
 	private stderrTail = "";
 	private exited = false;
 	private terminalError: Error | null = null;
 
-	protected constructor(protected readonly child: ChildProcess) {
+	protected constructor(child: ChildProcess) {
+		this.child = child;
 		child.stderr?.on("data", (chunk: Buffer) => {
 			this.stderrTail = appendWorkerStderr(this.stderrTail, chunk);
 		});
@@ -319,8 +321,10 @@ abstract class ModelWorkerTransport {
 }
 
 class IpcModelWorkerTransport extends ModelWorkerTransport {
-	private constructor(private readonly ipcChild: SendCapableChild) {
+	private readonly ipcChild: SendCapableChild;
+	private constructor(ipcChild: SendCapableChild) {
 		super(ipcChild);
+		this.ipcChild = ipcChild;
 		ipcChild.on("message", (message: unknown) => this.handleWorkerResponse(message));
 	}
 
@@ -436,6 +440,30 @@ export async function embedInModelWorker(
 		if (!Array.isArray(vector)) throw new Error("Invalid embedding vector from worker");
 		return new Float32Array(vector);
 	});
+}
+
+export async function measureEmbeddingInputInModelWorker(
+	texts: string[],
+	prefix: "query" | "passage",
+	prefixes: "on" | "off",
+	signal?: AbortSignal,
+): Promise<{ counts: number[]; maximum: number }> {
+	const result = await getWorker().request({ type: "measure_embedding_input", texts, prefix, prefixes }, signal);
+	if (
+		typeof result !== "object" ||
+		result === null ||
+		!("counts" in result) ||
+		!Array.isArray(result.counts) ||
+		result.counts.length !== texts.length ||
+		!result.counts.every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0) ||
+		!("maximum" in result) ||
+		typeof result.maximum !== "number" ||
+		!Number.isInteger(result.maximum) ||
+		result.maximum <= 0
+	) {
+		throw new Error("Invalid embedding input measurement from worker");
+	}
+	return { counts: result.counts, maximum: result.maximum };
 }
 
 export interface RerankWorkerCandidate {

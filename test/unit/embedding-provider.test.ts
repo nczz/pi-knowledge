@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const workerMock = vi.hoisted(() => ({
 	embedInModelWorker: vi.fn(async () => [new Float32Array([0.5, 0.5])]),
+	measureEmbeddingInputInModelWorker: vi.fn(async (texts: string[]) => ({
+		counts: texts.map((text) => text.length),
+		maximum: 512,
+	})),
 }));
 
 vi.mock("../../src/model-worker-client.ts", () => workerMock);
@@ -17,6 +21,11 @@ describe("embedding provider", () => {
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
 		workerMock.embedInModelWorker.mockClear();
+		workerMock.measureEmbeddingInputInModelWorker.mockReset();
+		workerMock.measureEmbeddingInputInModelWorker.mockImplementation(async (texts: string[]) => ({
+			counts: texts.map((text) => text.length),
+			maximum: 512,
+		}));
 	});
 
 	it("uses PI_KNOWLEDGE_EMBEDDING_BASE_URL for OpenAI-compatible embedding APIs", async () => {
@@ -87,7 +96,7 @@ describe("embedding provider", () => {
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
 	});
 
-	it("bounds API embedding input length with a configurable safety cap", async () => {
+	it("rejects API embedding input above the configured safety cap without truncating or sending it", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_MAX_CHARS", "32");
 		vi.stubEnv("OPENAI_API_KEY", "test-key");
@@ -97,12 +106,22 @@ describe("embedding provider", () => {
 		vi.stubGlobal("fetch", fetchMock);
 
 		const { embedDocuments } = await import("../../src/embedding/provider.ts");
-		await embedDocuments(["x".repeat(100)]);
 
-		const [, init] = fetchMock.mock.calls[0];
-		const body = JSON.parse(String(init?.body)) as { input: string[] };
-		expect(body.input[0]).toHaveLength(32);
-		expect(body.input[0]).toBe("passage: xxxxxxxxxxxxxxxxxxxxxxx");
+		await expect(embedDocuments(["x".repeat(100)])).rejects.toThrow(
+			"openai embedding passage input 1 is 109 characters; maximum is 32",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects local embedding input above the tokenizer limit before inference", async () => {
+		workerMock.measureEmbeddingInputInModelWorker.mockResolvedValue({ counts: [513], maximum: 512 });
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+
+		await expect(embedDocuments(["oversized"])).rejects.toThrow(
+			"local embedding passage input 1 is 513 tokens; maximum is 512",
+		);
+		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
 	});
 
 	it("sends raw API embedding input when prefixes are disabled", async () => {

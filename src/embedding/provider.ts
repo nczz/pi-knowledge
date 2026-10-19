@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { embedInModelWorker } from "../model-worker-client.ts";
+import { embedInModelWorker, measureEmbeddingInputInModelWorker } from "../model-worker-client.ts";
 
 export type EmbeddingProvider = "local" | "openai";
 export type EmbeddingPrefix = "query" | "passage";
@@ -15,6 +15,13 @@ export interface EmbeddingConfig {
 	prefixes: EmbeddingPrefixStrategy;
 	pooling: "mean";
 	normalize: true;
+}
+
+export interface EmbeddingInputMeasurement {
+	counts: number[];
+	maximum: number;
+	preferredMaximum: number;
+	unit: "tokens" | "characters";
 }
 
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -166,16 +173,58 @@ function applyEmbeddingPrefix(text: string, prefix: EmbeddingPrefix, config: Emb
 	return config.prefixes === "on" ? `${prefix}: ${text}` : text;
 }
 
+export async function measureEmbeddingInputs(
+	texts: string[],
+	prefix: EmbeddingPrefix,
+	config: EmbeddingConfig,
+	signal?: AbortSignal,
+): Promise<EmbeddingInputMeasurement> {
+	if (signal?.aborted) throw new Error("Cancelled");
+	if (config.provider === "openai") {
+		return {
+			counts: texts.map((text) => applyEmbeddingPrefix(text, prefix, config).length),
+			maximum: config.maxChars,
+			preferredMaximum: Math.max(1, Math.floor(config.maxChars * 0.875)),
+			unit: "characters",
+		};
+	}
+	beginRun();
+	try {
+		const measurement = await measureEmbeddingInputInModelWorker(texts, prefix, config.prefixes, signal);
+		return {
+			...measurement,
+			preferredMaximum: Math.max(1, Math.floor(measurement.maximum * 0.875)),
+			unit: "tokens",
+		};
+	} finally {
+		endRun();
+	}
+}
+
+async function assertEmbeddingInputsWithinBudget(
+	texts: string[],
+	prefix: EmbeddingPrefix,
+	config: EmbeddingConfig,
+	signal?: AbortSignal,
+): Promise<void> {
+	const measurement = await measureEmbeddingInputs(texts, prefix, config, signal);
+	for (let index = 0; index < measurement.counts.length; index++) {
+		const count = measurement.counts[index];
+		if (count !== undefined && count > measurement.maximum) {
+			throw new Error(
+				`${config.provider} embedding ${prefix} input ${index + 1} is ${count} ${measurement.unit}; maximum is ${measurement.maximum}. Split the input before embedding.`,
+			);
+		}
+	}
+}
+
 async function embedViaAPI(
 	texts: string[],
 	prefix: EmbeddingPrefix,
 	config: EmbeddingConfig,
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	const safeTexts = texts.map((text) => {
-		const embeddingText = applyEmbeddingPrefix(text, prefix, config);
-		return embeddingText.length > config.maxChars ? embeddingText.slice(0, config.maxChars) : embeddingText;
-	});
+	const safeTexts = texts.map((text) => applyEmbeddingPrefix(text, prefix, config));
 	const apiKey = cleanEnv(process.env.PI_KNOWLEDGE_EMBEDDING_API_KEY) ?? cleanEnv(process.env.OPENAI_API_KEY);
 	if (!config.baseUrl) throw new Error("OpenAI embedding base URL is not configured");
 	const endpoint = new URL("embeddings", `${config.baseUrl.replace(/\/+$/, "")}/`);
@@ -204,6 +253,7 @@ export async function embedTextsWithConfig(
 	const config = resolveEmbeddingConfig();
 	let actualConfig = config;
 	if (config.provider === "openai") {
+		await assertEmbeddingInputsWithinBudget(texts, prefix, config, signal);
 		if (signal?.aborted) throw new Error("Cancelled");
 		try {
 			return { vectors: await embedViaAPI(texts, prefix, config, signal), config };
@@ -216,6 +266,7 @@ export async function embedTextsWithConfig(
 			actualConfig = localEmbeddingConfig(config.maxChars, config.prefixes);
 		}
 	}
+	await assertEmbeddingInputsWithinBudget(texts, prefix, actualConfig, signal);
 	beginRun();
 	try {
 		return { vectors: await embedInModelWorker(texts, prefix, actualConfig.prefixes, signal), config: actualConfig };
