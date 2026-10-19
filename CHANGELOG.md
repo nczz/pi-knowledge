@@ -5,6 +5,7 @@
 ### Added
 - Added embedding-safe chunk finalization for add, update, URL, inline-text, and JSONL import paths. Local inputs use the existing model worker tokenizer; OpenAI-compatible inputs use the configured complete-input character cap.
 - Added `knowledge_doctor` action `reindex_for_embedding_budget` for KBs created before the current chunk input policy.
+- Added dependency-free structured HTML normalization for URL sources, preserving headings, paragraphs, lists, tables, and entities for heading-aware chunking.
 
 ### Fixed
 - Prevented local and OpenAI-compatible embedding inputs from silently discarding oversized multilingual or context-enriched chunk tails.

@@ -493,7 +493,7 @@ function makeChunk(
 	return { ...chunk, content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)) };
 }
 
-export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInsert, "kb_id">[] {
+export function chunkMarkdown(content: string, filePath: string, fileType = "markdown"): Omit<ChunkInsert, "kb_id">[] {
 	const lines = content.split("\n");
 	const chunks: Omit<ChunkInsert, "kb_id">[] = [];
 	const headingStack: string[] = [];
@@ -508,7 +508,7 @@ export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInse
 	function pushMarkdownChunk(text: string, start: number, end: number): void {
 		if (text.trim().length < 50) return;
 		chunks.push(
-			makeChunk(text.trim(), filePath, "markdown", start, end, {
+			makeChunk(text.trim(), filePath, fileType, start, end, {
 				heading: currentHeading,
 				breadcrumb: currentBreadcrumb(),
 			}),

@@ -24,6 +24,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
 - **Code- and document-aware indexing**: recursive AST chunking for supported code, heading-aware Markdown chunks, and an embedding-safe finalizer that preserves oversized multilingual tails without adding a heavy document runtime.
+- **Structured URL indexing**: preserves HTML headings, paragraphs, lists, tables, and entities as lightweight Markdown-like text without a browser, Docling runtime, or new dependency.
 - **Lightweight symbol lookup**: indexes functions, methods, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.

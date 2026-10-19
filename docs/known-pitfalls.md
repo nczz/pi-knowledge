@@ -78,6 +78,12 @@ SQLite FTS5 的 `bm25()` 分數是「越小越相關」。`KnowledgeEngine.searc
 
 URL indexing 如果把 `source_type` 存成 `text`，`knowledge_update` 會走本機檔案存在性檢查，對 `https://...` 永遠失敗。URL 必須是正式 source type，並在 update 時重新 fetch。
 
+## URL HTML 不可壓成單行純文字
+
+直接移除所有 tags 再做 `\s+ → " "` 會消滅 heading、paragraph、list 與 table row 邊界。索引雖成功，heading breadcrumb、section-level chunk 與 line provenance 都不存在。輕量路徑應先把 HTML block semantics 正規化成 Markdown-like text，再交給 heading-aware chunker。
+
+這個正規化器是 bounded best-effort，不宣稱完整 HTML parsing。它不執行 JavaScript、不載入 browser、不做 Readability/OCR/layout inference；遇到 SPA 或複雜 malformed HTML 時應保留限制說明，而不是加入預設重型 runtime。
+
 ## 單檔 diagnostics 路徑
 
 Directory KB 的 chunk `file_path` 是相對路徑；single-file KB 的 chunk `file_path` 是絕對路徑。`knowledge_status` 做 stale 檢測時，只有 directory KB 可以 `join(source_path, relPath)`；single-file KB 必須直接 stat 該絕對路徑。

@@ -20,6 +20,7 @@ import {
 	buildChunkEmbeddingText,
 	chunkFile,
 	chunkIdentityHash,
+	chunkMarkdown,
 	createSkippedScanStats,
 	isReadableTextFile,
 	isSupportedDocumentFile,
@@ -30,6 +31,7 @@ import {
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
 import { finalizeChunksForEmbedding } from "./indexer/embedding-safe-chunks.ts";
+import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
@@ -152,6 +154,7 @@ export interface AddOptions {
 
 interface StoredSourceOptions extends AddOptions {
 	embedding_input_policy?: number;
+	url_structure_policy?: number;
 }
 
 type UpdateableKnowledgeBase = KnowledgeBase & { source_path: string };
@@ -241,6 +244,7 @@ export interface SymbolSearchResponse {
 	has_more: boolean;
 }
 
+export const CURRENT_URL_STRUCTURE_POLICY = 1;
 export const CURRENT_EMBEDDING_INPUT_POLICY = 2;
 const DEFAULT_INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
@@ -308,9 +312,11 @@ function toScanOptions(options: AddOptions = {}): ScanOptions {
 		excludePaths: options.exclude_paths,
 	};
 }
-
 function serializeAddOptions(options: AddOptions = {}): string {
-	const normalized: StoredSourceOptions = { embedding_input_policy: CURRENT_EMBEDDING_INPUT_POLICY };
+	const normalized: StoredSourceOptions = {
+		embedding_input_policy: CURRENT_EMBEDDING_INPUT_POLICY,
+		url_structure_policy: CURRENT_URL_STRUCTURE_POLICY,
+	};
 	if (options.include_suggested_text === true) normalized.include_suggested_text = true;
 	if (options.include_paths && options.include_paths.length > 0) normalized.include_paths = options.include_paths;
 	if (options.exclude_paths && options.exclude_paths.length > 0) normalized.exclude_paths = options.exclude_paths;
@@ -335,13 +341,15 @@ function parseAddOptions(raw: string | null): AddOptions {
 	}
 }
 
-function embeddingInputPolicyVersion(raw: string | null): number | undefined {
+function storedSourcePolicyVersion(
+	raw: string | null,
+	key: "embedding_input_policy" | "url_structure_policy",
+): number | undefined {
 	if (!raw) return undefined;
 	try {
 		const parsed = JSON.parse(raw) as StoredSourceOptions;
-		return typeof parsed.embedding_input_policy === "number" && Number.isInteger(parsed.embedding_input_policy)
-			? parsed.embedding_input_policy
-			: undefined;
+		const version = parsed[key];
+		return typeof version === "number" && Number.isInteger(version) ? version : undefined;
 	} catch {
 		return undefined;
 	}
@@ -738,14 +746,10 @@ async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<R
 	const res = await fetch(source, { signal });
 	if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
 	const html = await res.text();
-	const text = html
-		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/&[a-z]+;/gi, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	return chunkFile(text, source);
+	throwIfAborted(signal);
+	const text = htmlToStructuredMarkdown(html);
+	const structuredChunks = chunkMarkdown(text, source, "html");
+	return structuredChunks.length > 0 ? structuredChunks : chunkFile(text, source);
 }
 
 function normalizeExtractedText(text: string | string[]): string {
@@ -2157,7 +2161,7 @@ export class KnowledgeEngine {
 				throwIfAborted(signal);
 				if (
 					(kb.status === "ready" || kb.status === "stale") &&
-					(embeddingInputPolicyVersion(kb.source_options) ?? 0) < CURRENT_EMBEDDING_INPUT_POLICY
+					(storedSourcePolicyVersion(kb.source_options, "embedding_input_policy") ?? 0) < CURRENT_EMBEDDING_INPUT_POLICY
 				) {
 					const canUpdate = kb.source_path !== null && kb.source_type !== "text";
 					issues.push({
@@ -2169,6 +2173,19 @@ export class KnowledgeEngine {
 							? "Run knowledge_update to re-chunk oversized inputs with the current embedding budget."
 							: "Re-add inline text or re-import the original source to rebuild chunks with the current embedding budget.",
 						action_code: "reindex_for_embedding_budget",
+					});
+				}
+				if (
+					kb.source_type === "url" &&
+					(kb.status === "ready" || kb.status === "stale") &&
+					(storedSourcePolicyVersion(kb.source_options, "url_structure_policy") ?? 0) < CURRENT_URL_STRUCTURE_POLICY
+				) {
+					issues.push({
+						severity: "warning",
+						kb_name: kb.name,
+						message: "This URL KB predates structure-preserving HTML normalization.",
+						action: "Run knowledge_update to rebuild URL headings, sections, lists, tables, and entities.",
+						action_code: "run_update",
 					});
 				}
 				if (kb.status === "ready" && kb.chunk_count > 0 && getSymbolCount(this.db, kb.id) === 0) {

@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CURRENT_EMBEDDING_INPUT_POLICY, KnowledgeEngine } from "../../src/engine.ts";
+import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
 import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
@@ -201,6 +201,37 @@ describe("KnowledgeEngine", () => {
 			expect(chunkCount).toBeGreaterThan(1);
 			expect(chunks.some((chunk) => chunk.content.includes("TailBudgetToken"))).toBe(true);
 			expect(result.total_count).toBe(1);
+		});
+
+		it("preserves URL heading boundaries for chunk metadata and retrieval", async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async () =>
+						new Response(
+							[
+								"<html><body>",
+								"<h1>Billing Guide</h1>",
+								"<p>BillingHtmlToken explains invoices, payment retries, account balances, and reconciliation details.</p>",
+								"<h2>Refund Policy</h2>",
+								"<p>RefundHtmlTailToken explains approval rules, audit records, review ownership, and settlement timing.</p>",
+								"</body></html>",
+							].join(""),
+						),
+				),
+			);
+
+			const { kb, chunkCount } = await engine.add("https://example.test/guide", "Structured HTML");
+			const db = openDatabase(TEST_DIR);
+			const chunks = getChunksByKB(db, kb.id);
+			db.close();
+			const tail = await engine.search("RefundHtmlTailToken", { mode: "fast", kb_id: kb.id });
+
+			expect(chunkCount).toBe(2);
+			expect(chunks.map((chunk) => chunk.file_type)).toEqual(["html", "html"]);
+			expect(chunks[0].metadata_json).toContain("Billing Guide");
+			expect(chunks[1].metadata_json).toContain("Billing Guide > Refund Policy");
+			expect(tail.total_count).toBe(1);
 		});
 
 		it("rejects overlapping adds for the same knowledge base name", async () => {
@@ -617,12 +648,35 @@ describe("KnowledgeEngine", () => {
 				vi.fn(async () => new Response(body, { status: 200 })),
 			);
 
-			await engine.add("https://example.test/docs", "URL");
+			const added = await engine.add("https://example.test/docs", "URL");
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET source_options = ? WHERE id = ?").run(
+					JSON.stringify({ embedding_input_policy: CURRENT_EMBEDDING_INPUT_POLICY }),
+					added.kb.id,
+				);
+			} finally {
+				db.close();
+			}
+			expect(
+				engine
+					.doctor()
+					.issues.some((issue) => issue.kb_name === "URL" && issue.message.includes("structure-preserving HTML")),
+			).toBe(true);
 			body = "<html><body>Changed URL content about billing invoices and payments.</body></html>";
 
 			const result = await engine.update("URL");
+			const sourceOptions = JSON.parse(engine.list()[0].source_options ?? "{}") as {
+				url_structure_policy?: number;
+			};
 			expect(result.added).toBeGreaterThan(0);
 			expect(engine.list()[0].source_type).toBe("url");
+			expect(sourceOptions.url_structure_policy).toBe(CURRENT_URL_STRUCTURE_POLICY);
+			expect(
+				engine
+					.doctor()
+					.issues.some((issue) => issue.kb_name === "URL" && issue.message.includes("structure-preserving HTML")),
+			).toBe(false);
 		});
 
 		it("honors cancellation before embedding changed chunks", async () => {

@@ -144,19 +144,20 @@
 
 ---
 
-## ADR-012: Regex HTML stripping for URL indexing
+## ADR-012: Dependency-free structural HTML normalization for URL indexing
 
-**狀態**: 已決定（可改進）
+**狀態**: 已決定
 
-**當前**: `html.replace(/<script>...</script>/).replace(/<[^>]+>/g, " ")`
+**決策**: URL fetch 後先移除 comment、script、style、noscript、template 與 SVG 內容，再把 heading 轉成 Markdown heading、paragraph/block tag 轉成空行、`br` 轉成換行、list item 轉成 `- `、table row/cell 轉成可讀分隔文字。常見 named entity 與合法 numeric entity 會解碼；未知 entity 保留原文。結果走 heading-aware chunker，並保留 `file_type=html`。
 
-**替代**: cheerio (~200KB), @mozilla/readability, htmlparser2
+**理由**:
+- 保住文件標題、section breadcrumb 與段落邊界，避免所有 HTML 被壓成單行後失去 chunk 語意。
+- 只在 URL ingestion 執行；無新 dependency、parser process、模型或常駐記憶體。
+- 對 API docs、blog、wiki 與一般 server-rendered 文件提供明確改善，且沿用現有 Markdown chunk metadata 與 embedding-safe finalizer。
 
-**理由**: 零額外依賴。對文檔類頁面（API docs、blog、wiki）夠用。
+**已知限制**: 這不是完整 DOM、Readability、OCR 或 browser rendering。Malformed nested tags、`>` 出現在 attribute、SPA 動態內容、CSS layout、複雜表格關係與 `<pre>` 原始排版不保證還原。
 
-**已知限制**: 不處理 nested `>`、HTML entities、SPA 動態內容。
-
-**未來升級條件**: 如果使用者回報 URL indexing 品質差，加 cheerio。
+**未來升級條件**: 只有在真實 URL fixture 證明 lightweight normalization 無法滿足召回，且使用者接受額外 dependency/runtime 成本時，才評估 htmlparser2、Readability 或可選外部文件處理器；不把 Docling 類重型管線放進預設路徑。
 
 ---
 
