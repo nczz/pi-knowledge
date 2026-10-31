@@ -21,7 +21,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 ## Highlights
 
-- **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
+- **Local-first project memory**: stores indexes under the active host knowledge directory (`~/.pi/knowledge/` for Pi or `~/.omp/knowledge/` for OMP); no project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
 - **Code- and document-aware indexing**: recursive AST chunking for supported code, heading-aware Markdown chunks, and an embedding-safe finalizer that preserves oversized multilingual tails without adding a heavy document runtime.
 - **Structured URL indexing**: preserves HTML headings, paragraphs, lists, tables, and entities as lightweight Markdown-like text without a browser, Docling runtime, or new dependency.
@@ -43,7 +43,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Adaptive contextual search** | ✅ | ❌ | ❌ |
 | **Diversity reranking** | ✅ | ❌ | ❌ |
 | **Incremental re-indexing** | ✅ | ❌ | ❌ |
-| **File watcher (auto-update)** | ✅ | ❌ | ❌ |
+| **File watcher (opt-in auto-update)** | ✅ | ❌ | ❌ |
 | **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java/Bash/C/C++/QML) | ❌ | ❌ |
 | **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
 | **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
@@ -52,9 +52,9 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Progress reporting + stuck indexing diagnostics** | ✅ | partial | ❌ |
 | Cross-session persistence | ✅ | ✅ | ✅ |
 | Pi extension native | ✅ | N/A | ✅ |
-| Context injection per turn | ✅ | ❌ | ✅ |
-| Search result TUI rendering | ✅ | N/A | ❌ |
-| Full tool TUI rendering | partial | N/A | ❌ |
+| Context injection per turn (opt-in) | ✅ | ❌ | ✅ |
+| Structured search result formatting | ✅ | N/A | ❌ |
+| Custom tool TUI renderers | ❌ | N/A | ❌ |
 | RPC mode support | ✅ | N/A | N/A |
 
 TUI rendering currently uses Pi's stable default tool rendering plus targeted result formatting. A fuller custom renderer is intentionally not enabled yet because custom renderers must be width-safe across terminal sizes and Pi TUI modes.
@@ -73,35 +73,136 @@ TUI rendering currently uses Pi's stable default tool rendering plus targeted re
 
 This is intentionally not a heavy ColBERT-style late-interaction index yet (Khattab and Zaharia 2020). The current product chooses lightweight local embeddings, BM25, query-aware ranking, optional cross-encoder reranking, streamed vector scans, and health diagnostics for commercial usefulness with low setup cost.
 
-In project-level dogfood, these changes improved a real codebase evaluation from early 3.x/5 quality to above 4.5/5 after rebuilds, with fixes for score compression, README repetition, garbage-query false positives, small-module discoverability, source-vs-test ranking, indexing stability, and auto-mode false positives. Existing KBs should be rebuilt or updated after upgrades that change indexing text.
+Project dogfood drove fixes for score compression, repeated same-file results,
+garbage-query false positives, small-module discoverability, source-versus-test
+ranking, indexing stability, and auto-mode false positives. Existing KBs should
+be rebuilt or updated after upgrades that change indexing text.
 
 ## Quick Start
 
+### Install
+
+For Pi:
+
 ```bash
-# Install for Pi
 pi install npm:pi-knowledge
-
-# Install for OMP
-omp install npm:pi-knowledge
-
-# On minimal Ubuntu/Debian servers, install native build tools first because
-# OMP's Bun-based npm install compiles better-sqlite3 from source.
-sudo apt-get update && sudo apt-get install -y build-essential python3
-omp install npm:pi-knowledge
-
-# Or from source
-pi install ./pi-knowledge
-omp install ./pi-knowledge
-
-# Index a directory
-# (agent will call knowledge_add automatically, or you can ask it)
-> Index my project docs at ./docs as "Project Docs"
-
-# Search
-> Search my knowledge base for "authentication flow"
-
-# The agent also auto-searches relevant knowledge before answering domain questions
 ```
+
+For OMP:
+
+```bash
+omp plugin install npm:pi-knowledge
+```
+
+On minimal Ubuntu or Debian systems, install native build tools first if OMP
+must compile `better-sqlite3`:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential python3
+omp plugin install npm:pi-knowledge
+```
+
+For a local checkout, install dependencies and build before registration:
+
+```bash
+cd /path/to/pi-knowledge
+npm ci
+npm run typecheck
+npm test
+npm run build
+
+# Register with the host you use:
+pi install ./
+omp plugin link "$(pwd)"
+```
+
+Use either the npm package or the local checkout for a host, not both. Check
+Pi with `pi list` and OMP with `omp plugin list --json` when switching sources.
+
+### Index and search
+
+Ask the agent:
+
+```text
+Index my project docs at ./docs as "Project Docs".
+Search my knowledge bases for "authentication flow".
+```
+
+The agent receives guidance to use `knowledge_symbol_search` and
+`knowledge_search` when knowledge bases are available. Automatic behavior is
+opt-in. Set one or both variables before starting Pi or OMP:
+
+```bash
+export PI_KNOWLEDGE_AUTO_INJECT=true # retrieve context before every model call
+export PI_KNOWLEDGE_WATCH=true       # update directory KBs after file changes
+```
+
+Per-turn injection adds retrieval work and prompt context to every model call.
+File watching applies only to directory-backed knowledge bases.
+
+## Upgrade
+
+### npm-installed package
+
+Update only pi-knowledge in Pi:
+
+```bash
+pi update npm:pi-knowledge
+pi list
+```
+
+Use `pi update --extensions` instead when every installed Pi extension should
+be updated.
+
+Update only pi-knowledge in OMP:
+
+```bash
+omp plugin upgrade pi-knowledge
+omp plugin list --json
+omp plugin doctor
+```
+
+Bare `omp plugin upgrade` and `omp update --plugins --check` report marketplace
+plugin status; they do not confirm that this npm plugin was upgraded.
+
+Install the unversioned Pi source (`npm:pi-knowledge`) to follow the npm
+`latest` tag. Pi preserves explicitly versioned sources such as
+`npm:pi-knowledge@<version>`. To remove a pin:
+
+1. Run `pi list`.
+2. Pass the exact pinned source shown there to `pi remove`.
+3. Run `pi install npm:pi-knowledge`.
+
+### Local checkout
+
+A linked checkout is updated from Git, not from the npm registry. Finish,
+commit, or stash local edits before pulling. Exit Pi and OMP processes that use
+the checkout before replacing dependencies or build output.
+
+```bash
+cd /path/to/pi-knowledge
+git status --short
+git pull --ff-only  # only when the checkout is clean and follows a remote branch
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+When actively developing local changes, skip `git pull --ff-only` and build the
+current tree. `extension.js` prefers `dist/index.js`, so source edits are
+inactive until the build succeeds. The local registration only needs to be
+repeated when its path or host settings change.
+
+Pi and OMP load extension modules once per process. Start a new host process
+after a successful registry upgrade or local build. Then use `pi list` to
+confirm Pi's selected source, or `omp plugin list --json` to confirm OMP's
+installed version and path.
+
+After releases that change indexing text, run `knowledge_doctor` and follow its
+suggested reindex action. Source-backed knowledge bases can normally use
+`knowledge_update`; rebuild only when diagnostics or release notes require it.
 
 ## Tools
 
@@ -215,17 +316,25 @@ Update and diagnostics paths are also streaming-oriented: changed chunks are emb
 
 ## Architecture
 
-[DESIGN.md](DESIGN.md) is the historical technical design. For current behavior contracts, prefer this README, [AGENTS.md](AGENTS.md), [docs/configuration.md](docs/configuration.md), and the ADR/pitfall notes under `docs/`.
+[DESIGN.md](https://github.com/nczz/pi-knowledge/blob/main/DESIGN.md) is the
+historical technical design. For current behavior contracts, prefer this
+README, the repository's
+[AGENTS.md](https://github.com/nczz/pi-knowledge/blob/main/AGENTS.md),
+[docs/configuration.md](docs/configuration.md), and the source-only
+[ADR and pitfall notes](https://github.com/nczz/pi-knowledge/tree/main/docs).
+The npm package includes the user-facing configuration and offline-mode guides;
+the repository retains the broader design history.
 
 ## Data Storage
 
-All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/` under OMP unless overridden (never in your project directory):
+All data is stored under the active host knowledge directory unless overridden;
+indexed projects are never used for internal storage:
 
 ```
-~/.pi/knowledge/
+<knowledge-dir>/
 ├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
 ├── vectors/          ← Embedding vectors per KB (binary)
-└── models/           ← Downloaded ONNX models (~32MB, cached)
+└── models/           ← ONNX cache (embedding ~32MB; rerankers add artifacts)
 ```
 
 - **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`

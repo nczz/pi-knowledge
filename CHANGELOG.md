@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Reworked the quick start and added verified Pi and Oh My Pi upgrade guidance for npm and local sources, targeted updates, explicit-version pins, safe checkout updates, build activation, source verification, host restarts, and post-upgrade diagnostics.
+- Clarified host-specific storage, opt-in watcher/context injection, model-cache sizing, source-only architecture links, and the distinction between structured result text and custom TUI renderers.
+
 ## [0.12.0] - 2026-10-19
 
 ### Added
