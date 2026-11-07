@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Fixed `diversifyRankedChunks` recomputing the full candidate × selected similarity matrix on every greedy selection round, which cost `n³/6` pair evaluations (each a Jaccard over token sets plus a full-dimension cosine) and dominated search CPU — ~1.7 s per search at `limit=8` and minutes at large `limit`, and long enough to block the event loop and time out the concurrent embedding/rerank request. Redundancy is a running max over pairs, so each unordered pair is now evaluated exactly once and folded into a per-candidate accumulator: same greedy result, same `lambda`, same tie-breaking, `O(n²)` instead of `O(n³)`, with no array `splice` per round. `lineProximity` now compares source chunk ids as sets instead of `some(…includes(…))`, and `normalizeScores` finds min/max in a loop instead of `Math.min(…spread)`, which also removes a `RangeError` risk on large candidate pools. Measured 9×/18×/77×/160× faster at 50/100/200/400 candidates (1024-dim vectors) with byte-identical selection order; added a differential unit test against the previous implementation and a benchmark.
+
 ### Changed
 - Reworked the quick start and added verified Pi and Oh My Pi upgrade guidance for npm and local sources, targeted updates, explicit-version pins, safe checkout updates, build activation, source verification, host restarts, and post-upgrade diagnostics.
 - Clarified host-specific storage, opt-in watcher/context injection, model-cache sizing, source-only architecture links, and the distinction between structured result text and custom TUI renderers.

@@ -176,7 +176,7 @@ interface ImportHeader {
 	chunk_count?: number;
 }
 
-interface RankedChunk {
+export interface RankedChunk {
 	chunk: Chunk;
 	kbName: string;
 	ranking?: RankingDiagnostics;
@@ -419,9 +419,33 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 	return intersection / (a.size + b.size - intersection);
 }
 
-function lineProximity(a: RankedChunk, b: RankedChunk): number {
-	if (a.chunk.file_path !== b.chunk.file_path || a.chunk.kb_id !== b.chunk.kb_id) return 0;
-	if (a.sourceChunkIds.some((id) => b.sourceChunkIds.includes(id))) return 1;
+/** Per-candidate fields that `lineProximity` reads, flattened out of `RankedChunk`. */
+interface ProximityMeta {
+	filePath: string;
+	kbId: string;
+	startLine: number;
+	endLine: number;
+	sourceIds: Set<string>;
+}
+
+function proximityMeta(candidate: RankedChunk): ProximityMeta {
+	return {
+		filePath: candidate.chunk.file_path,
+		kbId: candidate.chunk.kb_id,
+		startLine: candidate.startLine,
+		endLine: candidate.endLine,
+		// The original `some((id) => other.includes(id)))` is a set-intersection test;
+		// a Set makes it O(1) per probe instead of O(|a|*|b|).
+		sourceIds: new Set(candidate.sourceChunkIds),
+	};
+}
+
+function lineProximity(a: ProximityMeta, b: ProximityMeta): number {
+	if (a.filePath !== b.filePath || a.kbId !== b.kbId) return 0;
+	const [small, large] = a.sourceIds.size <= b.sourceIds.size ? [a.sourceIds, b.sourceIds] : [b.sourceIds, a.sourceIds];
+	for (const id of small) {
+		if (large.has(id)) return 1;
+	}
 	const overlap = Math.max(0, Math.min(a.endLine, b.endLine) - Math.max(a.startLine, b.startLine) + 1);
 	if (overlap > 0) return 1;
 	const gap = Math.max(a.startLine, b.startLine) - Math.min(a.endLine, b.endLine);
@@ -431,9 +455,14 @@ function lineProximity(a: RankedChunk, b: RankedChunk): number {
 }
 
 function normalizeScores(candidates: RankedChunk[]): Map<string, number> {
-	const scores = candidates.map((candidate) => candidate.score);
-	const min = Math.min(...scores);
-	const max = Math.max(...scores);
+	// Plain loop instead of Math.min(...scores): spreading a large candidate pool
+	// into the argument list risks a RangeError on the stack.
+	let min = Number.POSITIVE_INFINITY;
+	let max = Number.NEGATIVE_INFINITY;
+	for (const candidate of candidates) {
+		if (candidate.score < min) min = candidate.score;
+		if (candidate.score > max) max = candidate.score;
+	}
 	const normalized = new Map<string, number>();
 	for (const candidate of candidates) {
 		const value = max === min ? 1 : (candidate.score - min) / (max - min);
@@ -442,48 +471,79 @@ function normalizeScores(candidates: RankedChunk[]): Map<string, number> {
 	return normalized;
 }
 
-function diversifyRankedChunks(
+export function diversifyRankedChunks(
 	candidates: RankedChunk[],
 	diversity: SearchOptions["diversity"],
 	vectorsByChunkId: Map<string, Float32Array> = new Map(),
 ): RankedChunk[] {
 	if (diversity === "off" || candidates.length <= 2) return candidates;
 	const lambda = diversity === "strong" ? 0.62 : 0.76;
-	const normalized = normalizeScores(candidates);
-	const tokenSets = new Map(
-		candidates.map((candidate) => [candidate.chunk.id, tokenizeForSimilarity(candidate.content)]),
-	);
-	const selected: RankedChunk[] = [];
-	const remaining = [...candidates];
+	const n = candidates.length;
 
-	while (remaining.length > 0) {
-		let bestIndex = 0;
+	// Per-candidate hot data flattened out of the pair loop, which is where this
+	// function spends nearly all of its time.
+	const ids = new Array<string>(n);
+	const tokenSets = new Array<Set<string>>(n);
+	const vectors = new Array<Float32Array | undefined>(n);
+	const metas = new Array<ProximityMeta>(n);
+	const relevance = new Float64Array(n);
+	const normalized = normalizeScores(candidates);
+	for (let i = 0; i < n; i++) {
+		const candidate = candidates[i];
+		const id = candidate.chunk.id;
+		ids[i] = id;
+		tokenSets[i] = tokenizeForSimilarity(candidate.content);
+		vectors[i] = vectorsByChunkId.get(id);
+		metas[i] = proximityMeta(candidate);
+		// Read through the same Map as before, so duplicate chunk ids keep the
+		// identical (last-written) relevance the original produced.
+		relevance[i] = normalized.get(id) ?? 0;
+	}
+
+	// Redundancy of a candidate against one other candidate — the same expression
+	// the original inner loop reduced with Math.max.
+	const pairRedundancy = (a: number, b: number): number => {
+		let best = lineProximity(metas[a], metas[b]);
+		const lexical = jaccardSimilarity(tokenSets[a], tokenSets[b]);
+		if (lexical > best) best = lexical;
+		const va = vectors[a];
+		const vb = vectors[b];
+		if (va !== undefined && vb !== undefined) {
+			const vector = Math.max(0, cosineSimilarity(va, vb)) * VECTOR_REDUNDANCY_WEIGHT;
+			if (vector > best) best = vector;
+		}
+		return best;
+	};
+
+	// Redundancy is a running MAX over pairs, so each unordered pair only has to be
+	// evaluated once: when a candidate is selected, fold its pairs into the
+	// per-candidate accumulator. That is O(n^2) pair evaluations instead of the
+	// sum_k (n-k)*k = n^3/6 the round-per-round recomputation cost, and it makes
+	// the greedy result, the lambda, and the tie-breaking behaviour unchanged.
+	const redundancy = new Float64Array(n);
+	const used = new Uint8Array(n);
+	const selected: RankedChunk[] = [];
+
+	for (let round = 0; round < n; round++) {
+		let bestIndex = -1;
 		let bestScore = Number.NEGATIVE_INFINITY;
-		for (let i = 0; i < remaining.length; i++) {
-			const candidate = remaining[i];
-			let redundancy = 0;
-			for (const chosen of selected) {
-				const lexical = jaccardSimilarity(
-					tokenSets.get(candidate.chunk.id) ?? new Set<string>(),
-					tokenSets.get(chosen.chunk.id) ?? new Set<string>(),
-				);
-				const vector = Math.max(
-					0,
-					cosineSimilarity(vectorsByChunkId.get(candidate.chunk.id), vectorsByChunkId.get(chosen.chunk.id)),
-				);
-				redundancy = Math.max(
-					redundancy,
-					Math.max(lexical, lineProximity(candidate, chosen), vector * VECTOR_REDUNDANCY_WEIGHT),
-				);
-			}
-			const relevance = normalized.get(candidate.chunk.id) ?? 0;
-			const mmrScore = lambda * relevance - (1 - lambda) * redundancy;
+		// Ascending index order over unused candidates reproduces the original
+		// strict `>` tie break over `remaining`, which preserved input order.
+		for (let i = 0; i < n; i++) {
+			if (used[i] === 1) continue;
+			const mmrScore = lambda * relevance[i] - (1 - lambda) * redundancy[i];
 			if (mmrScore > bestScore) {
 				bestScore = mmrScore;
 				bestIndex = i;
 			}
 		}
-		selected.push(remaining.splice(bestIndex, 1)[0]);
+		used[bestIndex] = 1;
+		selected.push(candidates[bestIndex]);
+		for (let i = 0; i < n; i++) {
+			if (used[i] === 1) continue;
+			const pair = pairRedundancy(bestIndex, i);
+			if (pair > redundancy[i]) redundancy[i] = pair;
+		}
 	}
 
 	return selected;
