@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-07
+
 ### Added
 - Added bounded `knowledge_search` pagination (`limit` 1-50, `offset + limit` up to 800) and diagnostics for per-KB retrieval breadth, merged/filtered/diversity candidate counts, and global-pool truncation.
 - Added client-side validation and L2 normalization for OpenAI-compatible embedding vectors, with a signed normalization policy and `knowledge_doctor` rebuild guidance for older API-backed KBs.
