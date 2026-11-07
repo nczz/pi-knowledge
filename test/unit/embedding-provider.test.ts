@@ -40,12 +40,53 @@ describe("embedding provider", () => {
 		const { embedDocuments } = await import("../../src/embedding/provider.ts");
 		const vectors = await embedDocuments(["hello"]);
 
-		expect(vectors[0]).toEqual(new Float32Array([0.1, 0.2]));
+		expect(Array.from(vectors[0])).toEqual([expect.closeTo(0.4472136, 6), expect.closeTo(0.8944272, 6)]);
 		expect(fetchMock).toHaveBeenCalledOnce();
 		const [url, init] = fetchMock.mock.calls[0];
 		expect(String(url)).toBe("http://127.0.0.1:8080/v1/embeddings");
 		expect(init?.method).toBe("POST");
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
+	});
+
+	it("L2-normalizes every API vector before search or persistence", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				jsonResponse({
+					data: [{ embedding: [3, 4, 0] }, { embedding: [0, 12, 5] }],
+				}),
+			),
+		);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		const vectors = await embedDocuments(["first", "second"]);
+
+		expect(Array.from(vectors[0])).toEqual([expect.closeTo(0.6, 6), expect.closeTo(0.8, 6), 0]);
+		expect(Array.from(vectors[1])).toEqual([0, expect.closeTo(12 / 13, 6), expect.closeTo(5 / 13, 6)]);
+	});
+
+	it("rejects invalid vectors instead of persisting unusable similarity data", async () => {
+		const { normalizeEmbeddingVector } = await import("../../src/embedding/provider.ts");
+
+		expect(() => normalizeEmbeddingVector(new Float32Array([0, 0]))).toThrow("zero-magnitude vector");
+		expect(() => normalizeEmbeddingVector(new Float32Array([Number.NaN, 1]))).toThrow("non-finite vector value");
+	});
+
+	it("rejects malformed or inconsistent API vectors before normalization", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse({ data: [{ embedding: [null, 1] }] }))
+			.mockResolvedValueOnce(jsonResponse({ data: [{ embedding: [1, 0] }, { embedding: [1, 0, 0] }] }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+
+		await expect(embedDocuments(["invalid"])).rejects.toThrow("contains a non-finite numeric value");
+		await expect(embedDocuments(["first", "second"])).rejects.toThrow("has dimension 3; expected 2");
 	});
 
 	it("allows unauthenticated custom OpenAI-compatible embedding APIs", async () => {
@@ -241,6 +282,7 @@ describe("embedding provider", () => {
 		expect(signature).toContain("apiMax=12345");
 		expect(signature).toContain("base-sha256=");
 		expect(signature).not.toContain("secret-key");
+		expect(signature).toContain("normalize=client-l2-v1");
 		expect(signature).not.toContain("prefixes=");
 	});
 

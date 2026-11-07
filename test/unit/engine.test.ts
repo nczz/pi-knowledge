@@ -12,8 +12,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
-import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
-import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
+import { buildChunkEmbeddingText, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
+import {
+	createKB,
+	getChunksByKB,
+	getIndexingJob,
+	insertChunks,
+	openDatabase,
+	updateKBCounts,
+	updateKBEmbeddingMetadata,
+} from "../../src/storage/sqlite.ts";
 
 const mammothMock = vi.hoisted(() => ({
 	extractRawText: vi.fn(),
@@ -77,6 +85,11 @@ describe("KnowledgeEngine", () => {
 			} finally {
 				db.close();
 			}
+
+			const doctorIssue = engine
+				.doctor()
+				.issues.find((issue) => issue.kb_name === "IncompatibleVectors" && issue.action_code === "rebuild_vectors");
+			expect(doctorIssue?.severity).toBe("warning");
 
 			const hybrid = await engine.search("OAuth token", { mode: "hybrid" });
 			expect(hybrid.total_count).toBeGreaterThan(0);
@@ -901,6 +914,73 @@ describe("KnowledgeEngine", () => {
 
 			const byId = await engine.search("SearchByNameToken", { mode: "fast", kb_id: kb.id });
 			expect(byId.total_count).toBe(byName.total_count);
+		});
+
+		it("enforces one global candidate budget across knowledge bases with stable pagination", async () => {
+			const db = openDatabase(TEST_DIR);
+			try {
+				for (let kbIndex = 0; kbIndex < 2; kbIndex++) {
+					const kb = createKB(db, {
+						name: `Bounded Search ${kbIndex}`,
+						source_type: "text",
+					});
+					const chunks = Array.from({ length: 200 }, (_, chunkIndex) => {
+						const content = `GlobalBoundToken architecture candidate ${kbIndex}-${chunkIndex}`;
+						return {
+							content_hash: `bound-${kbIndex}-${chunkIndex}`,
+							content,
+							content_tokenized: preTokenizeForFTS(content),
+							file_path: `kb-${kbIndex}/candidate-${chunkIndex}.md`,
+							file_type: "markdown",
+							start_line: 1,
+							end_line: 1,
+							metadata_json: "{}",
+						};
+					});
+					insertChunks(db, kb.id, chunks);
+					updateKBCounts(db, kb.id, chunks.length, chunks.length);
+				}
+			} finally {
+				db.close();
+			}
+
+			const firstPage = await engine.search("GlobalBoundToken", {
+				mode: "fast",
+				profile: "precision",
+				limit: 50,
+				diversity: "off",
+			});
+			const secondPage = await engine.search("GlobalBoundToken", {
+				mode: "fast",
+				profile: "precision",
+				limit: 50,
+				offset: 50,
+				diversity: "off",
+			});
+			const repeatedFirstPage = await engine.search("GlobalBoundToken", {
+				mode: "fast",
+				profile: "precision",
+				limit: 50,
+				diversity: "off",
+			});
+
+			expect(firstPage.results).toHaveLength(50);
+			expect(firstPage.total_count).toBe(300);
+			expect(firstPage.has_more).toBe(true);
+			expect(firstPage.tuning).toMatchObject({
+				candidate_limit: 300,
+				retrieval_limit_per_kb: 300,
+				retrieved_candidates: 400,
+				filtered_candidates: 400,
+				diversity_candidates: 300,
+				candidate_pool_truncated: true,
+			});
+			expect(secondPage.results).toHaveLength(50);
+			const firstPagePaths = new Set(firstPage.results.map((result) => result.file_path));
+			expect(secondPage.results.every((result) => !firstPagePaths.has(result.file_path))).toBe(true);
+			expect(repeatedFirstPage.results.map((result) => result.file_path)).toEqual(
+				firstPage.results.map((result) => result.file_path),
+			);
 		});
 
 		it("diversifies repeated hits from the same file", async () => {

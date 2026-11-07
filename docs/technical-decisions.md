@@ -377,3 +377,31 @@
 - 完整 ASCII input 在 448-token preferred target 內時使用保守字元上界直接接受；multilingual/較長 input 才進 tokenizer，避免一般 code/docs 增加不必要的 worker round-trip。
 - 正常安全 chunk 不重建 identity；只有實際超限內容增加向量數。
 - file/directory/URL KB 可用 `knowledge_update` 升級；inline/import KB 由原始來源重新建立。
+
+---
+
+## ADR-021: 全域限制搜尋候選、O(n²) diversity 與 API vector normalization
+
+**狀態**: 已決定
+
+**背景**: 多 KB 搜尋原本只在每個 KB 套用 retrieval limit，合併後的候選會隨 KB 數量成長；adaptive expansion 和 diversity 因而處理未受全域限制的集合。原 MMR-style implementation 又在每輪對每個未選候選重掃全部已選結果，最差為 O(n³)，且 CPU loop 沒有 cooperative yield。OpenAI-compatible embedding API 同時可能回傳未 L2-normalized vectors，但搜尋以 dot product 作為 cosine-style similarity，造成 provider magnitude 影響排名。
+
+**決策**:
+- Public search window 驗證 `limit` 為 1-50 的整數、`offset` 為非負整數，且 `offset + limit <= 800`。
+- Profile-derived candidate limit 對每個 KB 保留 bounded retrieval breadth；合併後先做 ranking、confidence/filter，再以同一上限建立全域 candidate pool。
+- Deep reranking、adaptive context expansion 和 diversity 只能接收全域 bounded pool。Diagnostics 回報 per-KB retrieval limit、retrieved、filtered、diversity candidate counts 和 truncation。
+- Diversity 保留既有 relevance、lexical/vector/line redundancy 與 stable tie semantics，但以 running maximum redundancy 讓每個 pair 只需計算一次，時間複雜度降為 O(n²)。
+- Large diversity passes 在 bounded CPU slice 後 yield event loop，並在 pair batches 前後檢查 `AbortSignal`。
+- OpenAI-compatible vectors 在 query 使用或 persistence 前驗證數量、finite values、non-zero magnitude 並做 client-side L2 normalization。
+- API normalization policy `client-l2-v1` 納入 embedding signature。既有 API KB 不自動重建；`knowledge_doctor` 以 `rebuild_vectors` 指示 update/rebuild。
+
+**理由**:
+- Per-KB breadth 保留跨 KB recall；全域 cap 把昂貴 query-time work 與 KB 數量解耦。
+- Running maximum 與原本每輪取 `max(redundancy)` 數學等價，可改善複雜度而不重寫排序策略。
+- Cooperative yield 讓取消能在大型候選池內生效，不需要 worker thread 或新 dependency。
+- Client-side normalization 讓所有 OpenAI-compatible providers 符合相同 cosine contract；signature cutover 防止新舊 vector semantics 混用。
+
+**升級邊界**:
+- Candidate budget、pagination validation、diversity 與 diagnostics 是 query-time 行為，既有 KB 立即受益。
+- Local embedding signature 不變。
+- 舊 OpenAI-compatible KB signature 不含 `client-l2-v1`，必須執行 `knowledge_update`；inline/import KB 應從原始來源重新建立。

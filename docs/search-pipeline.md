@@ -124,6 +124,14 @@ Implementation-oriented queries also demote localization catalogs such as `local
 
 Hybrid/adaptive search must not always return something. Candidates must pass a minimum adjusted score and enough lexical evidence, except when the query strongly names a source module path. This prevents garbage queries or one accidental token match from returning unrelated code.
 
+### Candidate budget and diversity
+
+The effective candidate limit is profile-derived from `offset + limit`, then hard-capped at 800. Retrieval applies that limit independently to each selected KB so a small KB is not hidden by an earlier large KB. After query-aware ranking, confidence gating, sorting, and metadata filtering, the merged pool is capped once globally. Deep reranking, adaptive expansion, and MMR-style diversity only process this bounded pool.
+
+Diversity preserves the existing relevance/redundancy formula but keeps each remaining candidate's maximum redundancy as selected results are added. This changes repeated pair evaluation from O(n³) to O(n²), while stable input-order tie handling preserves ranking behavior. Large passes check `AbortSignal` and yield to the event loop between bounded CPU slices.
+
+Public pagination is bounded: `limit` is an integer from 1 to 50, `offset` is a non-negative integer, and `offset + limit` cannot exceed 800. Diagnostics distinguish per-KB retrieval breadth, merged retrieval count, filtered count, diversity input count, and global-pool truncation.
+
 ---
 
 ## 5. Cross-Encoder Reranking
@@ -177,13 +185,13 @@ function applyFilters(results: SearchResult[], filters: SearchFilters): SearchRe
 ## 8. 完整流程
 
 ```
-query → mode dispatch:
-  fast:     BM25(top-50) → filter → paginate
-  semantic: vectorSearch(top-50) → filter → paginate
-  semantic_hybrid: vectorSearch(top-N) + BM25(top-N when available) → weighted fusion → query-aware ranking → score gate → filter → diversify → paginate
-  hybrid:   BM25(top-N) + vectorSearch(top-N) → weighted fusion → query-aware ranking → confidence gate → filter → diversify → paginate
-  deep:     hybrid candidates → crossEncoderRerank → diversify → return
-  adaptive: hybrid seeds → contextual window expansion → diversify → paginate
+query → mode dispatch → retrieve up to N per KB → cross-KB rank/filter → global cap (≤800):
+  fast:            BM25 → paginate
+  semantic:        vectorSearch → paginate
+  semantic_hybrid: vectorSearch + optional BM25 → weighted fusion → score gate → diversify → paginate
+  hybrid:          BM25 + vectorSearch → weighted fusion → confidence gate → diversify → paginate
+  deep:            bounded hybrid candidates → crossEncoderRerank → diversify → paginate
+  adaptive:        bounded hybrid seeds → contextual window expansion → diversify → paginate
 ```
 
 ---

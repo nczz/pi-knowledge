@@ -35,6 +35,8 @@ import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
+import { MAX_SEARCH_WINDOW } from "./search/contracts.ts";
+import { diversifyRankedChunks, interleaveByFile, type RankedChunk } from "./search/diversity.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
 import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
 import {
@@ -48,6 +50,7 @@ import {
 import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
 import {
 	resolveSearchTuning,
+	resolveSearchWindow,
 	type SearchProfile,
 	type SearchTuningSummary,
 	summarizeSearchTuning,
@@ -176,18 +179,6 @@ interface ImportHeader {
 	chunk_count?: number;
 }
 
-interface RankedChunk {
-	chunk: Chunk;
-	kbName: string;
-	ranking?: RankingDiagnostics;
-	score: number;
-	content: string;
-	snippet: string;
-	startLine: number;
-	endLine: number;
-	sourceChunkIds: string[];
-}
-
 export interface DoctorIssue {
 	severity: "blocking" | "warning" | "info";
 	kb_name?: string;
@@ -247,7 +238,6 @@ export interface SymbolSearchResponse {
 export const CURRENT_URL_STRUCTURE_POLICY = 1;
 export const CURRENT_EMBEDDING_INPUT_POLICY = 2;
 const DEFAULT_INDEX_EMBED_BATCH_SIZE = 64;
-const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 
 function resolveIndexEmbedBatchSize(env: NodeJS.ProcessEnv = process.env): number {
 	const raw = env.PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE?.trim();
@@ -399,125 +389,8 @@ function formatBytes(bytes: number): string {
 	return `${(mb / 1024).toFixed(2)} GB`;
 }
 
-function cosineSimilarity(a: Float32Array | undefined, b: Float32Array | undefined): number {
-	if (!a || !b || a.length !== b.length) return 0;
-	let dot = 0;
-	for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-	return dot;
-}
-
 function tokenizeForSimilarity(text: string): Set<string> {
 	return tokenizeForSearch(text);
-}
-
-function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-	if (a.size === 0 || b.size === 0) return 0;
-	let intersection = 0;
-	for (const token of a) {
-		if (b.has(token)) intersection++;
-	}
-	return intersection / (a.size + b.size - intersection);
-}
-
-function lineProximity(a: RankedChunk, b: RankedChunk): number {
-	if (a.chunk.file_path !== b.chunk.file_path || a.chunk.kb_id !== b.chunk.kb_id) return 0;
-	if (a.sourceChunkIds.some((id) => b.sourceChunkIds.includes(id))) return 1;
-	const overlap = Math.max(0, Math.min(a.endLine, b.endLine) - Math.max(a.startLine, b.startLine) + 1);
-	if (overlap > 0) return 1;
-	const gap = Math.max(a.startLine, b.startLine) - Math.min(a.endLine, b.endLine);
-	if (gap <= 20) return 0.8;
-	if (gap <= 80) return 0.45;
-	return 0.2;
-}
-
-function normalizeScores(candidates: RankedChunk[]): Map<string, number> {
-	const scores = candidates.map((candidate) => candidate.score);
-	const min = Math.min(...scores);
-	const max = Math.max(...scores);
-	const normalized = new Map<string, number>();
-	for (const candidate of candidates) {
-		const value = max === min ? 1 : (candidate.score - min) / (max - min);
-		normalized.set(candidate.chunk.id, value);
-	}
-	return normalized;
-}
-
-function diversifyRankedChunks(
-	candidates: RankedChunk[],
-	diversity: SearchOptions["diversity"],
-	vectorsByChunkId: Map<string, Float32Array> = new Map(),
-): RankedChunk[] {
-	if (diversity === "off" || candidates.length <= 2) return candidates;
-	const lambda = diversity === "strong" ? 0.62 : 0.76;
-	const normalized = normalizeScores(candidates);
-	const tokenSets = new Map(
-		candidates.map((candidate) => [candidate.chunk.id, tokenizeForSimilarity(candidate.content)]),
-	);
-	const selected: RankedChunk[] = [];
-	const remaining = [...candidates];
-
-	while (remaining.length > 0) {
-		let bestIndex = 0;
-		let bestScore = Number.NEGATIVE_INFINITY;
-		for (let i = 0; i < remaining.length; i++) {
-			const candidate = remaining[i];
-			let redundancy = 0;
-			for (const chosen of selected) {
-				const lexical = jaccardSimilarity(
-					tokenSets.get(candidate.chunk.id) ?? new Set<string>(),
-					tokenSets.get(chosen.chunk.id) ?? new Set<string>(),
-				);
-				const vector = Math.max(
-					0,
-					cosineSimilarity(vectorsByChunkId.get(candidate.chunk.id), vectorsByChunkId.get(chosen.chunk.id)),
-				);
-				redundancy = Math.max(
-					redundancy,
-					Math.max(lexical, lineProximity(candidate, chosen), vector * VECTOR_REDUNDANCY_WEIGHT),
-				);
-			}
-			const relevance = normalized.get(candidate.chunk.id) ?? 0;
-			const mmrScore = lambda * relevance - (1 - lambda) * redundancy;
-			if (mmrScore > bestScore) {
-				bestScore = mmrScore;
-				bestIndex = i;
-			}
-		}
-		selected.push(remaining.splice(bestIndex, 1)[0]);
-	}
-
-	return selected;
-}
-
-function interleaveByFile(candidates: RankedChunk[], diversity: SearchOptions["diversity"]): RankedChunk[] {
-	if (diversity === "off" || candidates.length <= 2) return candidates;
-	const buckets = new Map<string, RankedChunk[]>();
-	const fileOrder: string[] = [];
-	for (const candidate of candidates) {
-		const key = `${candidate.chunk.kb_id}:${candidate.chunk.file_path}`;
-		if (!buckets.has(key)) {
-			buckets.set(key, []);
-			fileOrder.push(key);
-		}
-		buckets.get(key)?.push(candidate);
-	}
-	if (fileOrder.length <= 1) return candidates;
-
-	const result: RankedChunk[] = [];
-	let round = 0;
-	while (result.length < candidates.length) {
-		let added = false;
-		for (const key of fileOrder) {
-			const bucket = buckets.get(key);
-			const item = bucket?.[round];
-			if (!item) continue;
-			result.push(item);
-			added = true;
-		}
-		if (!added) break;
-		round++;
-	}
-	return result;
 }
 
 function buildQuerySnippet(content: string, query: string, maxLength = 240): string {
@@ -1689,7 +1562,7 @@ export class KnowledgeEngine {
 			};
 		}
 		const db = this.db;
-		const { mode = "hybrid", offset = 0, kb_id, filters, diversity = "balanced" } = options;
+		const { mode = "hybrid", offset: requestedOffset, kb_id, filters, diversity = "balanced" } = options;
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const normalizedQuery = normalizedQueryText(query);
@@ -1712,11 +1585,12 @@ export class KnowledgeEngine {
 			profile: options.profile,
 			kbSourceTypes: kbs.map((kb) => kb.source_type),
 		});
-		const limit =
-			typeof options.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
-				? Math.trunc(options.limit)
-				: tuning.defaultLimit;
-		const candidateLimit = Math.max(tuning.candidateMin, offset + limit * tuning.candidateMultiplier);
+		const { limit, offset } = resolveSearchWindow(options.limit, requestedOffset, tuning.defaultLimit);
+		const candidateLimit = Math.min(
+			MAX_SEARCH_WINDOW,
+			Math.max(tuning.candidateMin, offset + limit * tuning.candidateMultiplier),
+		);
+		const retrievalLimitPerKb = candidateLimit;
 		const tuningSummary = summarizeSearchTuning(tuning, limit, candidateLimit);
 		if (kbs.length === 0) {
 			return {
@@ -1731,6 +1605,7 @@ export class KnowledgeEngine {
 
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
+		let queryEmbedding: { vector: Float32Array; config: EmbeddingConfig } | undefined;
 
 		for (const kb of kbs) {
 			throwIfAborted(signal);
@@ -1739,7 +1614,7 @@ export class KnowledgeEngine {
 
 			if (retrievalMode === "fast") {
 				allResults.push(
-					...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id, { allowOrFallback: false }).map(
+					...searchBM25(db, normalizedQuery || query, retrievalLimitPerKb, kb.id, { allowOrFallback: false }).map(
 						(result) => ({
 							...result,
 							score: result.score * kbTrustMultiplier(kb),
@@ -1747,7 +1622,8 @@ export class KnowledgeEngine {
 					),
 				);
 			} else if (retrievalMode === "semantic") {
-				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
+				queryEmbedding ??= await embedQueryWithConfig(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = queryEmbedding;
 				throwIfAborted(signal);
 				if (!canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					warnings.push(embeddingMismatchWarning(kb));
@@ -1757,7 +1633,7 @@ export class KnowledgeEngine {
 					queryVec,
 					vectorPath,
 					iterateChunkIdsByKB(db, kb.id),
-					candidateLimit,
+					retrievalLimitPerKb,
 					signal,
 				);
 				allResults.push(
@@ -1766,18 +1642,19 @@ export class KnowledgeEngine {
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
 				const semanticHybrid = retrievalMode === "semantic_hybrid";
-				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
+				const bm25Results = searchBM25(db, normalizedQuery || query, retrievalLimitPerKb, kb.id);
 				if (bm25Results.length === 0 && !semanticHybrid) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
-				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
+				queryEmbedding ??= await embedQueryWithConfig(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = queryEmbedding;
 				throwIfAborted(signal);
 				if (canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					const vectorResults = searchVectorFile(
 						queryVec,
 						vectorPath,
 						iterateChunkIdsByKB(db, kb.id),
-						candidateLimit,
+						retrievalLimitPerKb,
 						signal,
 					);
 					vecResults = vectorResults.results;
@@ -1835,9 +1712,15 @@ export class KnowledgeEngine {
 				return true;
 			});
 		}
+		const candidatePool = filtered.slice(0, candidateLimit);
+		const candidatePoolTruncated = candidatePool.length < filtered.length;
+		const candidateIds = new Set(candidatePool.map((candidate) => candidate.chunkId));
+		for (const chunkId of vectorsByChunkId.keys()) {
+			if (!candidateIds.has(chunkId)) vectorsByChunkId.delete(chunkId);
+		}
 
-		if (mode === "deep" && filtered.length > 0) {
-			const candidates = filtered
+		if (mode === "deep" && candidatePool.length > 0) {
+			const candidates = candidatePool
 				.slice(0, tuning.deepRerankCandidates)
 				.map((r) => {
 					const chunk = getChunkById(db, r.chunkId);
@@ -1868,7 +1751,11 @@ export class KnowledgeEngine {
 					sourceChunkIds: [chunk.id],
 				});
 			}
-			const diversified = interleaveByFile(diversifyRankedChunks(ranked, diversity, vectorsByChunkId), diversity);
+			const diversified = interleaveByFile(
+				await diversifyRankedChunks(ranked, diversity, vectorsByChunkId, signal),
+				diversity,
+				signal,
+			);
 			const page = diversified.slice(offset, offset + limit);
 			const results = page.map((r) => {
 				const kb = kbById.get(r.chunk.kb_id);
@@ -1900,12 +1787,18 @@ export class KnowledgeEngine {
 				has_more: offset + limit < diversified.length,
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
-				tuning: tuningSummary,
+				tuning: {
+					...tuningSummary,
+					retrieved_candidates: unique.length,
+					filtered_candidates: filtered.length,
+					diversity_candidates: ranked.length,
+					candidate_pool_truncated: candidatePoolTruncated,
+				},
 			};
 		}
 
 		const ranked: RankedChunk[] = [];
-		for (const r of filtered) {
+		for (const r of candidatePool) {
 			throwIfAborted(signal);
 			const chunk = getChunkById(db, r.chunkId);
 			if (!chunk) continue;
@@ -1949,7 +1842,11 @@ export class KnowledgeEngine {
 			}
 		}
 
-		const diversified = interleaveByFile(diversifyRankedChunks(ranked, diversity, vectorsByChunkId), diversity);
+		const diversified = interleaveByFile(
+			await diversifyRankedChunks(ranked, diversity, vectorsByChunkId, signal),
+			diversity,
+			signal,
+		);
 		const total = diversified.length;
 		const page = diversified.slice(offset, offset + limit);
 		const results: SearchResult[] = page.map((r) => ({
@@ -1983,7 +1880,13 @@ export class KnowledgeEngine {
 			has_more: offset + limit < total,
 			warnings: warnings.length > 0 ? warnings : undefined,
 			mode_used: mode,
-			tuning: tuningSummary,
+			tuning: {
+				...tuningSummary,
+				retrieved_candidates: unique.length,
+				filtered_candidates: filtered.length,
+				diversity_candidates: ranked.length,
+				candidate_pool_truncated: candidatePoolTruncated,
+			},
 			suggestions:
 				results.length === 0
 					? [
@@ -2157,8 +2060,26 @@ export class KnowledgeEngine {
 		}
 
 		if (this.db) {
+			const activeEmbeddingConfig = resolveEmbeddingConfig();
 			for (const kb of kbs) {
 				throwIfAborted(signal);
+				if (
+					(kb.status === "ready" || kb.status === "stale") &&
+					kb.chunk_count > 0 &&
+					kb.embedding_dimension !== null &&
+					kb.embedding_signature !== embeddingSignature(activeEmbeddingConfig, kb.embedding_dimension)
+				) {
+					const canUpdate = kb.source_path !== null && kb.source_type !== "text";
+					issues.push({
+						severity: "warning",
+						kb_name: kb.name,
+						message: "This KB's vectors are incompatible with the active embedding provider or normalization policy.",
+						action: canUpdate
+							? "Run knowledge_update to rebuild vectors with the active embedding configuration."
+							: "Re-add inline text or re-import the original source with the active embedding configuration.",
+						action_code: "rebuild_vectors",
+					});
+				}
 				if (
 					(kb.status === "ready" || kb.status === "stale") &&
 					(storedSourcePolicyVersion(kb.source_options, "embedding_input_policy") ?? 0) < CURRENT_EMBEDDING_INPUT_POLICY

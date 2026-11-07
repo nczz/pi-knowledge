@@ -1,3 +1,5 @@
+import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
+
 type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
 type StorageRuntime = typeof import("./src/storage/sqlite.ts");
 type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
@@ -496,9 +498,23 @@ export default function (pi: ExtensionAPI) {
 					Type.Literal("docs"),
 				]),
 			),
-			limit: Type.Optional(Type.Number({ description: "Max results (default comes from search profile/env)" })),
+			limit: Type.Optional(
+				Type.Number({
+					description: "Max results (default comes from search profile/env)",
+					minimum: 1,
+					maximum: MAX_SEARCH_RESULTS,
+					multipleOf: 1,
+				}),
+			),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
-			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
+			offset: Type.Optional(
+				Type.Number({
+					description: `Pagination offset; offset + limit must not exceed ${MAX_SEARCH_WINDOW}`,
+					minimum: 0,
+					maximum: MAX_SEARCH_WINDOW - 1,
+					multipleOf: 1,
+				}),
+			),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 			path_pattern: Type.Optional(
 				Type.String({ description: "Filter by file path substring (for example src/engine.ts)" }),
@@ -544,7 +560,7 @@ export default function (pi: ExtensionAPI) {
 					response.retry_modes?.length ? `Retried: ${response.retry_modes.join(", ")}` : "",
 					response.warnings?.length ? `Warnings: ${response.warnings.join(" | ")}` : "",
 					diagnostics && response.tuning
-						? `Tuning: profile=${response.tuning.requested_profile}->${response.tuning.selected_profile}, limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.candidate_limit}`
+						? `Tuning: profile=${response.tuning.requested_profile}->${response.tuning.selected_profile}, limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, filtered=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
 						: "",
 					response.suggestions?.length ? `Suggestions: ${response.suggestions.join(" | ")}` : "",
 				]
@@ -583,7 +599,7 @@ export default function (pi: ExtensionAPI) {
 							: "";
 					const tuning =
 						diagnostics && response.tuning && i === 0
-							? `\nTuning: limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.candidate_limit}`
+							? `\nTuning: limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, filtered=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
 							: "";
 					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}${provenance}${tuning}`;
 				})

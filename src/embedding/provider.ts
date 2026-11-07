@@ -37,6 +37,7 @@ export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const LOCAL_EMBEDDING_MAX_TOKENS = 512;
 export const LOCAL_EMBEDDING_PREFERRED_TOKENS = 448;
 export const DEFAULT_API_MAX_EMBED_CHARS = 20_000;
+export const API_VECTOR_NORMALIZATION_POLICY = "client-l2-v1";
 const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_000);
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
 const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK === "local";
@@ -139,14 +140,29 @@ export function embeddingConfigLabel(config: EmbeddingConfig): string {
 	return config.provider === "local" ? config.model : `${config.provider}:${config.model}`;
 }
 
+export function normalizeEmbeddingVector(vector: Float32Array): Float32Array {
+	let squaredMagnitude = 0;
+	for (const value of vector) {
+		if (!Number.isFinite(value)) throw new Error("Embedding provider returned a non-finite vector value");
+		squaredMagnitude += value * value;
+	}
+	if (!Number.isFinite(squaredMagnitude) || squaredMagnitude <= 0) {
+		throw new Error("Embedding provider returned a zero-magnitude vector");
+	}
+	const magnitude = Math.sqrt(squaredMagnitude);
+	for (let index = 0; index < vector.length; index++) vector[index] /= magnitude;
+	return vector;
+}
+
 export function embeddingSignature(config: EmbeddingConfig, dimension: number): string {
 	const base = config.baseUrl ? `:base-sha256=${providerInstanceHash(config.baseUrl)}` : "";
+	const normalization = config.provider === "openai" ? API_VECTOR_NORMALIZATION_POLICY : String(config.normalize);
 	const parts = [
 		`${config.provider}:${config.model}${base}`,
 		`dim=${dimension}`,
 		`apiMax=${config.provider === "openai" ? config.maxChars : "none"}`,
 		`pooling=${config.pooling}`,
-		`normalize=${config.normalize}`,
+		`normalize=${normalization}`,
 		`q=${config.queryPrefix}`,
 		`d=${config.documentPrefix}`,
 	];
@@ -242,8 +258,36 @@ async function embedViaAPI(
 		const detail = await res.text().catch(() => "");
 		throw new Error(`OpenAI embedding API error: ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
 	}
-	const data = (await res.json()) as { data: Array<{ embedding: number[] }> };
-	return data.data.map((d) => new Float32Array(d.embedding));
+	const payload = (await res.json()) as unknown;
+	if (!payload || typeof payload !== "object" || !("data" in payload && Array.isArray(payload.data))) {
+		throw new Error("OpenAI embedding API response is missing a data array");
+	}
+	if (payload.data.length !== texts.length) {
+		throw new Error(`OpenAI embedding API returned ${payload.data.length} vectors for ${texts.length} inputs`);
+	}
+	let expectedDimension: number | undefined;
+	return payload.data.map((item, index) => {
+		if (!item || typeof item !== "object" || !("embedding" in item && Array.isArray(item.embedding))) {
+			throw new Error(`OpenAI embedding API response item ${index + 1} is missing an embedding array`);
+		}
+		if (expectedDimension !== undefined && item.embedding.length !== expectedDimension) {
+			throw new Error(
+				`OpenAI embedding API response item ${index + 1} has dimension ${item.embedding.length}; expected ${expectedDimension}`,
+			);
+		}
+		expectedDimension = item.embedding.length;
+		const vector = new Float32Array(item.embedding.length);
+		for (let valueIndex = 0; valueIndex < item.embedding.length; valueIndex++) {
+			const value = item.embedding[valueIndex];
+			if (typeof value !== "number" || !Number.isFinite(value)) {
+				throw new Error(
+					`OpenAI embedding API response item ${index + 1} contains a non-finite numeric value at position ${valueIndex}`,
+				);
+			}
+			vector[valueIndex] = value;
+		}
+		return normalizeEmbeddingVector(vector);
+	});
 }
 
 export async function embedTextsWithConfig(

@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Added bounded `knowledge_search` pagination (`limit` 1-50, `offset + limit` up to 800) and diagnostics for per-KB retrieval breadth, merged/filtered/diversity candidate counts, and global-pool truncation.
+- Added client-side validation and L2 normalization for OpenAI-compatible embedding vectors, with a signed normalization policy and `knowledge_doctor` rebuild guidance for older API-backed KBs.
+
 ### Changed
 - Reworked the quick start and added verified Pi and Oh My Pi upgrade guidance for npm and local sources, targeted updates, explicit-version pins, safe checkout updates, build activation, source verification, host restarts, and post-upgrade diagnostics.
 - Clarified host-specific storage, opt-in watcher/context injection, model-cache sizing, source-only architecture links, and the distinction between structured result text and custom TUI renderers.
+
+### Fixed
+- Reduced MMR-style diversity ranking from O(n³) repeated redundancy scans to behavior-preserving O(n²) running maxima, with cooperative event-loop yielding and cancellation checks (#21).
+- Bounded merged multi-KB candidates before deep reranking, adaptive expansion, and diversity so query-time work cannot grow unchecked with the number of selected KBs.
 
 ## [0.12.0] - 2026-10-19
 

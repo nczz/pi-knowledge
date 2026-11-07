@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveSearchTuning, summarizeSearchTuning } from "../../src/search/tuning.ts";
+import { resolveSearchTuning, resolveSearchWindow, summarizeSearchTuning } from "../../src/search/tuning.ts";
 
 describe("search tuning", () => {
 	beforeEach(() => {
@@ -21,6 +21,17 @@ describe("search tuning", () => {
 		expect(tuning.minHybridScore).toBe(0.4);
 		expect(summary.limit).toBe(8);
 		expect(summary.candidate_limit).toBe(64);
+	});
+
+	it("validates bounded integer pagination before retrieval", () => {
+		expect(resolveSearchWindow(undefined, undefined, 10)).toEqual({ limit: 10, offset: 0 });
+		expect(resolveSearchWindow(50, 750, 10)).toEqual({ limit: 50, offset: 750 });
+		expect(() => resolveSearchWindow(0, 0, 10)).toThrow("integer from 1 to 50");
+		expect(() => resolveSearchWindow(51, 0, 10)).toThrow("integer from 1 to 50");
+		expect(() => resolveSearchWindow(2.5, 0, 10)).toThrow("integer from 1 to 50");
+		expect(() => resolveSearchWindow(10, -1, 10)).toThrow("non-negative integer");
+		expect(() => resolveSearchWindow(10, 1.5, 10)).toThrow("non-negative integer");
+		expect(() => resolveSearchWindow(50, 751, 10)).toThrow("offset + limit must not exceed 800");
 	});
 
 	it("auto-selects precision for exact identifiers and long context for conceptual document searches", () => {

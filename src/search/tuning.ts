@@ -1,3 +1,4 @@
+import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./contracts.ts";
 import { MIN_HYBRID_SCORE } from "./ranking.ts";
 
 export type SearchProfile =
@@ -48,6 +49,11 @@ export interface SearchTuningSummary {
 	snippet_max_length: number;
 	min_hybrid_score: number;
 	candidate_limit: number;
+	retrieval_limit_per_kb: number;
+	retrieved_candidates: number;
+	filtered_candidates: number;
+	diversity_candidates: number;
+	candidate_pool_truncated: boolean;
 	candidate_min: number;
 	candidate_multiplier: number;
 	adaptive_context_lines: number;
@@ -62,6 +68,11 @@ interface SearchTuningInput {
 	mode: SearchModeForTuning;
 	profile?: SearchProfile;
 	kbSourceTypes: string[];
+}
+
+export interface SearchWindow {
+	limit: number;
+	offset: number;
 }
 
 const PROFILE_DEFAULTS: Record<RuntimeProfile, Omit<SearchTuning, "requestedProfile" | "selectedProfile">> = {
@@ -224,6 +235,27 @@ function chooseRuntimeProfile(input: SearchTuningInput): RuntimeProfile {
 	return "balanced";
 }
 
+export function resolveSearchWindow(
+	limit: number | undefined,
+	offset: number | undefined,
+	defaultLimit: number,
+): SearchWindow {
+	const resolvedLimit = limit ?? defaultLimit;
+	if (!Number.isInteger(resolvedLimit) || resolvedLimit < 1 || resolvedLimit > MAX_SEARCH_RESULTS) {
+		throw new Error(`Search limit must be an integer from 1 to ${MAX_SEARCH_RESULTS}`);
+	}
+	const resolvedOffset = offset ?? 0;
+	if (!Number.isInteger(resolvedOffset) || resolvedOffset < 0) {
+		throw new Error("Search offset must be a non-negative integer");
+	}
+	if (resolvedOffset + resolvedLimit > MAX_SEARCH_WINDOW) {
+		throw new Error(
+			`Search offset + limit must not exceed ${MAX_SEARCH_WINDOW}; narrow the query or use a more specific knowledge base`,
+		);
+	}
+	return { limit: resolvedLimit, offset: resolvedOffset };
+}
+
 export function resolveSearchTuning(input: SearchTuningInput): SearchTuning {
 	const requestedProfile = input.profile ?? parseProfile(process.env.PI_KNOWLEDGE_SEARCH_PROFILE) ?? "auto";
 	const selectedProfile = requestedProfile === "auto" ? chooseRuntimeProfile(input) : requestedProfile;
@@ -281,6 +313,11 @@ export function summarizeSearchTuning(
 		snippet_max_length: tuning.snippetMaxLength,
 		min_hybrid_score: tuning.minHybridScore,
 		candidate_limit: candidateLimit,
+		retrieval_limit_per_kb: candidateLimit,
+		retrieved_candidates: 0,
+		filtered_candidates: 0,
+		diversity_candidates: 0,
+		candidate_pool_truncated: false,
 		candidate_min: tuning.candidateMin,
 		candidate_multiplier: tuning.candidateMultiplier,
 		adaptive_context_lines: tuning.adaptiveContextLines,

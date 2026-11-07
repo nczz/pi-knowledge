@@ -74,6 +74,14 @@ FTS5 query builder 的 term filter 不能用 `length > 1`（CJK 逐字分隔後�
 
 SQLite FTS5 的 `bm25()` 分數是「越小越相關」。`KnowledgeEngine.search()` 對所有 search modes 的最終排序語意是「score 越大越相關」，所以 BM25 module 必須在 SQL 層 `ORDER BY bm25(chunks_fts)`，但回傳 `-bm25(chunks_fts) as score`。否則 `mode: "fast"` 會被 engine 的全域排序反轉。
 
+## Cross-KB candidates must be globally bounded before expensive ranking
+
+只限制每個 KB 的 retrieval `topK` 不等於限制整次搜尋。當同時搜尋多個 KB 時，候選數會乘上 KB 數量；若 adaptive expansion 或 MMR diversity 直接吃合併後的全部候選，CPU、記憶體與取消延遲都會隨 KB 數增加。
+
+正確順序是每個 KB 使用 bounded retrieval limit，合併後完成 query-aware ranking、confidence gate、排序與 metadata filter，再套用一次全域 candidate cap；deep rerank、adaptive expansion 與 diversity 只能處理這個 bounded pool。Public `limit` 必須在 1-50、`offset` 必須是非負整數，且 `offset + limit` 不得超過 800。Diagnostics 必須同時揭露 per-KB retrieval limit、retrieved/filtered/diversity counts 與 truncation，否則效能問題會被「結果只有十筆」掩蓋。
+
+MMR 如果每一輪對每個未選候選重新掃過所有已選結果，會形成 O(n³)。保留每個候選目前最大的 redundancy，選出新結果後只更新一次剩餘候選，可維持相同的 max-redundancy 公式與 stable tie order，並降為 O(n²)。CPU-bound loop 仍要定期檢查 `AbortSignal`、在 bounded slice 後讓出 event loop；只在外層 async function 檢查取消不足以提供可接受的互動性。
+
 ## URL source type 不能偷用 text
 
 URL indexing 如果把 `source_type` 存成 `text`，`knowledge_update` 會走本機檔案存在性檢查，對 `https://...` 永遠失敗。URL 必須是正式 source type，並在 update 時重新 fetch。
@@ -293,6 +301,8 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - add/update/import 的 document embedding API failure 不得 silent fallback 到 local。使用者明確設定 fallback 也只能用於 query-time degradation，不能用於產生 KB vectors。
 - `knowledge_update` 發現目前 embedding signature 與 KB metadata 不相容時，不能重用 unchanged chunk 的舊 vectors，必須完整重建 vectors。
 - `knowledge_search` 在 semantic/hybrid vector retrieval 前要檢查 KB signature/dimension。相容才可讀 vector file；不相容時 hybrid 可退回 BM25-only 並明確 warning，semantic 不可拿錯向量空間硬搜。
+
+OpenAI-compatible provider 不能假設服務端一定回傳 unit vectors。Dot product 只有在 query/document 都 L2-normalized 時才等同 cosine similarity；不同服務的向量 magnitude 會讓 ranking 和 diversity 權重失真。API response 必須拒絕 non-finite、zero-magnitude 與錯誤 vector count，並在 query 使用或 document persistence 前做 client-side L2 normalization。Normalization policy 必須寫進 embedding signature；舊 API KB 因 signature 不相容要由 `knowledge_doctor` 回報 `rebuild_vectors`，不能把未正規化舊向量和新 query 向量混用。
 
 
 ## Cancellation boundaries must preserve unrelated work
