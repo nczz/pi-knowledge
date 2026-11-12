@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-12
+
 ### Added
 - Added model-aware embedding input instructions with byte-compatible E5 `on`/`off`, Jina Code task presets, and exact custom query/document instructions (#22).
 - Added instruction-aware embedding signatures and indexed-versus-active compatibility details in `knowledge_status`, `knowledge_doctor`, search warnings, and update progress.
