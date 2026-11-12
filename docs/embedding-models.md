@@ -37,6 +37,20 @@
 - `PI_KNOWLEDGE_EMBEDDING_PREFIXES=on` 是預設值，會保留這些 E5-style prefixes。
 - `PI_KNOWLEDGE_EMBEDDING_PREFIXES=off` 只適合已用無 prefix 輸入驗證過的 embedding API 或模型；切換後 embedding signature 會不同，既有 KB 需要 `knowledge_update` 重建向量。預設 `on` 保持既有 signature 相容。
 
+### Jina Code 與 custom instruction
+
+OpenAI-compatible provider 可用 `PI_KNOWLEDGE_EMBEDDING_PREFIXES=jina-code`（`jina` 為 alias）套用 `jinaai/jina-code-embeddings-1.5b` 發布的 query/document prompts。Prompts 取自 model revision `39aeb4fb9b60f930934c78ae5d749a46287c248a` 的 `config_sentence_transformers.json`，支援 `nl2code`（預設）、`code2code`、`code2nl`、`code2completion`、`qa`。
+
+```bash
+PI_KNOWLEDGE_EMBEDDING=openai:jinaai/jina-code-embeddings-1.5b
+PI_KNOWLEDGE_EMBEDDING_PREFIXES=jina-code
+PI_KNOWLEDGE_EMBEDDING_TASK=nl2code
+```
+
+Preset 只負責輸入 instruction，**不會**改變外部 server 的 pooling 或 normalization。Server 必須依模型要求使用 last-token pooling 並輸出可正規化的 finite vectors；client 仍會執行 L2 normalization。模型目前發布約 3.09 GB BF16 權重，沒有本專案可直接使用的 ONNX artifact，而且授權為 CC-BY-NC-4.0；因此不取代 MIT、32 MB quantized 的本地 E5 預設，也不應在未確認授權時用於商業部署。
+
+其他 instructed models 使用 `PI_KNOWLEDGE_EMBEDDING_PREFIXES=custom`，並同時設定 query/document instruction。字串逐字串接，換行與尾端空白不會自動補上；signature 只保存 instruction hash，不保存原文。任何 strategy/task/instruction 變更都代表不同向量空間，既有 KB 必須 `knowledge_update`。
+
 ---
 
 ## 3. Quantized 品質數據
@@ -127,8 +141,10 @@ For external reranking, set `PI_KNOWLEDGE_RERANKER=api:<model>` plus `PI_KNOWLED
 | 明確啟用 native idle dispose | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` |
 | OpenAI embedding API | `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small` + `OPENAI_API_KEY` |
 | OpenAI-compatible self-hosted API | `PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1` or `OPENAI_BASE_URL=...` |
+| Jina Code instructions | `PI_KNOWLEDGE_EMBEDDING_PREFIXES=jina-code` + `PI_KNOWLEDGE_EMBEDDING_TASK=nl2code` |
+| Custom instructions | `PI_KNOWLEDGE_EMBEDDING_PREFIXES=custom` + explicit query/document instruction variables |
 | API input safety cap | `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS=20000` by default |
-| Explicit API failure fallback | `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local` |
+| Explicit API failure fallback | `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local` for E5 `on`/`off` only |
 
 > Stability note: local models run in a worker process and are not idle-disposed by default. On macOS arm64, loading the native ONNX backend in the Pi TUI process can make Pi abort on `/quit` with `mutex lock failed`.
 

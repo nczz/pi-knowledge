@@ -274,7 +274,27 @@ export PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
 # Set PI_KNOWLEDGE_EMBEDDING_API_KEY or OPENAI_API_KEY only if your endpoint requires bearer auth.
 ```
 
-API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files. Inputs are never silently truncated.
+Embedding input instructions must match the selected model. `PI_KNOWLEDGE_EMBEDDING_PREFIXES` accepts:
+
+| Value | Query/document input | Intended use |
+|-------|----------------------|--------------|
+| `on` or `e5` | `query: ` / `passage: ` | Default local `multilingual-e5-small`; byte-compatible with existing indexes |
+| `off` or `none` | Raw text | Models explicitly evaluated without instructions |
+| `jina` or `jina-code` | Published Jina Code task prompts | `jinaai/jina-code-embeddings-1.5b` through an OpenAI-compatible endpoint |
+| `custom` | Exact configured query/document instructions | Other instructed embedding models |
+
+Jina Code example:
+
+```bash
+export PI_KNOWLEDGE_EMBEDDING=openai:jinaai/jina-code-embeddings-1.5b
+export PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
+export PI_KNOWLEDGE_EMBEDDING_PREFIXES=jina-code
+export PI_KNOWLEDGE_EMBEDDING_TASK=nl2code
+```
+
+The Jina preset controls input text only. The embedding server must independently implement the model's required last-token pooling and vector normalization. For custom instructions, set `PI_KNOWLEDGE_EMBEDDING_PREFIXES=custom` plus both `PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION` and `PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION`; values are concatenated verbatim, so include delimiters such as a trailing newline.
+
+API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files. Local fallback is rejected during configuration when `jina-code` or `custom` instructions are selected because the local E5 model cannot reproduce those inputs. Inputs are never silently truncated.
 
 OpenAI-compatible API vectors are validated and L2-normalized by the client before query use or persistence, so cosine-style dot products do not depend on a provider-specific vector magnitude. This normalization policy is part of the embedding signature. KBs created with an older API signature must run `knowledge_update`; `knowledge_doctor` reports `rebuild_vectors` when the active provider no longer matches stored vector semantics.
 
@@ -282,7 +302,7 @@ OpenAI-compatible embedding inputs use a 20000-character complete-input safety c
 
 For self-hosted servers with smaller request limits, set `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE` to the maximum number of chunk inputs the server accepts per embedding request.
 
-Stored KB metadata includes the embedding model, vector dimension, and a non-secret embedding signature. If the current query embedding is incompatible with a KB's stored vectors, or if an older KB has no signature metadata, `knowledge_search` skips vector retrieval for that KB and reports a warning; run `knowledge_update` after changing embedding providers or upgrading older KBs.
+Stored KB metadata includes the embedding model, vector dimension, and a non-secret embedding signature containing the exact instruction strategy/task/hash. If the current query embedding is incompatible with a KB's stored vectors, or if an older KB has no signature metadata, `knowledge_search` skips vector retrieval for that KB and reports the specific mismatch; `knowledge_status` shows indexed versus active model/decoration and includes mismatches in aggregate health. Run `knowledge_update` after changing embedding providers, models, tasks, or instructions.
 
 ## Configuration
 
@@ -292,7 +312,7 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 |------|-----------------------|
 | Storage path | `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR`, `OMP_PROFILE` |
 | Model worker and cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
-| Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `PI_KNOWLEDGE_EMBEDDING_API_KEY`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_PREFIXES`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
+| Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `PI_KNOWLEDGE_EMBEDDING_API_KEY`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_PREFIXES`, `PI_KNOWLEDGE_EMBEDDING_TASK`, `PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
 | Reranker provider | `PI_KNOWLEDGE_RERANKER`, `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE`, `PI_KNOWLEDGE_RERANKER_RAW_LOGITS`, `PI_KNOWLEDGE_RERANKER_API_ENDPOINT`, `PI_KNOWLEDGE_RERANKER_API_BASE_URL`, `PI_KNOWLEDGE_RERANKER_API_KEY`, `PI_KNOWLEDGE_RERANKER_API_FORMAT`, `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS`, `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS`, `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH`, `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` |
 | Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
 | Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT`, `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER`, `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES`, `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS`, `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET`, `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES`, `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` |

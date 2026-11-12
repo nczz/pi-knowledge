@@ -1,18 +1,37 @@
 import { createHash } from "node:crypto";
 import { embedInModelWorker, measureEmbeddingInputInModelWorker } from "../model-worker-client.ts";
+import {
+	decorateEmbeddingInput,
+	decorationSupportedByLocalModel,
+	type EmbeddingDecorationStrategy,
+	type EmbeddingInstructionSet,
+	type EmbeddingPrefixMode,
+	type EmbeddingRole,
+	type EmbeddingTask,
+	embeddingDecorationDescriptor,
+	embeddingInstructionLength,
+	type ResolvedEmbeddingDecoration,
+	resolveEmbeddingDecoration,
+} from "./instructions.ts";
 
+export type {
+	EmbeddingDecorationStrategy,
+	EmbeddingInstructionSet,
+	EmbeddingRole,
+	EmbeddingTask,
+} from "./instructions.ts";
 export type EmbeddingProvider = "local" | "openai";
-export type EmbeddingPrefix = "query" | "passage";
-export type EmbeddingPrefixStrategy = "on" | "off";
 
 export interface EmbeddingConfig {
 	provider: EmbeddingProvider;
 	model: string;
 	baseUrl?: string;
 	maxChars: number;
-	queryPrefix: "query";
-	documentPrefix: "passage";
-	prefixes: EmbeddingPrefixStrategy;
+	strategy: EmbeddingDecorationStrategy;
+	task?: EmbeddingTask;
+	instructions: EmbeddingInstructionSet;
+	prefixMode: EmbeddingPrefixMode;
+	apiFallbackToLocal: boolean;
 	pooling: "mean";
 	normalize: true;
 }
@@ -22,6 +41,25 @@ export interface EmbeddingInputMeasurement {
 	maximum: number;
 	preferredMaximum: number;
 	unit: "tokens" | "characters";
+}
+
+export type EmbeddingCompatibilityCause =
+	| "match"
+	| "unrecorded"
+	| "dimension"
+	| "decoration"
+	| "configuration"
+	| "signature_format";
+
+export interface EmbeddingCompatibility {
+	compatible: boolean;
+	cause: EmbeddingCompatibilityCause;
+	activeSignature: string;
+	recordedSignature: string | null;
+	activeDecoration: string;
+	recordedDecoration?: string;
+	activeDimension: number;
+	recordedDimension: number | null;
 }
 
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -40,20 +78,22 @@ export const DEFAULT_API_MAX_EMBED_CHARS = 20_000;
 export const API_VECTOR_NORMALIZATION_POLICY = "client-l2-v1";
 const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_000);
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
-const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK === "local";
 
-function localEmbeddingConfig(maxChars: number, prefixes: EmbeddingPrefixStrategy): EmbeddingConfig {
+function localEmbeddingConfig(maxChars: number, decoration: ResolvedEmbeddingDecoration): EmbeddingConfig {
 	return {
 		provider: "local",
 		model: DEFAULT_LOCAL_EMBEDDING_MODEL,
 		maxChars,
-		queryPrefix: "query",
-		documentPrefix: "passage",
-		prefixes,
+		strategy: decoration.strategy,
+		task: decoration.task,
+		instructions: decoration.instructions,
+		prefixMode: decoration.prefixMode,
+		apiFallbackToLocal: false,
 		pooling: "mean",
 		normalize: true,
 	};
 }
+
 function cleanEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
@@ -64,7 +104,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function clearIdleTimer(): void {
-	if (disposeTimer) clearTimeout(disposeTimer);
+	clearTimeout(disposeTimer ?? undefined);
 	disposeTimer = null;
 }
 
@@ -87,20 +127,26 @@ function endRun(): void {
 	if (!disposeRequested) scheduleIdleDispose();
 }
 
-function waitForNoActiveRuns(): Promise<void> {
-	if (activeRuns === 0) return Promise.resolve();
-	return new Promise((resolve) => idleWaiters.push(resolve));
+async function waitForNoActiveRuns(): Promise<void> {
+	if (activeRuns === 0) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	idleWaiters.push(resolve);
+	await promise;
 }
 
 function providerInstanceHash(value: string): string {
 	return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
-function resolveEmbeddingPrefixStrategy(env: NodeJS.ProcessEnv): EmbeddingPrefixStrategy {
-	const raw = cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_PREFIXES)?.toLowerCase();
-	if (!raw) return "on";
-	if (raw === "on" || raw === "off") return raw;
-	throw new Error(`Unsupported embedding prefix strategy: ${raw}. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on or off.`);
+function assertApiInstructionBudget(config: EmbeddingConfig): void {
+	for (const role of ["query", "passage"] as const) {
+		const instructionLength = embeddingInstructionLength(config.instructions, role);
+		if (instructionLength >= config.maxChars) {
+			throw new Error(
+				`Embedding ${role} instruction is ${instructionLength} characters; PI_KNOWLEDGE_EMBEDDING_MAX_CHARS=${config.maxChars} must leave room for input text.`,
+			);
+		}
+	}
 }
 
 export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): EmbeddingConfig {
@@ -111,28 +157,50 @@ export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Em
 	const maxCharsValue = Number(cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_MAX_CHARS) ?? DEFAULT_API_MAX_EMBED_CHARS);
 	const maxChars =
 		Number.isFinite(maxCharsValue) && maxCharsValue > 0 ? Math.trunc(maxCharsValue) : DEFAULT_API_MAX_EMBED_CHARS;
-	const prefixes = resolveEmbeddingPrefixStrategy(env);
+	const decoration = resolveEmbeddingDecoration(env);
+	const fallback = cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK)?.toLowerCase();
+	if (fallback && fallback !== "local") {
+		throw new Error("Unsupported embedding API fallback. Use PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local or unset it.");
+	}
+	const apiFallbackToLocal = fallback === "local";
+
 	if (provider === "local") {
 		const localModel = model || DEFAULT_LOCAL_EMBEDDING_MODEL;
 		if (localModel !== DEFAULT_LOCAL_EMBEDDING_MODEL) {
 			throw new Error(`Unsupported local embedding model: ${localModel}`);
 		}
-		return localEmbeddingConfig(maxChars, prefixes);
+		if (!decorationSupportedByLocalModel(decoration.strategy)) {
+			throw new Error(
+				`Embedding decoration ${decoration.strategy} is not supported for the local embedding model. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on|off|e5|none, or an OpenAI-compatible provider.`,
+			);
+		}
+		return localEmbeddingConfig(maxChars, decoration);
 	}
+
 	if (provider === "openai") {
-		return {
+		if (apiFallbackToLocal && !decorationSupportedByLocalModel(decoration.strategy)) {
+			throw new Error(
+				`PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local is incompatible with embedding decoration ${decoration.strategy}; the local model supports only E5 prefixes or none.`,
+			);
+		}
+		const config: EmbeddingConfig = {
 			provider: "openai",
 			model: model || DEFAULT_OPENAI_EMBEDDING_MODEL,
 			baseUrl:
 				cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_BASE_URL) ?? cleanEnv(env.OPENAI_BASE_URL) ?? DEFAULT_OPENAI_BASE_URL,
 			maxChars,
-			queryPrefix: "query",
-			documentPrefix: "passage",
-			prefixes,
+			strategy: decoration.strategy,
+			task: decoration.task,
+			instructions: decoration.instructions,
+			prefixMode: decoration.prefixMode,
+			apiFallbackToLocal,
 			pooling: "mean",
 			normalize: true,
 		};
+		assertApiInstructionBudget(config);
+		return config;
 	}
+
 	throw new Error(`Unsupported embedding provider: ${provider}`);
 }
 
@@ -154,28 +222,96 @@ export function normalizeEmbeddingVector(vector: Float32Array): Float32Array {
 	return vector;
 }
 
+export function describeEmbeddingDecoration(config: EmbeddingConfig): string {
+	return embeddingDecorationDescriptor({
+		strategy: config.strategy,
+		task: config.task,
+		instructions: config.instructions,
+		prefixMode: config.prefixMode,
+	});
+}
+
 export function embeddingSignature(config: EmbeddingConfig, dimension: number): string {
 	const base = config.baseUrl ? `:base-sha256=${providerInstanceHash(config.baseUrl)}` : "";
 	const normalization = config.provider === "openai" ? API_VECTOR_NORMALIZATION_POLICY : String(config.normalize);
-	const parts = [
+	return [
 		`${config.provider}:${config.model}${base}`,
 		`dim=${dimension}`,
 		`apiMax=${config.provider === "openai" ? config.maxChars : "none"}`,
 		`pooling=${config.pooling}`,
 		`normalize=${normalization}`,
-		`q=${config.queryPrefix}`,
-		`d=${config.documentPrefix}`,
-	];
-	if (config.prefixes === "off") parts.push("prefixes=off");
-	return parts.join(":");
+		describeEmbeddingDecoration(config),
+	].join(":");
 }
 
-export async function dispose(): Promise<void> {
+const RECORDED_DECORATION_PATTERN =
+	/:(q=query:d=passage(?::prefixes=off)?|strategy=(?:jina-code|custom)(?::task=[a-z0-9-]+)?:ih=[0-9a-f]{12})$/;
+
+export function recordedEmbeddingDecoration(signature: string | null): string | undefined {
+	if (!signature) return undefined;
+	return RECORDED_DECORATION_PATTERN.exec(signature)?.[1];
+}
+
+export function inspectEmbeddingCompatibility(
+	recordedSignature: string | null,
+	recordedDimension: number | null,
+	config: EmbeddingConfig,
+	activeDimension: number,
+): EmbeddingCompatibility {
+	const activeSignature = embeddingSignature(config, activeDimension);
+	const activeDecoration = describeEmbeddingDecoration(config);
+	const base = {
+		activeSignature,
+		recordedSignature,
+		activeDecoration,
+		activeDimension,
+		recordedDimension,
+	};
+	if (!recordedSignature || recordedDimension === null) {
+		return { ...base, compatible: false, cause: "unrecorded" };
+	}
+	const recordedDecoration = recordedEmbeddingDecoration(recordedSignature);
+	if (recordedDimension !== activeDimension) {
+		return { ...base, compatible: false, cause: "dimension", recordedDecoration };
+	}
+	if (recordedSignature === activeSignature) {
+		return { ...base, compatible: true, cause: "match", recordedDecoration };
+	}
+	if (!recordedDecoration) {
+		return { ...base, compatible: false, cause: "signature_format" };
+	}
+	if (recordedDecoration !== activeDecoration) {
+		const recordedBase = recordedSignature.slice(0, recordedSignature.length - recordedDecoration.length - 1);
+		const activeBase = activeSignature.slice(0, activeSignature.length - activeDecoration.length - 1);
+		if (recordedBase === activeBase) {
+			return { ...base, compatible: false, cause: "decoration", recordedDecoration };
+		}
+	}
+	return { ...base, compatible: false, cause: "configuration", recordedDecoration };
+}
+
+export function describeEmbeddingCompatibility(compatibility: EmbeddingCompatibility): string {
+	switch (compatibility.cause) {
+		case "match":
+			return "indexed vectors match the active embedding configuration";
+		case "unrecorded":
+			return "the indexed embedding signature or dimension is missing";
+		case "dimension":
+			return `indexed dimension ${compatibility.recordedDimension ?? "unknown"} differs from active dimension ${compatibility.activeDimension}`;
+		case "decoration":
+			return `indexed decoration ${compatibility.recordedDecoration ?? "unknown"} differs from active decoration ${compatibility.activeDecoration}`;
+		case "configuration":
+			return "the indexed provider, model, endpoint, input limit, pooling, or normalization differs from the active configuration";
+		case "signature_format":
+			return "the indexed embedding signature cannot be interpreted";
+	}
+}
+
+export function dispose(): Promise<void> {
 	clearIdleTimer();
 	if (disposePromise) return disposePromise;
 	disposeRequested = true;
-	await waitForNoActiveRuns();
-	disposePromise = Promise.resolve().finally(() => {
+	disposePromise = waitForNoActiveRuns().finally(() => {
 		disposePromise = null;
 		disposeRequested = false;
 	});
@@ -187,28 +323,32 @@ export async function prepareForShutdown(): Promise<void> {
 	await waitForNoActiveRuns();
 }
 
-function applyEmbeddingPrefix(text: string, prefix: EmbeddingPrefix, config: EmbeddingConfig): string {
-	return config.prefixes === "on" ? `${prefix}: ${text}` : text;
+function prepareEmbeddingInputs(texts: string[], role: EmbeddingRole, config: EmbeddingConfig): string[] {
+	return texts.map((text) => decorateEmbeddingInput(text, role, config.instructions));
+}
+
+function apiInputMeasurement(preparedInputs: string[], config: EmbeddingConfig): EmbeddingInputMeasurement {
+	return {
+		counts: preparedInputs.map((text) => text.length),
+		maximum: config.maxChars,
+		preferredMaximum: Math.max(1, Math.floor(config.maxChars * 0.875)),
+		unit: "characters",
+	};
 }
 
 export async function measureEmbeddingInputs(
 	texts: string[],
-	prefix: EmbeddingPrefix,
+	role: EmbeddingRole,
 	config: EmbeddingConfig,
 	signal?: AbortSignal,
 ): Promise<EmbeddingInputMeasurement> {
 	if (signal?.aborted) throw new Error("Cancelled");
 	if (config.provider === "openai") {
-		return {
-			counts: texts.map((text) => applyEmbeddingPrefix(text, prefix, config).length),
-			maximum: config.maxChars,
-			preferredMaximum: Math.max(1, Math.floor(config.maxChars * 0.875)),
-			unit: "characters",
-		};
+		return apiInputMeasurement(prepareEmbeddingInputs(texts, role, config), config);
 	}
 	beginRun();
 	try {
-		const measurement = await measureEmbeddingInputInModelWorker(texts, prefix, config.prefixes, signal);
+		const measurement = await measureEmbeddingInputInModelWorker(texts, role, config.prefixMode, signal);
 		return {
 			...measurement,
 			preferredMaximum: Math.max(1, Math.floor(measurement.maximum * 0.875)),
@@ -219,30 +359,35 @@ export async function measureEmbeddingInputs(
 	}
 }
 
-async function assertEmbeddingInputsWithinBudget(
-	texts: string[],
-	prefix: EmbeddingPrefix,
-	config: EmbeddingConfig,
-	signal?: AbortSignal,
-): Promise<void> {
-	const measurement = await measureEmbeddingInputs(texts, prefix, config, signal);
+function assertMeasurementWithinBudget(
+	measurement: EmbeddingInputMeasurement,
+	role: EmbeddingRole,
+	provider: EmbeddingProvider,
+): void {
 	for (let index = 0; index < measurement.counts.length; index++) {
 		const count = measurement.counts[index];
 		if (count !== undefined && count > measurement.maximum) {
 			throw new Error(
-				`${config.provider} embedding ${prefix} input ${index + 1} is ${count} ${measurement.unit}; maximum is ${measurement.maximum}. Split the input before embedding.`,
+				`${provider} embedding ${role} input ${index + 1} is ${count} ${measurement.unit}; maximum is ${measurement.maximum}. Split the input before embedding.`,
 			);
 		}
 	}
 }
 
-async function embedViaAPI(
+async function assertLocalInputsWithinBudget(
 	texts: string[],
-	prefix: EmbeddingPrefix,
+	role: EmbeddingRole,
+	config: EmbeddingConfig,
+	signal?: AbortSignal,
+): Promise<void> {
+	assertMeasurementWithinBudget(await measureEmbeddingInputs(texts, role, config, signal), role, config.provider);
+}
+
+async function embedPreparedInputsViaAPI(
+	preparedInputs: string[],
 	config: EmbeddingConfig,
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	const safeTexts = texts.map((text) => applyEmbeddingPrefix(text, prefix, config));
 	const apiKey = cleanEnv(process.env.PI_KNOWLEDGE_EMBEDDING_API_KEY) ?? cleanEnv(process.env.OPENAI_API_KEY);
 	if (!config.baseUrl) throw new Error("OpenAI embedding base URL is not configured");
 	const endpoint = new URL("embeddings", `${config.baseUrl.replace(/\/+$/, "")}/`);
@@ -251,7 +396,7 @@ async function embedViaAPI(
 	const res = await fetch(endpoint, {
 		method: "POST",
 		headers,
-		body: JSON.stringify({ input: safeTexts, model: config.model }),
+		body: JSON.stringify({ input: preparedInputs, model: config.model }),
 		signal,
 	});
 	if (!res.ok) {
@@ -262,8 +407,8 @@ async function embedViaAPI(
 	if (!payload || typeof payload !== "object" || !("data" in payload && Array.isArray(payload.data))) {
 		throw new Error("OpenAI embedding API response is missing a data array");
 	}
-	if (payload.data.length !== texts.length) {
-		throw new Error(`OpenAI embedding API returned ${payload.data.length} vectors for ${texts.length} inputs`);
+	if (payload.data.length !== preparedInputs.length) {
+		throw new Error(`OpenAI embedding API returned ${payload.data.length} vectors for ${preparedInputs.length} inputs`);
 	}
 	let expectedDimension: number | undefined;
 	return payload.data.map((item, index) => {
@@ -292,7 +437,7 @@ async function embedViaAPI(
 
 export async function embedTextsWithConfig(
 	texts: string[],
-	prefix: EmbeddingPrefix,
+	role: EmbeddingRole,
 	signal?: AbortSignal,
 	options: { allowApiFallback?: boolean; inputValidated?: boolean } = {},
 ): Promise<{ vectors: Float32Array[]; config: EmbeddingConfig }> {
@@ -300,24 +445,35 @@ export async function embedTextsWithConfig(
 	let actualConfig = config;
 	let inputValidated = options.inputValidated === true;
 	if (config.provider === "openai") {
-		if (!inputValidated) await assertEmbeddingInputsWithinBudget(texts, prefix, config, signal);
+		const preparedInputs = prepareEmbeddingInputs(texts, role, config);
+		if (!inputValidated) {
+			assertMeasurementWithinBudget(apiInputMeasurement(preparedInputs, config), role, config.provider);
+		}
 		if (signal?.aborted) throw new Error("Cancelled");
 		try {
-			return { vectors: await embedViaAPI(texts, prefix, config, signal), config };
+			return { vectors: await embedPreparedInputsViaAPI(preparedInputs, config, signal), config };
 		} catch (error) {
 			if (signal?.aborted || isAbortError(error)) throw new Error("Cancelled");
-			if (!API_FALLBACK_TO_LOCAL || !options.allowApiFallback) throw error;
+			if (!config.apiFallbackToLocal || !options.allowApiFallback) throw error;
 			console.warn(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
 			);
-			actualConfig = localEmbeddingConfig(config.maxChars, config.prefixes);
+			actualConfig = localEmbeddingConfig(config.maxChars, {
+				strategy: config.strategy,
+				task: config.task,
+				instructions: config.instructions,
+				prefixMode: config.prefixMode,
+			});
 			inputValidated = false;
 		}
 	}
-	if (!inputValidated) await assertEmbeddingInputsWithinBudget(texts, prefix, actualConfig, signal);
+	if (!inputValidated) await assertLocalInputsWithinBudget(texts, role, actualConfig, signal);
 	beginRun();
 	try {
-		return { vectors: await embedInModelWorker(texts, prefix, actualConfig.prefixes, signal), config: actualConfig };
+		return {
+			vectors: await embedInModelWorker(texts, role, actualConfig.prefixMode, signal),
+			config: actualConfig,
+		};
 	} finally {
 		endRun();
 	}
@@ -325,11 +481,11 @@ export async function embedTextsWithConfig(
 
 export async function embedTexts(
 	texts: string[],
-	prefix: EmbeddingPrefix,
+	role: EmbeddingRole,
 	signal?: AbortSignal,
 	options: { allowApiFallback?: boolean; inputValidated?: boolean } = {},
 ): Promise<Float32Array[]> {
-	return (await embedTextsWithConfig(texts, prefix, signal, options)).vectors;
+	return (await embedTextsWithConfig(texts, role, signal, options)).vectors;
 }
 
 export async function embedQueryWithConfig(
@@ -337,7 +493,9 @@ export async function embedQueryWithConfig(
 	signal?: AbortSignal,
 ): Promise<{ vector: Float32Array; config: EmbeddingConfig }> {
 	const { vectors, config } = await embedTextsWithConfig([text], "query", signal, { allowApiFallback: true });
-	return { vector: vectors[0], config };
+	const vector = vectors[0];
+	if (!vector) throw new Error("Embedding provider returned no query vector");
+	return { vector, config };
 }
 
 export async function embedQuery(text: string, signal?: AbortSignal): Promise<Float32Array> {

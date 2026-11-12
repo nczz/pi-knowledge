@@ -1,5 +1,12 @@
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import {
+	decorateEmbeddingInput,
+	E5_INSTRUCTIONS,
+	type EmbeddingPrefixMode,
+	type EmbeddingRole,
+	NO_INSTRUCTIONS,
+} from "./embedding/instructions.ts";
 import type { HfRerankerConfig } from "./search/reranker-config.ts";
 import {
 	DEFAULT_RERANKER_REMOTE_HOST,
@@ -42,16 +49,16 @@ type EmbedRequest = {
 	id: number;
 	type: "embed";
 	texts: string[];
-	prefix: "query" | "passage";
-	prefixes: "on" | "off";
+	prefix: EmbeddingRole;
+	prefixes: EmbeddingPrefixMode;
 };
 
 type MeasureEmbeddingInputRequest = {
 	id: number;
 	type: "measure_embedding_input";
 	texts: string[];
-	prefix: "query" | "passage";
-	prefixes: "on" | "off";
+	prefix: EmbeddingRole;
+	prefixes: EmbeddingPrefixMode;
 };
 
 type RerankRequest = {
@@ -141,8 +148,8 @@ async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerP
 	return loaded;
 }
 
-function applyEmbeddingPrefix(text: string, prefix: "query" | "passage", prefixes: "on" | "off"): string {
-	return prefixes === "on" ? `${prefix}: ${text}` : text;
+function applyEmbeddingPrefix(text: string, role: EmbeddingRole, prefixes: EmbeddingPrefixMode): string {
+	return decorateEmbeddingInput(text, role, prefixes === "on" ? E5_INSTRUCTIONS : NO_INSTRUCTIONS);
 }
 
 async function handleEmbed(request: EmbedRequest): Promise<number[][]> {

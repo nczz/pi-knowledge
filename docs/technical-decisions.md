@@ -405,3 +405,31 @@
 - Candidate budget、pagination validation、diversity 與 diagnostics 是 query-time 行為，既有 KB 立即受益。
 - Local embedding signature 不變。
 - 舊 OpenAI-compatible KB signature 不含 `client-l2-v1`，必須執行 `knowledge_update`；inline/import KB 應從原始來源重新建立。
+
+---
+
+## ADR-022: Embedding input instruction registry 與嚴格向量相容性
+
+**狀態**: 已決定
+
+**背景**: E5 需要 `query: ` / `passage: `，Jina Code 與其他 instructed embedding models 則需要不同的 query/document instructions。把所有模型只歸類為 prefix on/off 會造成兩種風險：送出模型未訓練過的輸入格式，或在 query/index 兩側使用不同 instruction 但仍誤判 vectors 相容。外部 server 的 pooling/normalization 也不是文字 preset 能代替的行為。
+
+**決策**:
+- 建立單一 instruction registry，strategy 為 `e5`、`none`、`jina-code`、`custom`；`on`/`off` 與 `jina` 保留為輸入 alias。
+- Jina Code task prompts 固定取自 model revision `39aeb4fb9b60f930934c78ae5d749a46287c248a`，task 為 `nl2code`、`code2code`、`code2nl`、`code2completion`、`qa`。
+- Custom query/document instructions 必須成對設定，保留原始 whitespace，只接受 printable Unicode 與 newline，單一 instruction 最長 512 characters。Raw instructions 不寫入 signature 或 status。
+- OpenAI-compatible path 先產生一次完整 input batch；同一批字串同時用於 safety-cap validation 與 HTTP body，避免 measurement/send 兩次 decoration 漂移。
+- Signature 納入 strategy、task 與 instruction hash。既有 E5 `on` 與 `off` signature bytes 不變；新策略沒有 compatibility shim。
+- Search、update、doctor、status 共用結構化 compatibility result，區分 missing metadata、dimension、decoration、provider/config 與無法解析的 signature。Mismatch 不能顯示 healthy，也不能重用 unchanged vectors。
+- Local E5 worker 只支援 `e5`/`none`。`jina-code`/`custom` 搭配 `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local` 在 config resolution 階段直接拒絕。
+
+**理由**:
+- Instruction 是 embedding 模型合約的一部分，不是顯示層 prefix；索引與查詢必須逐 byte 一致。
+- Registry 讓 built-in prompts 可稽核，custom 保留其他 provider 彈性，同時避免把可能敏感的 instruction 原文寫入 metadata。
+- 單次 prepared batch 保證 budget 計算、送出內容與 signature 所代表的策略一致。
+- 明確 compatibility cause 讓使用者知道是 task/instruction、dimension 或 provider 變更，而不是只看到籠統的「metadata changed」。
+
+**限制與升級邊界**:
+- Jina preset 只裝飾文字；server 仍必須依模型要求實作 last-token pooling 與 normalization。
+- `jinaai/jina-code-embeddings-1.5b` 的 CC-BY-NC-4.0 授權、約 3.09 GB BF16 權重與缺少適用 ONNX artifact，使它只作為 opt-in API preset，不取代本地 E5 預設。
+- Strategy、task 或 instruction 改變後，file/directory/URL KB 執行 `knowledge_update`；inline/import KB 從原始來源重建。

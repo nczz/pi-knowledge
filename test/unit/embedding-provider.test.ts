@@ -191,14 +191,68 @@ describe("embedding provider", () => {
 		expect(workerMock.embedInModelWorker).toHaveBeenCalledWith(["hello"], "passage", "off", undefined);
 	});
 
-	it("rejects unsupported embedding prefix strategies", async () => {
+	it("rejects unsupported embedding decoration strategies", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "disabled");
 
 		const { resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
 
 		expect(() => resolveEmbeddingConfig()).toThrow(
-			"Unsupported embedding prefix strategy: disabled. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on or off.",
+			"Unsupported embedding decoration strategy: disabled. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on|off|e5|none|jina|jina-code|custom.",
 		);
+	});
+
+	it("sends one prepared multilingual input batch without altering custom instructions", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:跨語言模型");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "custom");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION", "檢索最相關的程式碼：\n");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION", "候選程式碼：\n");
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse({ data: [{ embedding: [0.1, 0.2] }, { embedding: [0.2, 0.1] }] }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["驗證 OAuth 權杖", "function 讀取設定() {}"]);
+
+		expect(fetchMock).toHaveBeenCalledOnce();
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(String(init?.body)) as { input: string[] };
+		expect(body.input).toEqual(["候選程式碼：\n驗證 OAuth 權杖", "候選程式碼：\nfunction 讀取設定() {}"]);
+	});
+
+	it("rejects local fallback for instructions the local E5 model cannot reproduce", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:jinaai/jina-code-embeddings-1.5b");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "jina");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_FALLBACK", "local");
+
+		const { resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+
+		expect(() => resolveEmbeddingConfig()).toThrow(
+			"PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local is incompatible with embedding decoration jina-code",
+		);
+	});
+
+	it("keeps a stale API fallback setting harmless when the active provider is local", async () => {
+		const { resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+		const config = resolveEmbeddingConfig({
+			PI_KNOWLEDGE_EMBEDDING: "local:multilingual-e5-small",
+			PI_KNOWLEDGE_EMBEDDING_API_FALLBACK: "local",
+		});
+
+		expect(config.provider).toBe("local");
+		expect(config.apiFallbackToLocal).toBe(false);
+	});
+
+	it("rejects instructions that leave no room under the API input cap", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:跨語言模型");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "custom");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION", "請找出符合條件的內容：");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION", "候選文件：");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_MAX_CHARS", "8");
+
+		const { resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+
+		expect(() => resolveEmbeddingConfig()).toThrow("must leave room for input text");
 	});
 
 	it("passes AbortSignal to OpenAI-compatible embedding fetch", async () => {
@@ -268,6 +322,29 @@ describe("embedding provider", () => {
 		expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("falling back to local model"));
 	});
 
+	it("single-flights concurrent dispose calls while an embedding run is active", async () => {
+		const pending = Promise.withResolvers<Array<Float32Array<ArrayBuffer>>>();
+		workerMock.embedInModelWorker.mockReturnValueOnce(pending.promise);
+		const { dispose, embedDocuments } = await import("../../src/embedding/provider.ts");
+		const embedding = embedDocuments(["並行生命週期驗證"]);
+		await vi.waitFor(() => expect(workerMock.embedInModelWorker).toHaveBeenCalledOnce());
+
+		const firstDispose = dispose();
+		const secondDispose = dispose();
+		expect(secondDispose).toBe(firstDispose);
+		let disposed = false;
+		void firstDispose.then(() => {
+			disposed = true;
+		});
+		await Promise.resolve();
+		expect(disposed).toBe(false);
+
+		pending.resolve([new Float32Array([0.5, 0.5])]);
+		await embedding;
+		await firstDispose;
+		expect(disposed).toBe(true);
+	});
+
 	it("builds stable embedding signatures without storing API keys", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:text-embedding-3-small");
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://internal.example/v1");
@@ -296,5 +373,55 @@ describe("embedding provider", () => {
 
 		expect(signature).toContain("prefixes=off");
 		expect(signature).not.toContain("internal.example");
+	});
+	it("keeps existing local and API E5 signatures byte-compatible", async () => {
+		const { embeddingSignature, resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+		const enabled = embeddingSignature(resolveEmbeddingConfig({}), 384);
+		const disabled = embeddingSignature(resolveEmbeddingConfig({ PI_KNOWLEDGE_EMBEDDING_PREFIXES: "off" }), 384);
+		const api = embeddingSignature(
+			resolveEmbeddingConfig({ PI_KNOWLEDGE_EMBEDDING: "openai:text-embedding-3-small" }),
+			1536,
+		);
+
+		expect(enabled).toBe(
+			"local:multilingual-e5-small:dim=384:apiMax=none:pooling=mean:normalize=true:q=query:d=passage",
+		);
+		expect(disabled).toBe(
+			"local:multilingual-e5-small:dim=384:apiMax=none:pooling=mean:normalize=true:q=query:d=passage:prefixes=off",
+		);
+		expect(api).toBe(
+			"openai:text-embedding-3-small:base-sha256=d9617135d6fd:dim=1536:apiMax=20000:pooling=mean:normalize=client-l2-v1:q=query:d=passage",
+		);
+	});
+
+	it("classifies decoration changes separately from provider configuration changes", async () => {
+		const { embeddingSignature, inspectEmbeddingCompatibility, resolveEmbeddingConfig } = await import(
+			"../../src/embedding/provider.ts"
+		);
+		const indexedConfig = resolveEmbeddingConfig({
+			PI_KNOWLEDGE_EMBEDDING: "openai:跨語言模型",
+			PI_KNOWLEDGE_EMBEDDING_PREFIXES: "custom",
+			PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION: "查詢：",
+			PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION: "文件：",
+		});
+		const changedInstructions = resolveEmbeddingConfig({
+			PI_KNOWLEDGE_EMBEDDING: "openai:跨語言模型",
+			PI_KNOWLEDGE_EMBEDDING_PREFIXES: "custom",
+			PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION: "尋找：",
+			PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION: "候選：",
+		});
+		const changedModel = resolveEmbeddingConfig({
+			PI_KNOWLEDGE_EMBEDDING: "openai:另一個模型",
+			PI_KNOWLEDGE_EMBEDDING_PREFIXES: "custom",
+			PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION: "尋找：",
+			PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION: "候選：",
+		});
+		const signature = embeddingSignature(indexedConfig, 768);
+
+		expect(signature).toMatch(/:strategy=custom:ih=[0-9a-f]{12}$/);
+		expect(signature).not.toContain("查詢：");
+		expect(signature).not.toContain("文件：");
+		expect(inspectEmbeddingCompatibility(signature, 768, changedInstructions, 768).cause).toBe("decoration");
+		expect(inspectEmbeddingCompatibility(signature, 768, changedModel, 768).cause).toBe("configuration");
 	});
 });

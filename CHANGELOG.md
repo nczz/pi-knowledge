@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Added model-aware embedding input instructions with byte-compatible E5 `on`/`off`, Jina Code task presets, and exact custom query/document instructions (#22).
+- Added instruction-aware embedding signatures and indexed-versus-active compatibility details in `knowledge_status`, `knowledge_doctor`, search warnings, and update progress.
+
+### Changed
+- OpenAI-compatible embedding inputs are decorated once and reused for complete-input budget validation and the HTTP request.
+- Local API fallback is rejected during configuration for Jina/custom instructions that the local E5 model cannot reproduce.
+
+### Fixed
+- Included embedding incompatibility and invalid active embedding configuration in aggregate status health instead of reporting a contradictory healthy state.
+
 ## [0.13.0] - 2026-11-07
 
 ### Added

@@ -1,4 +1,5 @@
 import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
+import { formatKnowledgeStatus } from "./src/status.ts";
 
 type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
 type StorageRuntime = typeof import("./src/storage/sqlite.ts");
@@ -711,78 +712,26 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_status",
 		label: "Knowledge Status",
-		description: "Show knowledge engine status with health diagnostics: staleness, orphans, and coverage",
+		description:
+			"Show knowledge engine status with embedding compatibility, staleness, orphan, and coverage diagnostics",
 		approval: "read",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine, storage, watcher } = await ensureInitialized();
-			const kbs = engine.list();
-			const watchCount = watcher.getActiveWatcherCount();
-			const diagnostics = engine.diagnose(_signal);
-			const lines = [
-				`Storage: ${storage.getDefaultKnowledgeDir()}`,
-				`Knowledge bases: ${kbs.length}`,
-				`Active watchers: ${watchCount}`,
-				"",
-			];
-			for (const kb of kbs) {
-				const age = Math.round((Date.now() - kb.updated_at) / 60000);
-				const diag = diagnostics.find((d) => d.kb_id === kb.id);
-				lines.push(
-					`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`,
-				);
-				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
-				if (diag) {
-					if (diag.job) {
-						const jobAge = Math.round((Date.now() - diag.job.last_progress_at) / 1000);
-						const progress = [
-							`${diag.job.processed_files} files`,
-							`${diag.job.processed_chunks} chunks`,
-							diag.job.skipped_total > 0 ? `${diag.job.skipped_total} skipped` : "",
-							diag.job.added_chunks > 0 ? `+${diag.job.added_chunks}` : "",
-							diag.job.removed_chunks > 0 ? `-${diag.job.removed_chunks}` : "",
-							diag.job.unchanged_chunks > 0 ? `=${diag.job.unchanged_chunks}` : "",
-						]
-							.filter(Boolean)
-							.join(", ");
-						lines.push(
-							`    job: ${diag.job.status}/${diag.job.phase} — ${progress || "no processed items yet"} — last progress ${jobAge}s ago`,
-						);
-						if (diag.job.message) lines.push(`    last: ${diag.job.message}`);
-						if (diag.job.error_message) lines.push(`    error: ${diag.job.error_message}`);
-					}
-					lines.push(
-						`    coverage: ${diag.coverage_percent}% (${diag.indexed_files}/${diag.total_source_files} files)`,
-					);
-					if (diag.stale_files.length > 0)
-						lines.push(`    ⚠️ stale: ${diag.stale_files.length} files modified since last index`);
-					if (diag.orphan_files.length > 0)
-						lines.push(`    ⚠️ orphans: ${diag.orphan_files.length} chunks reference deleted files`);
-					if (diag.stuck_indexing)
-						lines.push(
-							`    ⚠️ indexing appears stuck for ${Math.round(diag.last_progress_age_ms / 60000)}m; remove and rebuild if no pi process is actively indexing it`,
-						);
-					if (diag.skipped_files.total > 0)
-						lines.push(
-							`    skipped: ${diag.skipped_files.total} files (${Object.entries(diag.skipped_files.by_reason)
-								.filter(([, count]) => count > 0)
-								.map(([reason, count]) => `${reason}: ${count}`)
-								.join(", ")})`,
-						);
-				}
-			}
-			const totalStale = diagnostics.reduce((n, d) => n + d.stale_files.length, 0);
-			const totalOrphans = diagnostics.reduce((n, d) => n + d.orphan_files.length, 0);
-			const totalStuck = diagnostics.filter((d) => d.stuck_indexing).length;
-			if (totalStale === 0 && totalOrphans === 0 && totalStuck === 0 && kbs.length > 0)
-				lines.push("", "Health: ✓ all indexes up to date");
-			else if (totalStale > 0 || totalOrphans > 0 || totalStuck > 0)
-				lines.push(
-					"",
-					`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing — run knowledge_update or rebuild affected KBs`,
-				);
-			return { content: [{ type: "text", text: lines.join("\n") }] };
+			const snapshot = engine.statusSnapshot(_signal);
+			return {
+				content: [
+					{
+						type: "text",
+						text: formatKnowledgeStatus({
+							snapshot,
+							storagePath: storage.getDefaultKnowledgeDir(),
+							watchCount: watcher.getActiveWatcherCount(),
+						}),
+					},
+				],
+			};
 		},
 	});
 

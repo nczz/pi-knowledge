@@ -1,3 +1,4 @@
+import { embeddingInstructionLength } from "../embedding/instructions.ts";
 import type { EmbeddingConfig, EmbeddingInputMeasurement } from "../embedding/provider.ts";
 import { LOCAL_EMBEDDING_PREFERRED_TOKENS, measureEmbeddingInputs } from "../embedding/provider.ts";
 import type { ChunkInsert } from "../storage/sqlite.ts";
@@ -175,8 +176,8 @@ function withPartMetadata(chunk: IndexableChunk, part: number, partCount: number
 
 function isProvablySafeLocalAsciiInput(text: string, config: EmbeddingConfig): boolean {
 	if (config.provider !== "local") return false;
-	const prefixLength = config.prefixes === "on" ? "passage: ".length : 0;
-	if (text.length + prefixLength + 2 > LOCAL_EMBEDDING_PREFERRED_TOKENS) return false;
+	const instructionLength = embeddingInstructionLength(config.instructions, "passage");
+	if (text.length + instructionLength + 2 > LOCAL_EMBEDDING_PREFERRED_TOKENS) return false;
 	for (let index = 0; index < text.length; index++) {
 		if (text.charCodeAt(index) > 0x7f) return false;
 	}

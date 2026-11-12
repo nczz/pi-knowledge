@@ -2,14 +2,17 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStrea
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
-import type { EmbeddingConfig } from "./embedding/provider.ts";
+import type { EmbeddingCompatibility, EmbeddingConfig } from "./embedding/provider.ts";
 import {
+	describeEmbeddingCompatibility,
+	describeEmbeddingDecoration,
 	dispose as disposeEmbedding,
 	embedDocuments,
 	embeddingConfigLabel,
 	embeddingSignature,
 	embedQueryWithConfig,
 	embedValidatedDocuments,
+	inspectEmbeddingCompatibility,
 	prepareForShutdown as prepareEmbeddingForShutdown,
 	resolveEmbeddingConfig,
 } from "./embedding/provider.ts";
@@ -189,6 +192,7 @@ export interface DoctorIssue {
 		| "rebuild_kb"
 		| "wait_for_indexing"
 		| "review_skipped_scope"
+		| "fix_embedding_config"
 		| "rebuild_vectors"
 		| "reindex_for_embedding_budget"
 		| "check_source"
@@ -206,6 +210,23 @@ export interface DoctorReport {
 		target?: string;
 		description: string;
 	}>;
+}
+
+export interface KnowledgeBaseEmbeddingStatus {
+	kb_id: string;
+	kb_name: string;
+	indexed_model: string | null;
+	active_model: string;
+	active_decoration: string;
+	compatibility: EmbeddingCompatibility;
+	detail: string;
+}
+
+export interface KnowledgeStatusSnapshot {
+	knowledge_bases: KnowledgeBase[];
+	diagnostics: DiagnosticResult[];
+	embeddings: KnowledgeBaseEmbeddingStatus[];
+	embedding_error?: string;
 }
 
 export interface SymbolSearchOptions {
@@ -728,14 +749,8 @@ function persistEmbeddingMetadata(
 	return dimension;
 }
 
-function embeddingMismatchWarning(kb: KnowledgeBase): string {
-	return `"${kb.name}" has incompatible embedding metadata; vector retrieval was skipped and knowledge_update should rebuild it`;
-}
-
-function canSearchVectors(kb: KnowledgeBase, config: EmbeddingConfig, queryDimension: number): boolean {
-	if (kb.embedding_signature === null || kb.embedding_dimension === null) return false;
-	if (kb.embedding_dimension !== queryDimension) return false;
-	return kb.embedding_signature === embeddingSignature(config, queryDimension);
+function embeddingMismatchWarning(kb: KnowledgeBase, compatibility: EmbeddingCompatibility): string {
+	return `"${kb.name}" has incompatible embedding vectors (${describeEmbeddingCompatibility(compatibility)}); vector retrieval was skipped and knowledge_update should rebuild them`;
 }
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
@@ -1174,16 +1189,22 @@ export class KnowledgeEngine {
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
-		updateKBStatus(this.db, kb.id, "indexing");
-		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
+		updateKBStatus(this.db, kb.id, "indexing");
+		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
-		const currentSignature =
-			kb.embedding_dimension === null ? undefined : embeddingSignature(embeddingConfig, kb.embedding_dimension);
-		let canReuseExistingVectors =
-			kb.embedding_signature !== null && kb.embedding_dimension !== null && kb.embedding_signature === currentSignature;
+		const compatibility = inspectEmbeddingCompatibility(
+			kb.embedding_signature,
+			kb.embedding_dimension,
+			embeddingConfig,
+			kb.embedding_dimension ?? 0,
+		);
+		let canReuseExistingVectors = compatibility.compatible;
+		let rebuildMessage = compatibility.compatible
+			? undefined
+			: `Embedding vectors for "${kb.name}" are incompatible (${describeEmbeddingCompatibility(compatibility)}); rebuilding all vectors`;
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -1215,9 +1236,7 @@ export class KnowledgeEngine {
 						canReuseExistingVectors = false;
 						const vectorCount = oldVectorReader?.count ?? 0;
 						const vectorDimension = oldVectorReader?.dim ?? 0;
-						const message = `Stored vector file for "${kb.name}" is incomplete or incompatible (${vectorCount} vectors/${vectorDimension}d for ${existingIndex} chunks/${kb.embedding_dimension}d); rebuilding all vectors`;
-						updateIndexingJob(this.db, kb.id, { phase: "embedding", message });
-						onProgress?.(message);
+						rebuildMessage = `Stored vector file for "${kb.name}" is incomplete or incompatible (${vectorCount} vectors/${vectorDimension}d for ${existingIndex} chunks/${kb.embedding_dimension}d); rebuilding all vectors`;
 					}
 				} finally {
 					oldVectorReader?.close();
@@ -1226,10 +1245,9 @@ export class KnowledgeEngine {
 			const reusableHashes = canReuseExistingVectors
 				? existingHashes
 				: new Map<string, Array<{ id: string; vectorIndex: number }>>();
-			if (!canReuseExistingVectors) {
-				const message = `Embedding metadata changed or missing for "${kb.name}"; rebuilding all vectors`;
-				updateIndexingJob(this.db, kb.id, { phase: "embedding", message });
-				onProgress?.(message);
+			if (!canReuseExistingVectors && rebuildMessage) {
+				updateIndexingJob(this.db, kb.id, { phase: "embedding", message: rebuildMessage });
+				onProgress?.(rebuildMessage);
 			}
 
 			const oldVectorIndexByHash = new Map<string, number[]>();
@@ -1625,8 +1643,14 @@ export class KnowledgeEngine {
 				queryEmbedding ??= await embedQueryWithConfig(query, signal);
 				const { vector: queryVec, config: queryEmbeddingConfig } = queryEmbedding;
 				throwIfAborted(signal);
-				if (!canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
-					warnings.push(embeddingMismatchWarning(kb));
+				const compatibility = inspectEmbeddingCompatibility(
+					kb.embedding_signature,
+					kb.embedding_dimension,
+					queryEmbeddingConfig,
+					queryVec.length,
+				);
+				if (!compatibility.compatible) {
+					warnings.push(embeddingMismatchWarning(kb, compatibility));
 					continue;
 				}
 				const vectorResults = searchVectorFile(
@@ -1649,7 +1673,13 @@ export class KnowledgeEngine {
 				queryEmbedding ??= await embedQueryWithConfig(query, signal);
 				const { vector: queryVec, config: queryEmbeddingConfig } = queryEmbedding;
 				throwIfAborted(signal);
-				if (canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
+				const compatibility = inspectEmbeddingCompatibility(
+					kb.embedding_signature,
+					kb.embedding_dimension,
+					queryEmbeddingConfig,
+					queryVec.length,
+				);
+				if (compatibility.compatible) {
 					const vectorResults = searchVectorFile(
 						queryVec,
 						vectorPath,
@@ -1660,7 +1690,7 @@ export class KnowledgeEngine {
 					vecResults = vectorResults.results;
 					for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 				} else {
-					warnings.push(embeddingMismatchWarning(kb));
+					warnings.push(embeddingMismatchWarning(kb, compatibility));
 				}
 				const fused = weightedScoreFusion(bm25Results, vecResults);
 				allResults.push(...fused.map((result) => ({ ...result, score: result.score * kbTrustMultiplier(kb) })));
@@ -1934,6 +1964,50 @@ export class KnowledgeEngine {
 		});
 	}
 
+	statusSnapshot(signal?: AbortSignal): KnowledgeStatusSnapshot {
+		if (!this.db) return { knowledge_bases: [], diagnostics: [], embeddings: [] };
+		throwIfAborted(signal);
+		const db = this.db;
+		const knowledgeBases = listKBs(db);
+		const diagnostics = knowledgeBases.map((kb) => {
+			throwIfAborted(signal);
+			return diagnoseKB(db, kb, signal);
+		});
+		try {
+			const config = resolveEmbeddingConfig();
+			const activeModel = embeddingConfigLabel(config);
+			const activeDecoration = describeEmbeddingDecoration(config);
+			return {
+				knowledge_bases: knowledgeBases,
+				diagnostics,
+				embeddings: knowledgeBases.map((kb) => {
+					const compatibility = inspectEmbeddingCompatibility(
+						kb.embedding_signature,
+						kb.embedding_dimension,
+						config,
+						kb.embedding_dimension ?? 0,
+					);
+					return {
+						kb_id: kb.id,
+						kb_name: kb.name,
+						indexed_model: kb.embedding_model,
+						active_model: activeModel,
+						active_decoration: activeDecoration,
+						compatibility,
+						detail: describeEmbeddingCompatibility(compatibility),
+					};
+				}),
+			};
+		} catch (error) {
+			return {
+				knowledge_bases: knowledgeBases,
+				diagnostics,
+				embeddings: [],
+				embedding_error: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
 	symbolSearch(query: string, options: SymbolSearchOptions = {}, signal?: AbortSignal): SymbolSearchResponse {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
@@ -2060,25 +2134,38 @@ export class KnowledgeEngine {
 		}
 
 		if (this.db) {
-			const activeEmbeddingConfig = resolveEmbeddingConfig();
+			let activeEmbeddingConfig: EmbeddingConfig | undefined;
+			try {
+				activeEmbeddingConfig = resolveEmbeddingConfig();
+			} catch (error) {
+				issues.push({
+					severity: "blocking",
+					message: `Active embedding configuration is invalid: ${error instanceof Error ? error.message : String(error)}`,
+					action: "Correct the embedding environment variables, then run knowledge_doctor again.",
+					action_code: "fix_embedding_config",
+				});
+			}
 			for (const kb of kbs) {
 				throwIfAborted(signal);
-				if (
-					(kb.status === "ready" || kb.status === "stale") &&
-					kb.chunk_count > 0 &&
-					kb.embedding_dimension !== null &&
-					kb.embedding_signature !== embeddingSignature(activeEmbeddingConfig, kb.embedding_dimension)
-				) {
-					const canUpdate = kb.source_path !== null && kb.source_type !== "text";
-					issues.push({
-						severity: "warning",
-						kb_name: kb.name,
-						message: "This KB's vectors are incompatible with the active embedding provider or normalization policy.",
-						action: canUpdate
-							? "Run knowledge_update to rebuild vectors with the active embedding configuration."
-							: "Re-add inline text or re-import the original source with the active embedding configuration.",
-						action_code: "rebuild_vectors",
-					});
+				if (activeEmbeddingConfig && (kb.status === "ready" || kb.status === "stale") && kb.chunk_count > 0) {
+					const compatibility = inspectEmbeddingCompatibility(
+						kb.embedding_signature,
+						kb.embedding_dimension,
+						activeEmbeddingConfig,
+						kb.embedding_dimension ?? 0,
+					);
+					if (!compatibility.compatible) {
+						const canUpdate = kb.source_path !== null && kb.source_type !== "text";
+						issues.push({
+							severity: "warning",
+							kb_name: kb.name,
+							message: `This KB's vectors are incompatible with the active embedding configuration: ${describeEmbeddingCompatibility(compatibility)}.`,
+							action: canUpdate
+								? "Run knowledge_update to rebuild vectors with the active embedding configuration."
+								: "Re-add inline text or re-import the original source with the active embedding configuration.",
+							action_code: "rebuild_vectors",
+						});
+					}
 				}
 				if (
 					(kb.status === "ready" || kb.status === "stale") &&
@@ -2231,10 +2318,10 @@ export class KnowledgeEngine {
 		throwIfAborted(signal);
 		const { createReadStream } = await import("node:fs");
 		const { createInterface } = await import("node:readline");
-		const stream = createReadStream(inputPath, { encoding: "utf-8" });
-		const lines = createInterface({ input: stream, crlfDelay: Infinity });
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
+		const stream = createReadStream(inputPath, { encoding: "utf-8" });
+		const lines = createInterface({ input: stream, crlfDelay: Infinity });
 		let header: ImportHeader | undefined;
 		let kb: KnowledgeBase | undefined;
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;

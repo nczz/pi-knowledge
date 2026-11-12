@@ -99,6 +99,44 @@ describe("KnowledgeEngine", () => {
 			expect(semantic.warnings?.join("\n")).toContain("vector retrieval was skipped");
 		});
 
+		it("reports decoration-only incompatibility across status, doctor, and search", async () => {
+			await engine.add("繁體中文 OAuth 權杖與設定載入流程。", "繁中相容性");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "off");
+
+			const snapshot = engine.statusSnapshot();
+			const embedding = snapshot.embeddings[0];
+			expect(embedding?.indexed_model).toBe("multilingual-e5-small");
+			expect(embedding?.active_model).toBe("multilingual-e5-small");
+			expect(embedding?.compatibility.cause).toBe("decoration");
+			expect(embedding?.detail).toContain("indexed decoration q=query:d=passage differs");
+
+			const doctorIssue = engine
+				.doctor()
+				.issues.find((issue) => issue.kb_name === "繁中相容性" && issue.action_code === "rebuild_vectors");
+			expect(doctorIssue?.message).toContain("indexed decoration q=query:d=passage differs");
+
+			const semantic = await engine.search("OAuth 權杖設定", { mode: "semantic" });
+			expect(semantic.total_count).toBe(0);
+			expect(semantic.warnings?.join("\n")).toContain("indexed decoration q=query:d=passage differs");
+		});
+
+		it("surfaces invalid active instructions without corrupting update state", async () => {
+			const sourcePath = join(TEST_DIR, "設定診斷.txt");
+			writeFileSync(sourcePath, "知識庫需要可理解的 embedding 設定。");
+			await engine.add(sourcePath, "設定診斷");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "custom");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION", "查詢：");
+
+			const snapshot = engine.statusSnapshot();
+			expect(snapshot.embeddings).toEqual([]);
+			expect(snapshot.embedding_error).toContain("requires PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION");
+			const doctorIssue = engine.doctor().issues.find((issue) => issue.action_code === "fix_embedding_config");
+			expect(doctorIssue?.severity).toBe("blocking");
+			expect(doctorIssue?.message).toContain("requires PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION");
+			await expect(engine.update("設定診斷")).rejects.toThrow("requires PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION");
+			expect(engine.list()[0]?.status).toBe("ready");
+		});
+
 		it("remove invalidates cache", async () => {
 			await engine.add("Content about vector caching and memory management for knowledge bases.", "ToRemove");
 			const [{ id }] = engine.list();
@@ -536,7 +574,9 @@ describe("KnowledgeEngine", () => {
 
 			expect(result.added).toBe(1);
 			expect(result.removed).toBe(1);
-			expect(updates).toContain('Embedding metadata changed or missing for "Legacy Signature"; rebuilding all vectors');
+			expect(updates).toContain(
+				'Embedding vectors for "Legacy Signature" are incompatible (the indexed embedding signature or dimension is missing); rebuilding all vectors',
+			);
 			expect(kb.embedding_signature).toContain("local:multilingual-e5-small");
 			expect(kb.embedding_dimension).toBe(384);
 		});

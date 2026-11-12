@@ -304,6 +304,18 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 OpenAI-compatible provider 不能假設服務端一定回傳 unit vectors。Dot product 只有在 query/document 都 L2-normalized 時才等同 cosine similarity；不同服務的向量 magnitude 會讓 ranking 和 diversity 權重失真。API response 必須拒絕 non-finite、zero-magnitude 與錯誤 vector count，並在 query 使用或 document persistence 前做 client-side L2 normalization。Normalization policy 必須寫進 embedding signature；舊 API KB 因 signature 不相容要由 `knowledge_doctor` 回報 `rebuild_vectors`，不能把未正規化舊向量和新 query 向量混用。
 
+### Instruction strategy 也是向量空間的一部分
+
+同一個 provider/model 若 query/document instructions、Jina task 或 whitespace 不同，產生的 vectors 也不可安全混用。不能只比 model name 或 dimension，也不能在 HTTP safety check 後重新組裝另一份 request input。
+
+- Decoration registry 是 query、document、measurement、signature 的單一來源；API 完整輸入只建立一次。
+- E5 `on`/`off` 維持既有 signature bytes；Jina/custom 使用 strategy、task 與 instruction hash。Signature/status 不得暴露 custom instruction 原文。
+- Custom variables 搭配非 custom strategy 必須報錯，不能靜默忽略 typo。Jina task 搭配其他 strategy 亦同。
+- Instruction 本身已達 API character cap 時應在 config resolution 失敗，不能等到 indexing 中途才出錯。
+- Add/update/import 必須在把 KB 設為 `indexing` 或開啟 import stream 前完成 instruction config resolution；invalid env 不得留下假 running job、stuck KB 或未關閉的 file handle。
+- Jina/custom query 不能在 API failure 後 fallback 到 local E5，因為 local worker 無法重現相同輸入合約。
+- `knowledge_status` 的 aggregate health 必須包含 embedding mismatch/config error；不能同時列 warning 又顯示 `Health: ✓`。
+
 
 ## Cancellation boundaries must preserve unrelated work
 

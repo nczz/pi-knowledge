@@ -1,4 +1,5 @@
 import { bench, describe } from "vitest";
+import { E5_INSTRUCTIONS } from "../../src/embedding/instructions.ts";
 import type { EmbeddingConfig } from "../../src/embedding/provider.ts";
 import { chunkText } from "../../src/indexer/chunker.ts";
 import { finalizeChunksForEmbedding } from "../../src/indexer/embedding-safe-chunks.ts";
@@ -8,9 +9,10 @@ const apiConfig: EmbeddingConfig = {
 	model: "benchmark-model",
 	baseUrl: "http://127.0.0.1:8080/v1",
 	maxChars: 2_048,
-	queryPrefix: "query",
-	documentPrefix: "passage",
-	prefixes: "on",
+	strategy: "e5",
+	instructions: E5_INSTRUCTIONS,
+	prefixMode: "on",
+	apiFallbackToLocal: false,
 	pooling: "mean",
 	normalize: true,
 };
