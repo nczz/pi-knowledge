@@ -433,3 +433,33 @@
 - Jina preset 只裝飾文字；server 仍必須依模型要求實作 last-token pooling 與 normalization。
 - `jinaai/jina-code-embeddings-1.5b` 的 CC-BY-NC-4.0 授權、約 3.09 GB BF16 權重與缺少適用 ONNX artifact，使它只作為 opt-in API preset，不取代本地 E5 預設。
 - Strategy、task 或 instruction 改變後，file/directory/URL KB 執行 `knowledge_update`；inline/import KB 從原始來源重建。
+
+---
+
+## ADR-023: PDF/DOCX extraction 使用隔離 Node worker
+
+**狀態**: 已決定
+
+**背景**: `unpdf` / PDF.js 與 `mammoth` 原本在 extension host 內執行。PDF.js 的非致命 font、xref、
+color-space 等 diagnostics 會透過 `console.warn` 寫到 inherited stderr；Pi/OMP full-screen TUI 因此可能
+被 parser output 覆蓋。OMP 的 Bun host 也不保證能解析 parser package 的 bare import 與 transitive
+CommonJS dependencies。
+
+**決策**:
+- PDF/DOC/DOCX extraction 透過既有 model worker request/response transport 執行，不在 TUI host 載入 parser。
+- Worker stdout/stderr 維持 pipe；stdio transport 的 stdout 只承載 JSONL protocol，其他 console output
+  重新導向 worker stderr。
+- PDF.js 額外使用 error-only verbosity；顯式建立的 document proxy 在 `finally` destroy。
+- Extraction failure 透過 worker response 回傳；不得比對或過濾特定 warning 文字。
+- Worker lifecycle、Node 22+ discovery、Windows IPC fallback、cancellation request cleanup 與 shutdown
+  繼續共用既有 model worker client。
+
+**理由**:
+- Stdio 隔離封閉的是所有第三方 parser output，不只單一 TrueType warning。
+- 共用既有 worker 避免第二套 child-process protocol、Node discovery、shutdown 與 Windows fallback。
+- Parser 仍為 lazy load；不使用 document source 的 session 不會載入 `unpdf` / `mammoth`。
+
+**限制與升級邊界**:
+- OMP packaged host 需要可用的 Node 22+ executable；可用 `knowledge_configure` 持久化路徑。
+- Extracted text 會經 worker transport 回傳，受既有 10 MiB directory source limit 與 process memory 約束。
+- 不改變 KB schema、chunk identity、embedding signature 或既有 KB；升級後不需 reindex。

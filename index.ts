@@ -320,7 +320,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_configure",
 		label: "Knowledge Configure",
-		description: "Configure pi-knowledge runtime settings such as the local model worker Node executable",
+		description: "Configure pi-knowledge runtime settings such as the isolated worker Node executable",
 		approval: "write",
 		promptSnippet: "Configure local pi-knowledge runtime prerequisites before indexing",
 		promptGuidelines: [
@@ -333,7 +333,7 @@ export default function (pi: ExtensionAPI) {
 			node_path: Type.Optional(
 				Type.String({
 					description:
-						"Optional full path to a Node 22+ executable for the isolated local embedding model worker, such as C:\\Program Files\\nodejs\\node.exe",
+						"Optional full path to a Node 22+ executable for the isolated local model and document extraction worker, such as C:\\Program Files\\nodejs\\node.exe",
 				}),
 			),
 		}),
@@ -347,7 +347,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `Configured local model worker Node executable: ${configuredPath}`,
+						text: `Configured isolated worker Node executable: ${configuredPath}`,
 					},
 				],
 				details: { node_path: configuredPath },

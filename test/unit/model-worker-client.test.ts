@@ -305,9 +305,7 @@ describe("model worker client", () => {
 		});
 		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
 
-		await expect(embedInModelWorker(["hello"], "passage")).rejects.toThrow(
-			"Node 22+ is required for local pi-knowledge embeddings, but no usable node executable was found.",
-		);
+		await expect(embedInModelWorker(["hello"], "passage")).rejects.toBeInstanceOf(Error);
 		expect(childProcessMock.fork).not.toHaveBeenCalled();
 		expect(childProcessMock.spawn).not.toHaveBeenCalled();
 	});

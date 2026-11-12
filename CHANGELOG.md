@@ -12,6 +12,7 @@
 
 ### Fixed
 - Included embedding incompatibility and invalid active embedding configuration in aggregate status health instead of reporting a contradictory healthy state.
+- Isolated PDF/DOCX parsing from Pi/OMP TUI stdio, suppressed all non-fatal PDF.js warning paths, and cleaned up explicit PDF document proxies without changing extracted text (#23).
 
 ## [0.13.0] - 2026-11-07
 

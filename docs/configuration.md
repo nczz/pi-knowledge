@@ -12,7 +12,7 @@
 | `OMP_CODING_AGENT_DIR` | unset | Derive the OMP host root from a configured agent directory. Used when `PI_CODING_AGENT_DIR` is not set. |
 | `OMP_PROFILE` | unset | Treat the current process as OMP-hosted for default path selection. |
 | `PI_KNOWLEDGE_MODEL_CACHE_DIR` | `<knowledge-dir>/models` | Override the local Transformers.js model cache directory. |
-| `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, then `NODE`, then `node` on `PATH` | Override the Node 22+ executable used to run the isolated model worker. Useful for Windows OMP packaged runtimes where the host process is not Node. |
+| `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, then `NODE`, then `node` on `PATH` | Override the Node 22+ executable used by the isolated runtime worker for local models and PDF/DOCX extraction. Useful for Windows OMP packaged runtimes where the host process is not Node. |
 
 Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under OMP. For the default home OMP root, `pi-knowledge` preserves an existing legacy `~/.pi/knowledge` directory when `~/.omp/knowledge` does not exist, so existing Pi knowledge bases remain visible during migration.
 
@@ -63,7 +63,7 @@ Reranker settings affect query-time `deep` search only; they do not change index
 
 For Hugging Face Text Embeddings Inference rerankers, set `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei` and point `PI_KNOWLEDGE_RERANKER_API_ENDPOINT` at the TEI `/rerank` endpoint, for example `http://127.0.0.1:8080/rerank`. Do not reuse an embeddings `OPENAI_BASE_URL` ending in `/v1` unless the reranker endpoint actually exists there; TEI's OpenAI-compatible route covers embeddings, while reranking uses `/rerank`.
 
-Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
+Local embeddings, local/HF reranking, and PDF/DOCX extraction require a real Node 22+ executable for the isolated worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid local model loading, but document extraction still uses the worker to isolate parser stdio from the host.
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, context-window errors, server batch limits, or instruction mismatches and can produce a KB with a different embedding model than intended. Query-time fallback is opt-in and supports only E5 `on`/`off` semantics; indexing fallback is disabled to prevent mixed vector spaces in one KB. OpenAI-compatible embedding requests send `Authorization: Bearer <key>` only when `PI_KNOWLEDGE_EMBEDDING_API_KEY` or `OPENAI_API_KEY` is configured. Instruction decoration is applied once before both safety-cap validation and the HTTP request.
 
@@ -122,7 +122,7 @@ Compatibility guarantees:
 
 - The packaged `extension.js` loads built `dist/index.js` when present and falls back to source `index.ts` for local development.
 - Runtime modules are imported lazily, after the extension is actually used.
-- Local embedding and reranking models run in an isolated Node model worker, not in the Pi or OMP TUI process. Node IPC is preferred; stdin/stdout JSONL transport is used automatically when host IPC is unavailable.
+- Local embedding/reranking models and PDF/DOCX parsers run in an isolated Node worker, not in the Pi or OMP TUI process. Node IPC is preferred; stdin/stdout JSONL transport is used automatically when host IPC is unavailable.
 - Native SQLite loading includes a fallback for hoisted plugin dependency layouts.
 - OMP path resolution can use `OMP_KNOWLEDGE_DIR`, `OMP_CODING_AGENT_DIR`, and `OMP_PROFILE`.
 - Existing default Pi knowledge data can remain visible under the default OMP home root through the legacy `~/.pi/knowledge` fallback described above.

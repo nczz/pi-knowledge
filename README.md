@@ -217,7 +217,7 @@ suggested reindex action. Source-backed knowledge bases can normally use
 | `knowledge_show` | List all knowledge bases with stats |
 | `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
 | `knowledge_doctor` | Diagnose health score, skipped files, stuck jobs, stale data, and recommended fixes |
-| `knowledge_configure` | Persist runtime prerequisites such as a Windows `node.exe` path for the isolated local model worker |
+| `knowledge_configure` | Persist runtime prerequisites such as a Windows `node.exe` path for the isolated runtime worker |
 | `knowledge_clear` | Remove all knowledge bases after `confirm: true` |
 | `knowledge_export` | Export a KB to shareable JSONL file |
 | `knowledge_import` | Import a KB from JSONL (re-embeds content) |
@@ -311,7 +311,7 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 | Area | Environment variables |
 |------|-----------------------|
 | Storage path | `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR`, `OMP_PROFILE` |
-| Model worker and cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
+| Runtime worker and model cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
 | Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `PI_KNOWLEDGE_EMBEDDING_API_KEY`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_PREFIXES`, `PI_KNOWLEDGE_EMBEDDING_TASK`, `PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
 | Reranker provider | `PI_KNOWLEDGE_RERANKER`, `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE`, `PI_KNOWLEDGE_RERANKER_RAW_LOGITS`, `PI_KNOWLEDGE_RERANKER_API_ENDPOINT`, `PI_KNOWLEDGE_RERANKER_API_BASE_URL`, `PI_KNOWLEDGE_RERANKER_API_KEY`, `PI_KNOWLEDGE_RERANKER_API_FORMAT`, `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS`, `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS`, `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH`, `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` |
 | Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
@@ -326,7 +326,7 @@ For Hugging Face Text Embeddings Inference rerankers, use `PI_KNOWLEDGE_RERANKER
 
 Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
 
-OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, Windows-safe worker transport fallback, and idempotent shutdown. Local embeddings require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
+OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated worker startup, Windows-safe worker transport fallback, document parser stdio isolation, and idempotent shutdown. Local embeddings and PDF/DOCX extraction require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
 
 ## Large Project Indexing
 

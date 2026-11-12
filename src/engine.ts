@@ -36,7 +36,7 @@ import {
 import { finalizeChunksForEmbedding } from "./indexer/embedding-safe-chunks.ts";
 import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
-import { shutdownModelWorker } from "./model-worker-client.ts";
+import { extractDocumentInModelWorker, shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { MAX_SEARCH_WINDOW } from "./search/contracts.ts";
 import { diversifyRankedChunks, interleaveByFile, type RankedChunk } from "./search/diversity.ts";
@@ -646,10 +646,6 @@ async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<R
 	return structuredChunks.length > 0 ? structuredChunks : chunkFile(text, source);
 }
 
-function normalizeExtractedText(text: string | string[]): string {
-	return Array.isArray(text) ? text.join("\n\n") : text;
-}
-
 interface ExtractedSourceFile {
 	content: string;
 	fileType: string;
@@ -659,23 +655,15 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 	const lowerPath = filePath.toLowerCase();
 	if (lowerPath.endsWith(".pdf")) {
 		throwIfAborted(signal);
-		// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
-		const { extractText } = await import("unpdf");
+		const extracted = await extractDocumentInModelWorker(filePath, "pdf", signal);
 		throwIfAborted(signal);
-		const buf = readFileSync(filePath);
-		throwIfAborted(signal);
-		const { text } = await extractText(new Uint8Array(buf));
-		throwIfAborted(signal);
-		return { content: normalizeExtractedText(text), fileType: "pdf" };
+		return extracted;
 	}
 	if (lowerPath.endsWith(".docx") || lowerPath.endsWith(".doc")) {
 		throwIfAborted(signal);
-		// DOCX extraction is an optional heavy runtime path; keep parser loading out of extension startup.
-		const mammoth = await import("mammoth");
+		const extracted = await extractDocumentInModelWorker(filePath, "docx", signal);
 		throwIfAborted(signal);
-		const result = await mammoth.extractRawText({ path: filePath });
-		throwIfAborted(signal);
-		return { content: result.value, fileType: "docx" };
+		return extracted;
 	}
 	if (!isReadableTextFile(filePath)) {
 		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);

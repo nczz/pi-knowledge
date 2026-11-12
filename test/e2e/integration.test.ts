@@ -51,17 +51,28 @@ describe("integration coverage", () => {
 		}
 	});
 
-	it.skipIf(!process.env.PI_KNOWLEDGE_E2E_PDF)("indexes a real PDF fixture supplied outside the repo", async () => {
-		const pdfPath = process.env.PI_KNOWLEDGE_E2E_PDF as string;
-		const engine = await makeEngine("pk-e2e-pdf-");
-		try {
-			const { chunkCount, kb } = await engine.add(pdfPath, "PDF Fixture");
-			expect(chunkCount).toBeGreaterThan(0);
-			expect(kb.file_count).toBe(1);
-		} finally {
-			await engine.dispose();
-		}
-	});
+	it.skipIf(!process.env.PI_KNOWLEDGE_E2E_PDF)(
+		"indexes a real PDF fixture without leaking parser warnings to the host console",
+		async () => {
+			const pdfPath = process.env.PI_KNOWLEDGE_E2E_PDF as string;
+			const engine = await makeEngine("pk-e2e-pdf-");
+			const warnings: string[] = [];
+			const originalWarn = console.warn;
+			console.warn = (...args: unknown[]) => {
+				warnings.push(args.map(String).join(" "));
+			};
+			try {
+				const { chunkCount, kb } = await engine.add(pdfPath, "PDF Fixture");
+				expect(chunkCount).toBeGreaterThan(0);
+				expect(kb.file_count).toBe(1);
+				await engine.update(kb.id);
+				expect(warnings.filter((warning) => warning.startsWith("Warning: "))).toEqual([]);
+			} finally {
+				console.warn = originalWarn;
+				await engine.dispose();
+			}
+		},
+	);
 
 	it.skipIf(!process.env.PI_KNOWLEDGE_E2E_DOCX)("indexes a real DOCX fixture supplied outside the repo", async () => {
 		const docxPath = process.env.PI_KNOWLEDGE_E2E_DOCX as string;

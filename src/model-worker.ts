@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -70,7 +71,14 @@ type RerankRequest = {
 	reranker: HfRerankerConfig;
 };
 
-type WorkerRequest = EmbedRequest | MeasureEmbeddingInputRequest | RerankRequest;
+type ExtractDocumentRequest = {
+	id: number;
+	type: "extract_document";
+	filePath: string;
+	fileType: "pdf" | "docx";
+};
+
+type WorkerRequest = EmbedRequest | MeasureEmbeddingInputRequest | RerankRequest | ExtractDocumentRequest;
 type WorkerResponse = { id: number; result?: unknown; error?: string };
 
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
@@ -207,6 +215,25 @@ async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: st
 	return results.slice(0, request.topK);
 }
 
+const PDFJS_ERRORS_ONLY_VERBOSITY = 0;
+
+async function handleExtractDocument(request: ExtractDocumentRequest): Promise<{ content: string; fileType: string }> {
+	if (request.fileType === "pdf") {
+		const { extractText, getDocumentProxy } = await import("unpdf");
+		const bytes = await readFile(request.filePath);
+		const pdf = await getDocumentProxy(new Uint8Array(bytes), { verbosity: PDFJS_ERRORS_ONLY_VERBOSITY });
+		try {
+			const { text } = await extractText(pdf);
+			return { content: Array.isArray(text) ? text.join("\n\n") : text, fileType: "pdf" };
+		} finally {
+			await pdf.destroy();
+		}
+	}
+	const mammoth = await import("mammoth");
+	const result = await mammoth.extractRawText({ path: request.filePath });
+	return { content: result.value, fileType: "docx" };
+}
+
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -249,6 +276,15 @@ function parseWorkerRequest(message: unknown): WorkerRequest {
 			prefixes,
 		};
 	}
+	if (message.type === "extract_document") {
+		if (!("filePath" in message) || typeof message.filePath !== "string") {
+			throw new Error("Invalid document file path");
+		}
+		if (!("fileType" in message) || (message.fileType !== "pdf" && message.fileType !== "docx")) {
+			throw new Error("Invalid document file type");
+		}
+		return { id: message.id, type: "extract_document", filePath: message.filePath, fileType: message.fileType };
+	}
 	if (message.type === "rerank") {
 		if (!("query" in message) || typeof message.query !== "string") throw new Error("Invalid rerank query");
 		if (!("topK" in message) || typeof message.topK !== "number") throw new Error("Invalid rerank topK");
@@ -282,7 +318,9 @@ async function handleRequestMessage(message: unknown): Promise<WorkerResponse> {
 				? await handleEmbed(request)
 				: request.type === "measure_embedding_input"
 					? await handleMeasureEmbeddingInput(request)
-					: await handleRerank(request);
+					: request.type === "extract_document"
+						? await handleExtractDocument(request)
+						: await handleRerank(request);
 		return { id: request.id, result };
 	} catch (error) {
 		return { id: requestId, error: error instanceof Error ? error.message : String(error) };

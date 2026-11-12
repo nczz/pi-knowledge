@@ -64,7 +64,9 @@ function validateNodeExecPath(candidate: string): string {
 	}).trim();
 	const major = parseNodeMajor(version);
 	if (major === null || major < MIN_NODE_MAJOR) {
-		throw new Error(`Node ${MIN_NODE_MAJOR}+ is required for the model worker; ${candidate} reported ${version}`);
+		throw new Error(
+			`Node ${MIN_NODE_MAJOR}+ is required for the isolated runtime worker; ${candidate} reported ${version}`,
+		);
 	}
 	return candidate;
 }
@@ -177,7 +179,7 @@ function getNodeExecPath(): string {
 		}
 	}
 	throw new Error(
-		`Node ${MIN_NODE_MAJOR}+ is required for local pi-knowledge embeddings, but no usable node executable was found. Install Node ${MIN_NODE_MAJOR}+ or set PI_KNOWLEDGE_NODE_PATH to the full node.exe path.`,
+		`Node ${MIN_NODE_MAJOR}+ is required for isolated pi-knowledge worker operations such as local models and PDF/DOCX extraction, but no usable node executable was found. Install Node ${MIN_NODE_MAJOR}+ or set PI_KNOWLEDGE_NODE_PATH to the full node.exe path.`,
 	);
 }
 
@@ -464,6 +466,25 @@ export async function measureEmbeddingInputInModelWorker(
 		throw new Error("Invalid embedding input measurement from worker");
 	}
 	return { counts: result.counts, maximum: result.maximum };
+}
+
+export async function extractDocumentInModelWorker(
+	filePath: string,
+	fileType: "pdf" | "docx",
+	signal?: AbortSignal,
+): Promise<{ content: string; fileType: "pdf" | "docx" }> {
+	const result = await getWorker().request({ type: "extract_document", filePath, fileType }, signal);
+	if (
+		typeof result !== "object" ||
+		result === null ||
+		!("content" in result) ||
+		typeof result.content !== "string" ||
+		!("fileType" in result) ||
+		result.fileType !== fileType
+	) {
+		throw new Error("Invalid document extraction worker response");
+	}
+	return { content: result.content, fileType };
 }
 
 export interface RerankWorkerCandidate {

@@ -38,6 +38,16 @@ It is not a Qt semantic analyzer and does not infer runtime signal wiring or com
 
 pdf-parse v2.x 的 class-based API 過於複雜且 bundle 巨大，已棄用。
 
+PDF.js 預設會把非致命 parser diagnostics 寫到 `console.warn`。Document extraction 若在 Pi/OMP extension
+host 內執行，raw warning 可能直接到達 full-screen TUI 的 stdio。PDF/DOCX extraction 因此共用既有的
+isolated Node worker；worker stdout/stderr 都是 pipe，第三方 parser output 不會直接寫入 host terminal。
+
+PDF extraction 仍須透過 `getDocumentProxy` 明確使用 `VerbosityLevel.ERRORS` 對應的 verbosity，並在
+`finally` destroy document proxy，形成 parser-level defense in depth。這項防護涵蓋所有 PDF.js warning
+paths，不可比對特定 warning 文字，也不可暫時覆寫 process-global `console.warn`。真正的 extraction
+exception 透過 worker response 正常回傳。OMP packaged host 若不是 Node，會使用與 local model 相同的
+Node 22+ discovery、IPC 與 stdin/stdout JSONL fallback。
+
 ## PDF/DOCX e2e fixture gate
 
 `npm run test:e2e` 在沒有 `PI_KNOWLEDGE_E2E_PDF` / `PI_KNOWLEDGE_E2E_DOCX` 時會 skip 真實文件抽取測試。這是為了避免把私有 PDF/DOCX fixtures 寫進 repo，但也代表 plain e2e 只能算 smoke pass。
@@ -139,7 +149,7 @@ node -e "import('./extension.js')"
 
 OMP plugin install validation runs in a Bun binary path that can statically resolve literal `import()` / `require()` targets before runtime guards run. Keep `extension.js` and root `index.ts` startup-light: do not statically import modules that pull native dependencies such as `better-sqlite3`.
 
-Bun binary resolution may also fail to resolve hoisted native-package dependencies from bare package specifiers. Native loaders should first try normal resolution, then walk parent directories for the installed package entry and require that absolute path with non-literal package names so validation does not pre-resolve it.
+Bun binary resolution may also fail to resolve hoisted dependencies from bare package specifiers. Optional runtime loaders should first try a non-literal dynamic import, then use `createRequire(import.meta.url)` with a non-literal package name so validation does not pre-resolve it. Native loaders may additionally need to walk parent directories for the installed package entry and load an absolute path.
 
 On minimal Ubuntu/Debian servers, OMP's Bun-based npm install currently cannot use
 `better-sqlite3` prebuilds and falls back to `node-gyp rebuild`. A failure like

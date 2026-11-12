@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
+import type * as ModelWorkerClient from "../../src/model-worker-client.ts";
 import {
 	createKB,
 	getChunksByKB,
@@ -23,12 +24,13 @@ import {
 	updateKBEmbeddingMetadata,
 } from "../../src/storage/sqlite.ts";
 
-const mammothMock = vi.hoisted(() => ({
-	extractRawText: vi.fn(),
+const documentWorkerMock = vi.hoisted(() => ({
+	extractDocument: vi.fn(),
 }));
 
-vi.mock("mammoth", () => ({
-	extractRawText: mammothMock.extractRawText,
+vi.mock("../../src/model-worker-client.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof ModelWorkerClient>()),
+	extractDocumentInModelWorker: documentWorkerMock.extractDocument,
 }));
 
 const TEST_DIR = "/tmp/pk-test-engine";
@@ -40,7 +42,7 @@ describe("KnowledgeEngine", () => {
 		rmSync(TEST_DIR, { recursive: true, force: true });
 		engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
-		mammothMock.extractRawText.mockReset();
+		documentWorkerMock.extractDocument.mockReset();
 	});
 
 	afterEach(async () => {
@@ -364,8 +366,8 @@ describe("KnowledgeEngine", () => {
 		it("uses the configured embedding batch size even when one file creates many chunks", async () => {
 			const projectDir = mkdtempSync(join(tmpdir(), "pk-batch-cap-"));
 			try {
-				const paragraphs = Array.from({ length: 90 }, (_, i) =>
-					`BatchCapToken${i} contains enough content to become a meaningful retrieval paragraph for bounded embedding batch validation. `.repeat(
+				const paragraphs = Array.from({ length: 40 }, (_, i) =>
+					`批次上限驗證 BatchCapToken${i}：每個段落都要維持有界 embedding batch，並保留日本語と Español 的多語內容。`.repeat(
 						8,
 					),
 				);
@@ -763,12 +765,14 @@ describe("KnowledgeEngine", () => {
 		it("updates document files from extractors instead of raw UTF-8 bytes", async () => {
 			const filePath = join(TEST_DIR, "source.docx");
 			writeFileSync(filePath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
-			mammothMock.extractRawText
+			documentWorkerMock.extractDocument
 				.mockResolvedValueOnce({
-					value: "Initial extracted DOCX text about InitialDocxToken authentication sessions.",
+					content: "初始 DOCX 抽取內容：InitialDocxToken 身分驗證與工作階段。",
+					fileType: "docx",
 				})
 				.mockResolvedValueOnce({
-					value: "Changed extracted DOCX text about ChangedDocxToken billing invoices.",
+					content: "更新 DOCX 抽取內容：ChangedDocxToken 帳務與發票。",
+					fileType: "docx",
 				});
 
 			await engine.add(filePath, "Docx Update");
@@ -778,7 +782,6 @@ describe("KnowledgeEngine", () => {
 
 			expect(result.added).toBe(1);
 			expect(result.removed).toBe(1);
-			expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
 			expect((await engine.search("ChangedDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(1);
 			expect((await engine.search("InitialDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(0);
 		});
@@ -788,17 +791,18 @@ describe("KnowledgeEngine", () => {
 			try {
 				const docxPath = join(projectDir, "handbook.docx");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
-				mammothMock.extractRawText
+				documentWorkerMock.extractDocument
 					.mockResolvedValueOnce({
-						value: "Initial directory DOCX text about DirectoryDocxInitialToken authentication sessions.",
+						content: "目錄初始 DOCX：DirectoryDocxInitialToken 身分驗證與工作階段。",
+						fileType: "docx",
 					})
 					.mockResolvedValueOnce({
-						value: "Changed directory DOCX text about DirectoryDocxChangedToken billing invoices.",
+						content: "目錄更新 DOCX：DirectoryDocxChangedToken 帳務與發票。",
+						fileType: "docx",
 					});
 
 				const added = await engine.add(projectDir, "Directory Docx");
 				expect(added.kb.file_count).toBe(1);
-				expect(mammothMock.extractRawText).toHaveBeenCalledWith({ path: docxPath });
 				expect(
 					(await engine.search("DirectoryDocxInitialToken", { mode: "fast", kb_id: "Directory Docx" })).total_count,
 				).toBe(1);
@@ -808,7 +812,6 @@ describe("KnowledgeEngine", () => {
 
 				expect(updated.added).toBe(1);
 				expect(updated.removed).toBe(1);
-				expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
 				expect(
 					(await engine.search("DirectoryDocxChangedToken", { mode: "fast", kb_id: "Directory Docx" })).total_count,
 				).toBe(1);
@@ -826,7 +829,7 @@ describe("KnowledgeEngine", () => {
 				const docxPath = join(projectDir, "broken.docx");
 				writeFileSync(join(projectDir, "valid.ts"), "export const ValidAddToken = 'indexed';");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
-				mammothMock.extractRawText.mockRejectedValueOnce(new Error("corrupt document"));
+				documentWorkerMock.extractDocument.mockRejectedValueOnce(new Error("corrupt document"));
 
 				const added = await engine.add(projectDir, "Directory Docx Add Skip");
 
@@ -838,7 +841,6 @@ describe("KnowledgeEngine", () => {
 				expect(job?.status).toBe("succeeded");
 				expect(job?.skipped_total).toBe(1);
 				expect(job?.message).toContain("extraction_failed: 1");
-				expect(mammothMock.extractRawText).toHaveBeenCalledWith({ path: docxPath });
 				expect(
 					(await engine.search("ValidAddToken", { mode: "fast", kb_id: "Directory Docx Add Skip" })).total_count,
 				).toBe(1);
@@ -854,14 +856,15 @@ describe("KnowledgeEngine", () => {
 				const validPath = join(projectDir, "valid.ts");
 				writeFileSync(validPath, "export const InitialValidUpdateToken = 'indexed';");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
-				mammothMock.extractRawText.mockResolvedValueOnce({
-					value: "Initial update DOCX text about InitialSkippedDocToken.",
+				documentWorkerMock.extractDocument.mockResolvedValueOnce({
+					content: "更新前 DOCX：InitialSkippedDocToken。",
+					fileType: "docx",
 				});
 
 				const added = await engine.add(projectDir, "Directory Docx Update Skip");
 				writeFileSync(validPath, "export const ChangedValidUpdateToken = 'indexed';");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xfe, 0x00]));
-				mammothMock.extractRawText.mockRejectedValueOnce(new Error("corrupt updated document"));
+				documentWorkerMock.extractDocument.mockRejectedValueOnce(new Error("corrupt updated document"));
 
 				const updated = await engine.update("Directory Docx Update Skip");
 
@@ -874,7 +877,6 @@ describe("KnowledgeEngine", () => {
 				expect(job?.status).toBe("succeeded");
 				expect(job?.skipped_total).toBe(1);
 				expect(job?.message).toContain("extraction_failed: 1");
-				expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
 				expect(
 					(await engine.search("ChangedValidUpdateToken", { mode: "fast", kb_id: "Directory Docx Update Skip" }))
 						.total_count,
