@@ -126,7 +126,7 @@ describe("lightweight symbol index", () => {
 		await engine.dispose({ disposeModels: false });
 	});
 
-	it("reports real total count and rejects unknown KB filters", async () => {
+	it("reports real totals and classifies symbol lookup misses", async () => {
 		const engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
 		const kb = createKB(db, { name: "repo", source_type: "text" });
@@ -137,11 +137,50 @@ describe("lightweight symbol index", () => {
 		]);
 
 		const result = engine.symbolSearch("alp", { limit: 2 });
+		const unknownKb = engine.symbolSearch("alp", { kb_id: "missing" });
+		const exactMiss = engine.symbolSearch("missingSymbol", { exact: true });
+		const filteredMiss = engine.symbolSearch("alphaSymbol", { exact: true, kind: "heading" });
+		const emptyPage = engine.symbolSearch("alp", { limit: 2, offset: 3 });
 
 		expect(result.results).toHaveLength(2);
 		expect(result.total_count).toBe(3);
 		expect(result.has_more).toBe(true);
-		expect(() => engine.symbolSearch("alp", { kb_id: "missing" })).toThrow("Knowledge base not found: missing");
+		expect(unknownKb.miss).toMatchObject({
+			reason: "knowledge_base_not_found",
+			action: "fix_kb_id",
+			requested_kb_id: "missing",
+		});
+		expect(exactMiss.miss).toMatchObject({
+			reason: "exact_name_not_found",
+			action: "broaden_symbol_search",
+			indexed_symbols: 3,
+		});
+		expect(filteredMiss.miss).toMatchObject({
+			reason: "metadata_filtered",
+			action: "relax_filter",
+			unfiltered_matches: 1,
+		});
+		expect(emptyPage.miss).toMatchObject({
+			reason: "page_out_of_range",
+			action: "reset_offset",
+		});
+		await engine.dispose({ disposeModels: false });
+	});
+
+	it("distinguishes an empty store from an empty symbol index", async () => {
+		const engine = new KnowledgeEngine();
+		await engine.initialize(TEST_DIR);
+
+		const emptyStore = engine.symbolSearch("missing");
+		createKB(db, { name: "repo", source_type: "text" });
+		const emptyIndex = engine.symbolSearch("missing");
+
+		expect(emptyStore.miss?.reason).toBe("no_knowledge_bases");
+		expect(emptyIndex.miss).toMatchObject({
+			reason: "symbol_index_empty",
+			action: "rebuild_symbol_index",
+			indexed_symbols: 0,
+		});
 		await engine.dispose({ disposeModels: false });
 	});
 

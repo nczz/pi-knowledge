@@ -138,6 +138,66 @@ export interface SearchResult {
 }
 
 export { CURRENT_EMBEDDING_MODEL } from "./embedding/provider.ts";
+export type SearchMissReason =
+	| "no_knowledge_bases"
+	| "knowledge_base_not_found"
+	| "no_searchable_knowledge_bases"
+	| "no_indexed_chunks"
+	| "embedding_incompatible"
+	| "no_retrieval_candidates"
+	| "threshold_filtered"
+	| "evidence_filtered"
+	| "metadata_filtered"
+	| "reranker_empty"
+	| "page_out_of_range"
+	| "no_match";
+
+export type SearchMissAction =
+	| "add_knowledge_base"
+	| "fix_kb_id"
+	| "wait_for_indexing"
+	| "fix_knowledge_base"
+	| "fix_embedding"
+	| "try_semantic"
+	| "try_semantic_hybrid"
+	| "relax_filter"
+	| "reset_offset"
+	| "rephrase";
+
+export interface SearchKnowledgeBaseSummary {
+	id: string;
+	name: string;
+	status: KnowledgeBase["status"];
+	chunk_count: number;
+}
+
+export interface SearchAttemptSummary {
+	mode: SearchMode;
+	reason?: SearchMissReason;
+	retrieved_candidates: number;
+	threshold_candidates: number;
+	eligible_candidates: number;
+	filtered_candidates: number;
+	result_count: number;
+}
+
+export interface SearchMiss {
+	reason: SearchMissReason;
+	action: SearchMissAction;
+	requested_kb_id?: string;
+	file_type?: string;
+	path_pattern?: string;
+	min_hybrid_score?: number;
+	searched_kbs: SearchKnowledgeBaseSummary[];
+	skipped_kbs: SearchKnowledgeBaseSummary[];
+	retrieved_candidates: number;
+	threshold_candidates: number;
+	eligible_candidates: number;
+	filtered_candidates: number;
+	ranked_candidates: number;
+	total_results: number;
+	attempts?: SearchAttemptSummary[];
+}
 
 export interface SearchResponse {
 	results: SearchResult[];
@@ -146,8 +206,8 @@ export interface SearchResponse {
 	warnings?: string[];
 	mode_used?: SearchMode;
 	retry_modes?: SearchMode[];
-	suggestions?: string[];
 	tuning?: SearchTuningSummary;
+	miss?: SearchMiss;
 }
 
 export type ProgressCallback = (msg: string) => void;
@@ -237,6 +297,39 @@ export interface SymbolSearchOptions {
 	offset?: number;
 	exact?: boolean;
 }
+export type SymbolSearchMissReason =
+	| "no_knowledge_bases"
+	| "knowledge_base_not_found"
+	| "no_searchable_knowledge_bases"
+	| "symbol_index_empty"
+	| "exact_name_not_found"
+	| "metadata_filtered"
+	| "page_out_of_range"
+	| "no_match";
+
+export type SymbolSearchMissAction =
+	| "add_knowledge_base"
+	| "fix_kb_id"
+	| "wait_for_indexing"
+	| "fix_knowledge_base"
+	| "rebuild_symbol_index"
+	| "broaden_symbol_search"
+	| "relax_filter"
+	| "reset_offset"
+	| "use_text_search";
+
+export interface SymbolSearchMiss {
+	reason: SymbolSearchMissReason;
+	action: SymbolSearchMissAction;
+	requested_kb_id?: string;
+	kind?: KnowledgeSymbol["kind"];
+	file_pattern?: string;
+	exact: boolean;
+	searched_kbs: SearchKnowledgeBaseSummary[];
+	skipped_kbs: SearchKnowledgeBaseSummary[];
+	indexed_symbols: number;
+	unfiltered_matches: number;
+}
 
 export interface SymbolSearchResponse {
 	results: Array<{
@@ -254,6 +347,7 @@ export interface SymbolSearchResponse {
 	}>;
 	total_count: number;
 	has_more: boolean;
+	miss?: SymbolSearchMiss;
 }
 
 export const CURRENT_URL_STRUCTURE_POLICY = 1;
@@ -399,6 +493,218 @@ function kbTrustMultiplier(kb: KnowledgeBase): number {
 	if (kb.source_type === "directory" || kb.source_type === "file") multiplier *= 1.04;
 	if (kb.source_type === "text" || kb.source_type === "url") multiplier *= 0.98;
 	return multiplier;
+}
+
+function summarizeKnowledgeBases(kbs: KnowledgeBase[]): SearchKnowledgeBaseSummary[] {
+	return kbs.map((kb) => ({
+		id: kb.id,
+		name: kb.name,
+		status: kb.status,
+		chunk_count: kb.chunk_count,
+	}));
+}
+
+interface SearchMissFacts {
+	allKnowledgeBases: KnowledgeBase[];
+	availableKnowledgeBases: KnowledgeBase[];
+	searchedKnowledgeBases: KnowledgeBase[];
+	requestedKbId?: string;
+	mode: SearchMode;
+	fileType?: string;
+	pathPattern?: string;
+	minimumScore?: number;
+	offset: number;
+	retrievedCandidates: number;
+	thresholdCandidates: number;
+	eligibleCandidates: number;
+	filteredCandidates: number;
+	rankedCandidates: number;
+	totalResults: number;
+	embeddingIncompatibleCount: number;
+}
+
+function searchMissAction(
+	reason: SearchMissReason,
+	mode: SearchMode,
+	availableKnowledgeBases: KnowledgeBase[],
+): SearchMissAction {
+	switch (reason) {
+		case "no_knowledge_bases":
+			return "add_knowledge_base";
+		case "knowledge_base_not_found":
+			return "fix_kb_id";
+		case "no_searchable_knowledge_bases":
+			return availableKnowledgeBases.length > 0 && availableKnowledgeBases.every((kb) => kb.status === "indexing")
+				? "wait_for_indexing"
+				: "fix_knowledge_base";
+		case "no_indexed_chunks":
+			return availableKnowledgeBases.some((kb) => kb.status === "indexing")
+				? "wait_for_indexing"
+				: "fix_knowledge_base";
+		case "embedding_incompatible":
+			return "fix_embedding";
+		case "no_retrieval_candidates":
+			return mode === "fast" || mode === "code" || mode === "config" || mode === "errors"
+				? "try_semantic"
+				: mode === "semantic" || mode === "semantic_hybrid"
+					? "rephrase"
+					: "try_semantic_hybrid";
+		case "threshold_filtered":
+			return mode === "semantic_hybrid" ? "rephrase" : "try_semantic_hybrid";
+		case "evidence_filtered":
+			return "try_semantic_hybrid";
+		case "metadata_filtered":
+			return "relax_filter";
+		case "page_out_of_range":
+			return "reset_offset";
+		case "reranker_empty":
+		case "no_match":
+			return "rephrase";
+	}
+}
+
+function classifySearchMiss(facts: SearchMissFacts): SearchMiss {
+	const skippedKnowledgeBases = facts.availableKnowledgeBases.filter(
+		(kb) => kb.status !== "ready" && kb.status !== "stale",
+	);
+	let reason: SearchMissReason;
+	if (facts.allKnowledgeBases.length === 0) {
+		reason = "no_knowledge_bases";
+	} else if (
+		facts.requestedKbId &&
+		!facts.availableKnowledgeBases.some((kb) => kb.id === facts.requestedKbId || kb.name === facts.requestedKbId)
+	) {
+		reason = "knowledge_base_not_found";
+	} else if (facts.searchedKnowledgeBases.length === 0) {
+		reason = "no_searchable_knowledge_bases";
+	} else if (facts.searchedKnowledgeBases.every((kb) => kb.chunk_count === 0)) {
+		reason = "no_indexed_chunks";
+	} else if (
+		facts.retrievedCandidates === 0 &&
+		facts.embeddingIncompatibleCount === facts.searchedKnowledgeBases.filter((kb) => kb.chunk_count > 0).length
+	) {
+		reason = "embedding_incompatible";
+	} else if (facts.retrievedCandidates === 0) {
+		reason = "no_retrieval_candidates";
+	} else if (facts.thresholdCandidates === 0) {
+		reason = "threshold_filtered";
+	} else if (facts.eligibleCandidates === 0) {
+		reason = "evidence_filtered";
+	} else if (facts.filteredCandidates === 0 && (facts.fileType || facts.pathPattern)) {
+		reason = "metadata_filtered";
+	} else if (facts.mode === "deep" && facts.rankedCandidates === 0) {
+		reason = "reranker_empty";
+	} else if (facts.totalResults > 0 && facts.offset >= facts.totalResults) {
+		reason = "page_out_of_range";
+	} else {
+		reason = "no_match";
+	}
+	return {
+		reason,
+		action: searchMissAction(reason, facts.mode, facts.availableKnowledgeBases),
+		requested_kb_id: facts.requestedKbId,
+		min_hybrid_score: facts.minimumScore,
+		file_type: facts.fileType,
+		path_pattern: facts.pathPattern,
+		searched_kbs: summarizeKnowledgeBases(facts.searchedKnowledgeBases),
+		skipped_kbs: summarizeKnowledgeBases(skippedKnowledgeBases),
+		retrieved_candidates: facts.retrievedCandidates,
+		threshold_candidates: facts.thresholdCandidates,
+		eligible_candidates: facts.eligibleCandidates,
+		filtered_candidates: facts.filteredCandidates,
+		ranked_candidates: facts.rankedCandidates,
+		total_results: facts.totalResults,
+	};
+}
+
+function searchAttemptSummary(mode: SearchMode, response: SearchResponse): SearchAttemptSummary {
+	return {
+		mode,
+		reason: response.miss?.reason,
+		retrieved_candidates: response.tuning?.retrieved_candidates ?? 0,
+		threshold_candidates: response.tuning?.threshold_candidates ?? 0,
+		eligible_candidates: response.tuning?.eligible_candidates ?? 0,
+		filtered_candidates: response.tuning?.filtered_candidates ?? 0,
+		result_count: response.results.length,
+	};
+}
+interface SymbolSearchMissFacts {
+	allKnowledgeBases: KnowledgeBase[];
+	availableKnowledgeBases: KnowledgeBase[];
+	searchedKnowledgeBases: KnowledgeBase[];
+	requestedKbId?: string;
+	kind?: KnowledgeSymbol["kind"];
+	filePattern?: string;
+	exact: boolean;
+	offset: number;
+	totalResults: number;
+	indexedSymbols: number;
+	unfilteredMatches: number;
+}
+
+function symbolMissAction(
+	reason: SymbolSearchMissReason,
+	availableKnowledgeBases: KnowledgeBase[],
+): SymbolSearchMissAction {
+	switch (reason) {
+		case "no_knowledge_bases":
+			return "add_knowledge_base";
+		case "knowledge_base_not_found":
+			return "fix_kb_id";
+		case "no_searchable_knowledge_bases":
+			return availableKnowledgeBases.length > 0 && availableKnowledgeBases.every((kb) => kb.status === "indexing")
+				? "wait_for_indexing"
+				: "fix_knowledge_base";
+		case "symbol_index_empty":
+			return "rebuild_symbol_index";
+		case "exact_name_not_found":
+			return "broaden_symbol_search";
+		case "metadata_filtered":
+			return "relax_filter";
+		case "page_out_of_range":
+			return "reset_offset";
+		case "no_match":
+			return "use_text_search";
+	}
+}
+
+function classifySymbolSearchMiss(facts: SymbolSearchMissFacts): SymbolSearchMiss {
+	const skippedKnowledgeBases = facts.availableKnowledgeBases.filter(
+		(kb) => kb.status !== "ready" && kb.status !== "stale",
+	);
+	let reason: SymbolSearchMissReason;
+	if (facts.allKnowledgeBases.length === 0) {
+		reason = "no_knowledge_bases";
+	} else if (
+		facts.requestedKbId &&
+		!facts.availableKnowledgeBases.some((kb) => kb.id === facts.requestedKbId || kb.name === facts.requestedKbId)
+	) {
+		reason = "knowledge_base_not_found";
+	} else if (facts.searchedKnowledgeBases.length === 0) {
+		reason = "no_searchable_knowledge_bases";
+	} else if (facts.indexedSymbols === 0) {
+		reason = "symbol_index_empty";
+	} else if (facts.totalResults > 0 && facts.offset >= facts.totalResults) {
+		reason = "page_out_of_range";
+	} else if ((facts.kind || facts.filePattern) && facts.unfilteredMatches > 0) {
+		reason = "metadata_filtered";
+	} else if (facts.exact) {
+		reason = "exact_name_not_found";
+	} else {
+		reason = "no_match";
+	}
+	return {
+		reason,
+		action: symbolMissAction(reason, facts.availableKnowledgeBases),
+		requested_kb_id: facts.requestedKbId,
+		kind: facts.kind,
+		file_pattern: facts.filePattern,
+		exact: facts.exact,
+		searched_kbs: summarizeKnowledgeBases(facts.searchedKnowledgeBases),
+		skipped_kbs: summarizeKnowledgeBases(skippedKnowledgeBases),
+		indexed_symbols: facts.indexedSymbols,
+		unfiltered_matches: facts.unfilteredMatches,
+	};
 }
 
 function formatBytes(bytes: number): string {
@@ -1532,40 +1838,79 @@ export class KnowledgeEngine {
 		const requestedMode: SearchMode = options.mode ?? "hybrid";
 		if (requestedMode === "auto") {
 			const primaryMode = chooseAutoMode(query);
-			const attempts = [primaryMode, ...fallbackModesFor(primaryMode)];
+			const modes = [primaryMode, ...fallbackModesFor(primaryMode)];
 			const tried: SearchMode[] = [];
+			const attemptSummaries: SearchAttemptSummary[] = [];
 			const warnings: string[] = [];
-			let lastTuning: SearchTuningSummary | undefined;
-			for (const mode of attempts) {
+			let lastMissResponse: { mode: SearchMode; response: SearchResponse } | undefined;
+			let bestWeakResponse: { mode: SearchMode; response: SearchResponse } | undefined;
+			for (const mode of modes) {
 				if (tried.includes(mode)) continue;
 				tried.push(mode);
 				throwIfAborted(signal);
 				const response = await this.search(query, { ...options, mode }, signal);
-				lastTuning = response.tuning;
+				attemptSummaries.push(searchAttemptSummary(mode, response));
 				if (response.warnings) warnings.push(...response.warnings);
+				if (
+					response.miss?.reason === "no_knowledge_bases" ||
+					response.miss?.reason === "knowledge_base_not_found" ||
+					response.miss?.reason === "no_searchable_knowledge_bases" ||
+					response.miss?.reason === "no_indexed_chunks"
+				) {
+					return {
+						...response,
+						warnings: warnings.length > 0 ? [...new Set(warnings)] : response.warnings,
+						mode_used: mode,
+						retry_modes: tried.slice(0, -1),
+						miss: { ...response.miss, attempts: attemptSummaries },
+					};
+				}
 				if (!isWeakAutoResponse(query, response, primaryMode, mode)) {
 					return {
 						...response,
 						warnings: warnings.length > 0 ? [...new Set(warnings)] : response.warnings,
 						mode_used: mode,
 						retry_modes: tried.slice(0, -1),
-						suggestions: response.suggestions,
 					};
+				}
+				if (response.results.length > 0) {
+					if (!bestWeakResponse || response.results.length > bestWeakResponse.response.results.length) {
+						bestWeakResponse = { mode, response };
+					}
+				} else {
+					lastMissResponse = { mode, response };
 				}
 				if (tried.length >= 3) break;
 			}
-			return {
-				results: [],
-				total_count: 0,
-				has_more: false,
-				warnings: warnings.length > 0 ? [...new Set(warnings)] : undefined,
-				mode_used: tried.at(-1),
-				retry_modes: tried.slice(0, -1),
-				tuning: lastTuning,
-				suggestions: [
-					"No results after auto mode fallback. Check knowledge_status, try a more exact term, or rebuild the KB if indexing rules changed.",
-				],
-			};
+			if (lastMissResponse?.response.miss) {
+				const attemptedModes = new Set(attemptSummaries.map((attempt) => attempt.mode));
+				let action = lastMissResponse.response.miss.action;
+				if (action === "try_semantic" && attemptedModes.has("semantic")) {
+					action = attemptedModes.has("semantic_hybrid") ? "rephrase" : "try_semantic_hybrid";
+				} else if (action === "try_semantic_hybrid" && attemptedModes.has("semantic_hybrid")) {
+					action = "rephrase";
+				}
+				return {
+					...lastMissResponse.response,
+					warnings: warnings.length > 0 ? [...new Set(warnings)] : lastMissResponse.response.warnings,
+					mode_used: lastMissResponse.mode,
+					retry_modes: tried.filter((mode) => mode !== lastMissResponse.mode),
+					miss: {
+						...lastMissResponse.response.miss,
+						action,
+						attempts: attemptSummaries,
+					},
+				};
+			}
+			if (bestWeakResponse) {
+				return {
+					...bestWeakResponse.response,
+					warnings: warnings.length > 0 ? [...new Set(warnings)] : bestWeakResponse.response.warnings,
+					mode_used: bestWeakResponse.mode,
+					retry_modes: tried.filter((mode) => mode !== bestWeakResponse.mode),
+				};
+			}
+			throw new Error("Auto search exhausted without a result or miss classification");
 		}
 		const db = this.db;
 		const { mode = "hybrid", offset: requestedOffset, kb_id, filters, diversity = "balanced" } = options;
@@ -1576,8 +1921,9 @@ export class KnowledgeEngine {
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
 
 		const warnings: string[] = [];
+		const allKBs = listKBs(db);
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
-		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
+		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : allKBs;
 		const kbs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
 		const kbById = new Map(kbs.map((kb) => [kb.id, kb]));
 		for (const kb of availableKBs) {
@@ -1606,12 +1952,31 @@ export class KnowledgeEngine {
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
 				tuning: tuningSummary,
+				miss: classifySearchMiss({
+					allKnowledgeBases: allKBs,
+					availableKnowledgeBases: availableKBs,
+					searchedKnowledgeBases: kbs,
+					requestedKbId: kb_id,
+					mode,
+					fileType: filters?.file_type,
+					pathPattern: filters?.path_pattern,
+					minimumScore: tuning.minHybridScore,
+					offset,
+					retrievedCandidates: 0,
+					thresholdCandidates: 0,
+					eligibleCandidates: 0,
+					filteredCandidates: 0,
+					rankedCandidates: 0,
+					totalResults: 0,
+					embeddingIncompatibleCount: 0,
+				}),
 			};
 		}
 
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
 		let queryEmbedding: { vector: Float32Array; config: EmbeddingConfig } | undefined;
+		const embeddingIncompatibleKbIds = new Set<string>();
 
 		for (const kb of kbs) {
 			throwIfAborted(signal);
@@ -1638,6 +2003,7 @@ export class KnowledgeEngine {
 					queryVec.length,
 				);
 				if (!compatibility.compatible) {
+					embeddingIncompatibleKbIds.add(kb.id);
 					warnings.push(embeddingMismatchWarning(kb, compatibility));
 					continue;
 				}
@@ -1678,6 +2044,7 @@ export class KnowledgeEngine {
 					vecResults = vectorResults.results;
 					for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 				} else {
+					embeddingIncompatibleKbIds.add(kb.id);
 					warnings.push(embeddingMismatchWarning(kb, compatibility));
 				}
 				const fused = weightedScoreFusion(bm25Results, vecResults);
@@ -1702,27 +2069,30 @@ export class KnowledgeEngine {
 				result.score = ranking.adjusted_score;
 			}
 		}
-		let scored = unique;
+		let thresholded = unique.filter((result) => rankingByChunkId.has(result.chunkId));
+		if (retrievalMode !== "fast" && retrievalMode !== "semantic") {
+			thresholded = thresholded.filter((result) => result.score >= tuning.minHybridScore);
+		}
+		const thresholdCandidates = thresholded.length;
+		let eligible = thresholded;
 		if (retrievalMode === "fast") {
-			scored = unique.filter((result) => {
+			eligible = thresholded.filter((result) => {
 				const chunk = getChunkById(db, result.chunkId);
-				if (!chunk) return false;
-				return hasAnyLexicalEvidence(buildChunkEmbeddingText(chunk), queryTokens);
+				return chunk ? hasAnyLexicalEvidence(buildChunkEmbeddingText(chunk), queryTokens) : false;
 			});
-		} else if (retrievalMode !== "semantic") {
-			scored = unique.filter((result) => {
+		} else if (retrievalMode !== "semantic" && retrievalMode !== "semantic_hybrid") {
+			eligible = thresholded.filter((result) => {
 				const chunk = getChunkById(db, result.chunkId);
-				if (!chunk) return false;
-				if (retrievalMode === "semantic_hybrid") return result.score >= tuning.minHybridScore;
-				return result.score >= tuning.minHybridScore && hasEnoughLexicalEvidence(chunk, queryTokens);
+				return chunk ? hasEnoughLexicalEvidence(chunk, queryTokens) : false;
 			});
 		}
-		scored.sort((a, b) => b.score - a.score);
+		eligible.sort((a, b) => b.score - a.score);
+		const eligibleCandidates = eligible.length;
 
 		// Apply metadata filters post-retrieval
-		let filtered = scored;
+		let filtered = eligible;
 		if (normalizedFileType || filters?.path_pattern) {
-			filtered = scored.filter((r) => {
+			filtered = eligible.filter((r) => {
 				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) return false;
 				if (normalizedFileType && chunk.file_type !== normalizedFileType) return false;
@@ -1799,19 +2169,43 @@ export class KnowledgeEngine {
 					},
 				};
 			});
+			const deepTuning: SearchTuningSummary = {
+				...tuningSummary,
+				retrieved_candidates: unique.length,
+				threshold_candidates: thresholdCandidates,
+				eligible_candidates: eligibleCandidates,
+				filtered_candidates: filtered.length,
+				diversity_candidates: ranked.length,
+				candidate_pool_truncated: candidatePoolTruncated,
+			};
 			return {
 				results,
 				total_count: diversified.length,
 				has_more: offset + limit < diversified.length,
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
-				tuning: {
-					...tuningSummary,
-					retrieved_candidates: unique.length,
-					filtered_candidates: filtered.length,
-					diversity_candidates: ranked.length,
-					candidate_pool_truncated: candidatePoolTruncated,
-				},
+				tuning: deepTuning,
+				miss:
+					results.length === 0
+						? classifySearchMiss({
+								allKnowledgeBases: allKBs,
+								availableKnowledgeBases: availableKBs,
+								searchedKnowledgeBases: kbs,
+								requestedKbId: kb_id,
+								mode,
+								fileType: filters?.file_type,
+								pathPattern: filters?.path_pattern,
+								minimumScore: tuning.minHybridScore,
+								offset,
+								retrievedCandidates: unique.length,
+								thresholdCandidates,
+								eligibleCandidates,
+								filteredCandidates: filtered.length,
+								rankedCandidates: ranked.length,
+								totalResults: diversified.length,
+								embeddingIncompatibleCount: embeddingIncompatibleKbIds.size,
+							})
+						: undefined,
 			};
 		}
 
@@ -1891,6 +2285,15 @@ export class KnowledgeEngine {
 				};
 			})(),
 		}));
+		const responseTuning: SearchTuningSummary = {
+			...tuningSummary,
+			retrieved_candidates: unique.length,
+			threshold_candidates: thresholdCandidates,
+			eligible_candidates: eligibleCandidates,
+			filtered_candidates: filtered.length,
+			diversity_candidates: ranked.length,
+			candidate_pool_truncated: candidatePoolTruncated,
+		};
 
 		return {
 			results,
@@ -1898,19 +2301,27 @@ export class KnowledgeEngine {
 			has_more: offset + limit < total,
 			warnings: warnings.length > 0 ? warnings : undefined,
 			mode_used: mode,
-			tuning: {
-				...tuningSummary,
-				retrieved_candidates: unique.length,
-				filtered_candidates: filtered.length,
-				diversity_candidates: ranked.length,
-				candidate_pool_truncated: candidatePoolTruncated,
-			},
-			suggestions:
+			tuning: responseTuning,
+			miss:
 				results.length === 0
-					? [
-							"Try mode 'fast' for exact symbols, mode 'semantic' for pure vector search, or mode 'semantic_hybrid' when weak lexical overlap should not block fused vector results.",
-							"Run knowledge_status if the KB should contain this answer.",
-						]
+					? classifySearchMiss({
+							allKnowledgeBases: allKBs,
+							availableKnowledgeBases: availableKBs,
+							searchedKnowledgeBases: kbs,
+							requestedKbId: kb_id,
+							mode,
+							fileType: filters?.file_type,
+							pathPattern: filters?.path_pattern,
+							minimumScore: tuning.minHybridScore,
+							offset,
+							retrievedCandidates: unique.length,
+							thresholdCandidates,
+							eligibleCandidates,
+							filteredCandidates: filtered.length,
+							rankedCandidates: ranked.length,
+							totalResults: total,
+							embeddingIncompatibleCount: embeddingIncompatibleKbIds.size,
+						})
 					: undefined,
 		};
 	}
@@ -2000,10 +2411,32 @@ export class KnowledgeEngine {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
 		const db = this.db;
+		const allKBs = listKBs(db);
 		const selectedKB = options.kb_id ? (getKB(db, options.kb_id) ?? getKBByName(db, options.kb_id)) : undefined;
-		if (options.kb_id && !selectedKB) throw new Error(`Knowledge base not found: ${options.kb_id}`);
+		const availableKBs = options.kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : allKBs;
+		const searchedKBs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
 		const limit = Math.max(1, Math.min(200, options.limit ?? 20));
 		const offset = Math.max(0, options.offset ?? 0);
+		if (searchedKBs.length === 0) {
+			return {
+				results: [],
+				total_count: 0,
+				has_more: false,
+				miss: classifySymbolSearchMiss({
+					allKnowledgeBases: allKBs,
+					availableKnowledgeBases: availableKBs,
+					searchedKnowledgeBases: searchedKBs,
+					requestedKbId: options.kb_id,
+					kind: options.kind,
+					filePattern: options.file_pattern,
+					exact: options.exact === true,
+					offset,
+					totalResults: 0,
+					indexedSymbols: 0,
+					unfilteredMatches: 0,
+				}),
+			};
+		}
 		const symbolOptions = {
 			kbId: selectedKB?.id,
 			kind: options.kind,
@@ -2019,25 +2452,49 @@ export class KnowledgeEngine {
 		const page = symbols.slice(0, limit);
 		const total = countSymbols(db, query, symbolOptions);
 		throwIfAborted(signal);
+		const results = page.map((symbol) => {
+			const kb = getKB(db, symbol.kb_id);
+			return {
+				name: symbol.name,
+				kind: symbol.kind,
+				file_path: symbol.file_path,
+				file_type: symbol.file_type,
+				kb_name: kb?.name ?? "unknown",
+				start_line: symbol.start_line,
+				end_line: symbol.end_line,
+				signature: symbol.signature ?? undefined,
+				container_name: symbol.container_name ?? undefined,
+				text: symbol.text,
+				indexed_at: symbol.indexed_at,
+			};
+		});
+		let miss: SymbolSearchMiss | undefined;
+		if (results.length === 0) {
+			const indexedSymbols = countSymbols(db, "", { kbId: selectedKB?.id });
+			const unfilteredMatches =
+				total === 0 && (options.kind || options.file_pattern)
+					? countSymbols(db, query, { kbId: selectedKB?.id, exact: options.exact })
+					: total;
+			throwIfAborted(signal);
+			miss = classifySymbolSearchMiss({
+				allKnowledgeBases: allKBs,
+				availableKnowledgeBases: availableKBs,
+				searchedKnowledgeBases: searchedKBs,
+				requestedKbId: options.kb_id,
+				kind: options.kind,
+				filePattern: options.file_pattern,
+				exact: options.exact === true,
+				offset,
+				totalResults: total,
+				indexedSymbols,
+				unfilteredMatches,
+			});
+		}
 		return {
-			results: page.map((symbol) => {
-				const kb = getKB(db, symbol.kb_id);
-				return {
-					name: symbol.name,
-					kind: symbol.kind,
-					file_path: symbol.file_path,
-					file_type: symbol.file_type,
-					kb_name: kb?.name ?? "unknown",
-					start_line: symbol.start_line,
-					end_line: symbol.end_line,
-					signature: symbol.signature ?? undefined,
-					container_name: symbol.container_name ?? undefined,
-					text: symbol.text,
-					indexed_at: symbol.indexed_at,
-				};
-			}),
+			results,
 			total_count: total,
 			has_more: symbols.length > limit,
+			miss,
 		};
 	}
 

@@ -51,6 +51,8 @@ export interface SearchTuningSummary {
 	candidate_limit: number;
 	retrieval_limit_per_kb: number;
 	retrieved_candidates: number;
+	threshold_candidates: number;
+	eligible_candidates: number;
 	filtered_candidates: number;
 	diversity_candidates: number;
 	candidate_pool_truncated: boolean;
@@ -315,6 +317,8 @@ export function summarizeSearchTuning(
 		candidate_limit: candidateLimit,
 		retrieval_limit_per_kb: candidateLimit,
 		retrieved_candidates: 0,
+		threshold_candidates: 0,
+		eligible_candidates: 0,
 		filtered_candidates: 0,
 		diversity_candidates: 0,
 		candidate_pool_truncated: false,

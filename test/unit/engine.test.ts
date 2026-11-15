@@ -99,6 +99,10 @@ describe("KnowledgeEngine", () => {
 			const semantic = await engine.search("OAuth token", { mode: "semantic" });
 			expect(semantic.total_count).toBe(0);
 			expect(semantic.warnings?.join("\n")).toContain("vector retrieval was skipped");
+			expect(semantic.miss).toMatchObject({
+				reason: "embedding_incompatible",
+				action: "fix_embedding",
+			});
 		});
 
 		it("reports decoration-only incompatibility across status, doctor, and search", async () => {
@@ -945,6 +949,56 @@ describe("KnowledgeEngine", () => {
 	});
 
 	describe("search", () => {
+		it("classifies an empty knowledge store without running diagnostics", async () => {
+			const result = await engine.search("missing", { mode: "fast" });
+
+			expect(result.miss).toMatchObject({
+				reason: "no_knowledge_bases",
+				action: "add_knowledge_base",
+				searched_kbs: [],
+				skipped_kbs: [],
+			});
+		});
+
+		it("does not recommend another search mode when selected knowledge bases have no chunks", async () => {
+			const db = openDatabase(TEST_DIR);
+			try {
+				createKB(db, { name: "Empty", source_type: "text" });
+				const indexing = createKB(db, { name: "Indexing", source_type: "text" });
+				db.prepare("UPDATE knowledge_bases SET status = 'indexing' WHERE id = ?").run(indexing.id);
+			} finally {
+				db.close();
+			}
+
+			const scoped = await engine.search("missing", { mode: "auto", kb_id: "Empty" });
+			const all = await engine.search("missing", { mode: "fast" });
+
+			expect(scoped.miss).toMatchObject({
+				reason: "no_indexed_chunks",
+				action: "fix_knowledge_base",
+				searched_kbs: [{ name: "Empty", chunk_count: 0 }],
+				skipped_kbs: [],
+			});
+			expect(scoped.miss?.attempts).toHaveLength(1);
+			expect(all.miss).toMatchObject({
+				reason: "no_indexed_chunks",
+				action: "wait_for_indexing",
+				skipped_kbs: [{ name: "Indexing", status: "indexing" }],
+			});
+		});
+
+		it("distinguishes an unknown knowledge base filter from a query miss", async () => {
+			await engine.add("Known knowledge base content.", "Known");
+
+			const result = await engine.search("missing", { mode: "fast", kb_id: "Unknown" });
+
+			expect(result.miss).toMatchObject({
+				reason: "knowledge_base_not_found",
+				action: "fix_kb_id",
+				requested_kb_id: "Unknown",
+			});
+		});
+
 		it("accepts a knowledge base name in kb_id", async () => {
 			const { kb } = await engine.add(
 				"Scoped search content about SearchByNameToken and exact knowledge base names.",
@@ -1005,6 +1059,13 @@ describe("KnowledgeEngine", () => {
 				limit: 50,
 				diversity: "off",
 			});
+			const emptyPage = await engine.search("GlobalBoundToken", {
+				mode: "fast",
+				profile: "precision",
+				limit: 50,
+				offset: 400,
+				diversity: "off",
+			});
 
 			expect(firstPage.results).toHaveLength(50);
 			expect(firstPage.total_count).toBe(300);
@@ -1013,6 +1074,8 @@ describe("KnowledgeEngine", () => {
 				candidate_limit: 300,
 				retrieval_limit_per_kb: 300,
 				retrieved_candidates: 400,
+				threshold_candidates: 400,
+				eligible_candidates: 400,
 				filtered_candidates: 400,
 				diversity_candidates: 300,
 				candidate_pool_truncated: true,
@@ -1023,6 +1086,13 @@ describe("KnowledgeEngine", () => {
 			expect(repeatedFirstPage.results.map((result) => result.file_path)).toEqual(
 				firstPage.results.map((result) => result.file_path),
 			);
+			expect(emptyPage.results).toEqual([]);
+			expect(emptyPage.total_count).toBe(400);
+			expect(emptyPage.miss).toMatchObject({
+				reason: "page_out_of_range",
+				action: "reset_offset",
+				total_results: 400,
+			});
 		});
 
 		it("diversifies repeated hits from the same file", async () => {
@@ -1292,6 +1362,11 @@ describe("KnowledgeEngine", () => {
 
 			expect(result.total_count).toBe(0);
 			expect(result.results).toEqual([]);
+			expect(result.miss).toMatchObject({
+				reason: "no_retrieval_candidates",
+				action: "try_semantic_hybrid",
+				retrieved_candidates: 0,
+			});
 		});
 
 		it("semantic_hybrid mode can return vector-backed results without a lexical anchor", async () => {
@@ -1320,6 +1395,50 @@ describe("KnowledgeEngine", () => {
 
 			expect(result.total_count).toBe(0);
 			expect(result.results).toEqual([]);
+			expect(result.miss).toMatchObject({
+				reason: "evidence_filtered",
+				action: "try_semantic_hybrid",
+			});
+			expect(result.miss?.retrieved_candidates).toBeGreaterThan(0);
+			expect(result.miss?.threshold_candidates).toBeGreaterThan(0);
+			expect(result.miss?.eligible_candidates).toBe(0);
+		});
+
+		it("distinguishes score-threshold rejection from lexical evidence rejection", async () => {
+			vi.stubEnv("PI_KNOWLEDGE_MIN_HYBRID_SCORE", "1");
+			await engine.add("A focused document about authentication permissions.", "Threshold");
+
+			const result = await engine.search("unrelated conceptual wording", {
+				mode: "semantic_hybrid",
+				limit: 3,
+			});
+
+			expect(result.miss).toMatchObject({
+				reason: "threshold_filtered",
+				action: "rephrase",
+				threshold_candidates: 0,
+			});
+			expect(result.miss?.retrieved_candidates).toBeGreaterThan(0);
+			expect(result.miss?.eligible_candidates).toBe(0);
+		});
+
+		it("distinguishes metadata filters from retrieval gates", async () => {
+			await engine.add("MetadataFilterToken source text for filter classification.", "Metadata Filter");
+
+			const result = await engine.search("MetadataFilterToken", {
+				mode: "fast",
+				filters: { path_pattern: "missing/path" },
+			});
+
+			expect(result.miss).toMatchObject({
+				reason: "metadata_filtered",
+				action: "relax_filter",
+				path_pattern: "missing/path",
+			});
+			expect(result.miss?.retrieved_candidates).toBeGreaterThan(0);
+			expect(result.miss?.threshold_candidates).toBeGreaterThan(0);
+			expect(result.miss?.eligible_candidates).toBeGreaterThan(0);
+			expect(result.miss?.filtered_candidates).toBe(0);
 		});
 
 		it("boosts small modules when the query names their path", async () => {
@@ -1577,6 +1696,37 @@ describe("KnowledgeEngine", () => {
 			const result = await engine.search("SkipIndexingToken", { mode: "hybrid" });
 			expect(result.total_count).toBe(0);
 			expect(result.warnings?.[0]).toContain('"Partial" is indexing');
+			expect(result.miss).toMatchObject({
+				reason: "no_searchable_knowledge_bases",
+				action: "wait_for_indexing",
+				skipped_kbs: [{ name: "Partial", status: "indexing" }],
+			});
+		});
+		it("does not attribute a scoped miss to an unrelated indexing knowledge base", async () => {
+			await engine.add("Ready scope content about ScopedReadyToken.", "Ready Scope");
+			await engine.add("Unrelated indexing content.", "Unrelated");
+			const unrelated = engine.list().find((kb) => kb.name === "Unrelated");
+			if (!unrelated) throw new Error("Expected unrelated knowledge base");
+			const db = openDatabase(TEST_DIR);
+			try {
+				db.prepare("UPDATE knowledge_bases SET status = 'indexing', updated_at = ? WHERE id = ?").run(
+					Date.now(),
+					unrelated.id,
+				);
+			} finally {
+				db.close();
+			}
+
+			const result = await engine.search("MissingScopedToken", {
+				mode: "fast",
+				kb_id: "Ready Scope",
+			});
+
+			expect(result.miss).toMatchObject({
+				reason: "no_retrieval_candidates",
+				searched_kbs: [{ name: "Ready Scope", status: "ready" }],
+				skipped_kbs: [],
+			});
 		});
 
 		it("auto mode selects exact lookup and reports mode used", async () => {
@@ -1596,7 +1746,13 @@ describe("KnowledgeEngine", () => {
 
 			expect(result.total_count).toBe(0);
 			expect(result.retry_modes?.length).toBeGreaterThan(0);
-			expect(result.suggestions?.[0]).toContain("No results after auto mode fallback");
+			const attempts = result.miss?.attempts ?? [];
+			expect(attempts.map((attempt) => attempt.mode)).toEqual(["hybrid", "fast", "semantic"]);
+			expect(new Set([result.mode_used, ...(result.retry_modes ?? [])])).toEqual(
+				new Set(attempts.map((attempt) => attempt.mode)),
+			);
+			expect(attempts.find((attempt) => attempt.mode === result.mode_used)?.reason).toBe(result.miss?.reason);
+			expect(result.miss?.action).not.toBe("try_semantic");
 		});
 	});
 

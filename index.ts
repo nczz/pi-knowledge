@@ -1,7 +1,8 @@
+import type { KnowledgeEngine, SearchMiss, SymbolSearchMiss } from "./src/engine.ts";
 import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
 import { formatKnowledgeStatus } from "./src/status.ts";
 
-type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
+type KnowledgeEngineInstance = KnowledgeEngine;
 type StorageRuntime = typeof import("./src/storage/sqlite.ts");
 type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
 
@@ -114,6 +115,156 @@ function scanOptionsFromSourceOptions(raw: string | null | undefined): {
 	} catch {
 		return {};
 	}
+}
+const SEARCH_MISS_ACTION_TEXT: Record<SearchMiss["action"], string> = {
+	add_knowledge_base: "Use knowledge_add to index a directory, file, URL, or text source.",
+	fix_kb_id: "Fix kb_id or omit it to search all knowledge bases.",
+	wait_for_indexing: "Retry after indexing completes.",
+	fix_knowledge_base: "Run knowledge_doctor and follow the action for the affected knowledge base.",
+	fix_embedding: "Run knowledge_doctor to resolve the embedding compatibility problem.",
+	try_semantic: 'Try mode "semantic", or rephrase with terms from the target files.',
+	try_semantic_hybrid: 'Try mode "semantic_hybrid", or rephrase with terms from the target files.',
+	relax_filter: "Relax the file type or path filter.",
+	reset_offset: "Retry with offset 0.",
+	rephrase: "Rephrase with exact terms from the target files.",
+};
+
+const SYMBOL_MISS_ACTION_TEXT: Record<SymbolSearchMiss["action"], string> = {
+	add_knowledge_base: "Use knowledge_add to index a directory, file, URL, or text source.",
+	fix_kb_id: "Fix kb_id or omit it to search all knowledge bases.",
+	wait_for_indexing: "Retry after indexing completes.",
+	fix_knowledge_base: "Run knowledge_doctor and follow the action for the affected knowledge base.",
+	rebuild_symbol_index:
+		"Run knowledge_update for a source-backed KB, or re-add an inline/imported source to rebuild symbol metadata.",
+	broaden_symbol_search: "Retry with exact=false.",
+	relax_filter: "Relax the kind or file_pattern filter.",
+	reset_offset: "Retry with offset 0.",
+	use_text_search: 'Try knowledge_search mode "fast" for source text or "adaptive" for surrounding context.',
+};
+
+function inlineLabel(value: string, fallback: string): string {
+	const normalized = value
+		.replace(/[\p{Cc}\p{Cf}]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.replaceAll('"', "'");
+	return normalized && normalized.length <= 80 ? `"${normalized}"` : fallback;
+}
+
+function requestedKbSuffix(requestedKbId: string | undefined): string {
+	return requestedKbId ? ` in ${inlineLabel(requestedKbId, "the requested KB")}` : "";
+}
+
+function compactFilter(miss: SearchMiss): string {
+	const filters: string[] = [];
+	if (miss.file_type) filters.push(`file_type ${inlineLabel(miss.file_type, "with the requested value")}`);
+	if (miss.path_pattern) filters.push(`path_pattern ${inlineLabel(miss.path_pattern, "with the requested value")}`);
+	return filters.join(" and ") || "the requested metadata filters";
+}
+
+function formatSearchMiss(miss: SearchMiss): string {
+	const scope = requestedKbSuffix(miss.requested_kb_id);
+	const indexedChunks = miss.searched_kbs.reduce((count, kb) => count + kb.chunk_count, 0);
+	const attemptedModes = miss.attempts?.map((attempt) => attempt.mode);
+	const attemptSuffix =
+		attemptedModes && attemptedModes.length > 1 ? ` Modes tried: ${attemptedModes.join(", ")}.` : "";
+	let cause: string;
+	switch (miss.reason) {
+		case "no_knowledge_bases":
+			cause = "No results: no knowledge bases are indexed.";
+			break;
+		case "knowledge_base_not_found":
+			cause = `No results: knowledge base ${inlineLabel(miss.requested_kb_id ?? "", "from the requested kb_id")} does not exist.`;
+			break;
+		case "no_searchable_knowledge_bases": {
+			const indexing = miss.skipped_kbs.find((kb) => kb.status === "indexing");
+			const errored = miss.skipped_kbs.find((kb) => kb.status === "error");
+			if (miss.action === "wait_for_indexing" && indexing) {
+				cause = `No results yet: ${inlineLabel(indexing.name, "the selected KB")} is still indexing (${indexing.chunk_count} chunks persisted).`;
+			} else if (errored) {
+				cause = `No results: ${inlineLabel(errored.name, "the selected KB")} is in error state and is not searchable.`;
+			} else if (indexing) {
+				cause = `No results: one or more selected knowledge bases are unavailable while ${inlineLabel(indexing.name, "one KB")} indexes.`;
+			} else {
+				cause = "No results: no selected knowledge base is currently searchable.";
+			}
+			break;
+		}
+		case "no_indexed_chunks":
+			cause = "No results: the searchable knowledge bases contain no indexed chunks.";
+			break;
+		case "embedding_incompatible":
+			cause = "No results: the selected knowledge bases are incompatible with the active embedding configuration.";
+			break;
+		case "no_retrieval_candidates":
+			cause = `No results: no retrieval candidates matched${scope} (${indexedChunks} indexed chunks).${attemptSuffix}`;
+			break;
+		case "threshold_filtered": {
+			const threshold =
+				miss.min_hybrid_score === undefined ? "the score threshold" : `the ${miss.min_hybrid_score} score threshold`;
+			cause = `No results: ${miss.retrieved_candidates} candidates were retrieved, but none passed ${threshold}.${attemptSuffix}`;
+			break;
+		}
+		case "evidence_filtered":
+			cause = `No results: ${miss.threshold_candidates} candidates passed the score threshold, but none had enough lexical evidence.${attemptSuffix}`;
+			break;
+		case "metadata_filtered":
+			cause = `No results: ${miss.eligible_candidates} eligible candidates matched the query, but none matched ${compactFilter(miss)}.`;
+			break;
+		case "reranker_empty":
+			cause = `No results: ${miss.filtered_candidates} candidates reached deep reranking, but the reranker returned none.`;
+			break;
+		case "page_out_of_range":
+			cause = `No results on this page: the requested offset exceeds ${miss.total_results} available results.`;
+			break;
+		case "no_match":
+			cause = `No results: candidates were processed but no result remained${scope}.${attemptSuffix}`;
+			break;
+	}
+	return `${cause}\n${SEARCH_MISS_ACTION_TEXT[miss.action]}`;
+}
+
+function formatSymbolMiss(miss: SymbolSearchMiss): string {
+	const scope = requestedKbSuffix(miss.requested_kb_id);
+	let cause: string;
+	switch (miss.reason) {
+		case "no_knowledge_bases":
+			cause = "No symbols found: no knowledge bases are indexed.";
+			break;
+		case "knowledge_base_not_found":
+			cause = `No symbols found: knowledge base ${inlineLabel(miss.requested_kb_id ?? "", "from the requested kb_id")} does not exist.`;
+			break;
+		case "no_searchable_knowledge_bases": {
+			const indexing = miss.skipped_kbs.find((kb) => kb.status === "indexing");
+			const errored = miss.skipped_kbs.find((kb) => kb.status === "error");
+			if (miss.action === "wait_for_indexing" && indexing) {
+				cause = `No symbols yet: ${inlineLabel(indexing.name, "the selected KB")} is still indexing (${indexing.chunk_count} chunks persisted).`;
+			} else if (errored) {
+				cause = `No symbols found: ${inlineLabel(errored.name, "the selected KB")} is in error state and is not searchable.`;
+			} else if (indexing) {
+				cause = `No symbols found: one or more selected knowledge bases are unavailable while ${inlineLabel(indexing.name, "one KB")} indexes.`;
+			} else {
+				cause = "No symbols found: no selected knowledge base is currently searchable.";
+			}
+			break;
+		}
+		case "symbol_index_empty":
+			cause = `No symbols are indexed${scope}.`;
+			break;
+		case "exact_name_not_found":
+			cause = `No symbol matched the exact normalized name${scope}.`;
+			break;
+		case "metadata_filtered":
+			cause = `No symbols matched the requested kind or file_pattern${scope}; ${miss.unfiltered_matches} unfiltered matches exist.`;
+			break;
+		case "page_out_of_range":
+			cause = "No symbols on this page: the requested offset exceeds the available matches.";
+			break;
+		case "no_match":
+			cause = `No indexed symbol matched${scope}.`;
+			break;
+	}
+	return `${cause}\n${SYMBOL_MISS_ACTION_TEXT[miss.action]}`;
 }
 
 function runtimeModule(modulePath: string): string {
@@ -466,7 +617,7 @@ export default function (pi: ExtensionAPI) {
 			"Use mode 'adaptive' when the user needs surrounding implementation context, related nearby sections, or enough context to make a code change",
 			"Use mode 'deep' for high-stakes answers, ambiguous top results, or final verification where slower cross-encoder reranking is acceptable",
 			"Use profile 'low_token' for slow local models that need fewer, stricter, longer snippets; use profile 'precision' for identifiers/errors and 'recall' or 'long_context' for broad prose/document research",
-			"If a search returns no results or obviously weak results, retry once with a different mode before concluding the KB lacks the answer",
+			"If a search returns no results, follow its classified action; do not repeat modes listed in the auto attempt summary",
 			"If top results are repetitive, retry with diversity 'strong' or mode 'adaptive' instead of increasing the limit first",
 		],
 		parameters: Type.Object({
@@ -555,19 +706,8 @@ export default function (pi: ExtensionAPI) {
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
 			const response = await engine.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
-				const details = [
-					"No results found.",
-					response.mode_used ? `Mode used: ${response.mode_used}` : "",
-					response.retry_modes?.length ? `Retried: ${response.retry_modes.join(", ")}` : "",
-					response.warnings?.length ? `Warnings: ${response.warnings.join(" | ")}` : "",
-					diagnostics && response.tuning
-						? `Tuning: profile=${response.tuning.requested_profile}->${response.tuning.selected_profile}, limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, filtered=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
-						: "",
-					response.suggestions?.length ? `Suggestions: ${response.suggestions.join(" | ")}` : "",
-				]
-					.filter(Boolean)
-					.join("\n");
-				return { content: [{ type: "text", text: details }], details: diagnostics ? response : undefined };
+				if (!response.miss) throw new Error("Search returned no results without a miss classification");
+				return { content: [{ type: "text", text: formatSearchMiss(response.miss) }], details: response };
 			}
 			let output = `${response.total_count} results (showing ${response.results.length})`;
 			if (response.mode_used) output += ` — mode: ${response.mode_used}`;
@@ -600,7 +740,7 @@ export default function (pi: ExtensionAPI) {
 							: "";
 					const tuning =
 						diagnostics && response.tuning && i === 0
-							? `\nTuning: limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, filtered=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
+							? `\nTuning: limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, threshold=${response.tuning.threshold_candidates}, eligible=${response.tuning.eligible_candidates}, metadata=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
 							: "";
 					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}${provenance}${tuning}`;
 				})
@@ -619,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use knowledge_symbol_search before knowledge_search when looking for a function, class, env var, config key, route, or Markdown heading",
 			"Use exact=true when the user provides a precise symbol or key",
-			"This is a lightweight declaration-pattern index, not full LSP; for methods, uncommon syntax, or missing symbols, fallback to knowledge_search mode 'fast' or 'adaptive'",
+			"This is a lightweight declaration-pattern index, not full LSP; on a miss, follow its classified action and use knowledge_search mode 'fast' or 'adaptive' only when directed to source text",
 			"After finding a symbol, use knowledge_search mode 'adaptive' with the file path or symbol name when surrounding implementation context is needed",
 		],
 		parameters: Type.Object({
@@ -660,14 +800,8 @@ export default function (pi: ExtensionAPI) {
 				_signal,
 			);
 			if (response.results.length === 0) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "No symbols found. This may mean the symbol is absent, symbol metadata is missing/stale, or the lightweight extractor does not cover this syntax. For important lookups, run knowledge_doctor or fallback to knowledge_search mode 'fast'/'adaptive'.",
-						},
-					],
-				};
+				if (!response.miss) throw new Error("Symbol search returned no results without a miss classification");
+				return { content: [{ type: "text", text: formatSymbolMiss(response.miss) }], details: response };
 			}
 			const lines = response.results.map((result, index) => {
 				const signature = result.signature ? ` — ${result.signature}` : "";

@@ -92,6 +92,12 @@ SQLite FTS5 的 `bm25()` 分數是「越小越相關」。`KnowledgeEngine.searc
 
 MMR 如果每一輪對每個未選候選重新掃過所有已選結果，會形成 O(n³)。保留每個候選目前最大的 redundancy，選出新結果後只更新一次剩餘候選，可維持相同的 max-redundancy 公式與 stable tie order，並降為 O(n²)。CPU-bound loop 仍要定期檢查 `AbortSignal`、在 bounded slice 後讓出 event loop；只在外層 async function 檢查取消不足以提供可接受的互動性。
 
+## Zero-result classification must use pipeline stages
+
+`retrieved_candidates > 0` 且 `filtered_candidates === 0` 不能直接宣稱所有候選都低於 threshold；lexical evidence gate 或 metadata filter 也可能清空結果。搜尋必須分別記錄 retrieval、threshold-passed、eligibility-passed、metadata-passed 與 final ranked counts，再由 engine 決定 miss reason。`auto` 必須保留各次嘗試的 bounded summary，不能只用最後一次 tuning 代表整個搜尋；若最後顯示的 miss 來自較早嘗試，`mode_used` 必須指向同一次嘗試。
+
+`path_pattern` 比對的是 indexed chunk 的相對 `file_path`，不是 KB 的絕對 `source_path`。不能用兩個字串是否互含來宣稱 KB 沒有 coverage，也不能從 query 自由文字猜測目標路徑。完整 stale-file/coverage 判斷需要 diagnostics source scan；零結果 formatter 不得為了附註 freshness 同步執行 `diagnoseKB()`。
+
 ## URL source type 不能偷用 text
 
 URL indexing 如果把 `source_type` 存成 `text`，`knowledge_update` 會走本機檔案存在性檢查，對 `https://...` 永遠失敗。URL 必須是正式 source type，並在 update 時重新 fetch。

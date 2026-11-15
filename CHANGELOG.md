@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-15
+
+### Added
+- Added deterministic, engine-owned zero-result classifications for `knowledge_search` and `knowledge_symbol_search`, with structured reasons/actions, searched and skipped KB summaries, stage-specific candidate counts, and bounded `auto` attempt details (#24).
+
+### Changed
+- Replaced hypothetical zero-result guidance with concise fact-first actions while keeping miss classification free of source diagnostics scans and absolute source-path enumeration.
+- Split search diagnostics into retrieved, score-threshold-passed, eligibility-passed, metadata-passed, and diversity candidate counts so threshold, lexical-evidence, and file/path rejection remain distinct.
+
 ## [0.14.0] - 2026-11-12
 
 ### Added

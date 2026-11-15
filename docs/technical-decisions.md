@@ -188,6 +188,9 @@
 - Ranking diagnostics 必須可回傳，方便用真實專案報告檢視分數與排序原因。
 - Agent-facing mode selection 必須文件化，不能只提供 modes 讓模型自行猜測。
 - `auto` mode 在工具層執行 primary mode selection 與 fallback，並回傳 mode/retry metadata。
+- 零結果分類由 engine 根據 KB selection、indexed chunk presence、retrieval、score threshold、lexical eligibility、metadata filter、rerank 與 pagination 的實際階段資料產生；tool layer 只負責兩行文字格式化。
+- 搜尋 miss 必須提供 structured reason/action、分階段 candidate counts 與 bounded auto-attempt summaries。Symbol lookup 使用對應的 symbol miss contract。
+- Miss path 不執行 diagnostics/source scan，不從 query、KB root 或相對 `path_pattern` 推論 source coverage，也不預設列出本機絕對路徑。
 
 **理由**:
 - 索引增強解決「chunk 自身缺少檔案/章節/符號語意」。
@@ -196,6 +199,8 @@
 - Confidence gate 讓無意義或低證據查詢可以回傳 0 結果，避免 agent 建立錯誤信心。
 - Mode contract 讓 agent 依任務型態選擇 `fast`、`semantic`、`semantic_hybrid`、`hybrid`、`adaptive` 或 `deep`，並在空/弱結果時重試一次，降低 false negative。
 - Tool-owned `auto` mode 降低 agent 忘記切換模式的機率；exact lookup fallback 必須防 semantic false positive。`semantic_hybrid` 保持 explicit opt-in，不作為預設 hybrid 的 lexical evidence gate 替代品。
+- Engine-owned miss contract 讓 Pi/OMP agent、RPC consumer 與未來 renderer 使用相同事實，不必解析英文或在 tool adapter 重建搜尋狀態。
+- 將 retrieved、threshold-passed、eligibility-passed、metadata-passed counts 分開，避免把 lexical evidence 或 metadata filter 誤報成 threshold rejection。
 
 **重建索引邊界**:
 - Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。

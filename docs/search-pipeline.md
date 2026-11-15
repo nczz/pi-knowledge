@@ -126,11 +126,15 @@ Hybrid/adaptive search must not always return something. Candidates must pass a 
 
 ### Candidate budget and diversity
 
-The effective candidate limit is profile-derived from `offset + limit`, then hard-capped at 800. Retrieval applies that limit independently to each selected KB so a small KB is not hidden by an earlier large KB. After query-aware ranking, confidence gating, sorting, and metadata filtering, the merged pool is capped once globally. Deep reranking, adaptive expansion, and MMR-style diversity only process this bounded pool.
+The effective candidate limit is profile-derived from `offset + limit`, then hard-capped at 800. Retrieval applies that limit independently to each selected KB so a small KB is not hidden by an earlier large KB. After query-aware ranking, the engine records score-threshold-passed and eligibility-passed counts separately, applies metadata filters, records the metadata-passed count, and caps the merged pool once globally. Deep reranking, adaptive expansion, and MMR-style diversity only process this bounded pool.
 
 Diversity preserves the existing relevance/redundancy formula but keeps each remaining candidate's maximum redundancy as selected results are added. This changes repeated pair evaluation from O(n³) to O(n²), while stable input-order tie handling preserves ranking behavior. Large passes check `AbortSignal` and yield to the event loop between bounded CPU slices.
 
-Public pagination is bounded: `limit` is an integer from 1 to 50, `offset` is a non-negative integer, and `offset + limit` cannot exceed 800. Diagnostics distinguish per-KB retrieval breadth, merged retrieval count, filtered count, diversity input count, and global-pool truncation.
+Public pagination is bounded: `limit` is an integer from 1 to 50, `offset` is a non-negative integer, and `offset + limit` cannot exceed 800. Diagnostics distinguish per-KB retrieval breadth, merged retrieval count, score-threshold-passed count, eligibility-passed count, metadata-passed count, diversity input count, and global-pool truncation.
+
+### Classified misses
+
+Empty searches return an engine-owned structured miss reason and action. Classification follows observed stages: KB selection and availability, indexed chunk presence, embedding compatibility, retrieval, score threshold, lexical eligibility, metadata filtering, reranking, and pagination. `auto` attaches a bounded summary of attempted modes. The tool layer renders the structured result in two lines; it does not infer source coverage from query text or `source_path`, enumerate absolute roots, or run `knowledge_status`/`knowledge_doctor` diagnostics to format a miss.
 
 ---
 
