@@ -4,7 +4,7 @@ const state = vi.hoisted(() => ({
 	watcherCallback: undefined as ((kbId: string) => void) | undefined,
 	updates: [] as Array<ReturnType<typeof Promise.withResolvers<{ added: number; removed: number; unchanged: number }>>>,
 	updateCalls: 0,
-	rejectNextUpdate: false,
+	rejectNextUpdateMessage: undefined as string | undefined,
 }));
 
 vi.mock("../../src/engine.ts", () => ({
@@ -25,9 +25,10 @@ vi.mock("../../src/engine.ts", () => ({
 
 		update(): Promise<{ added: number; removed: number; unchanged: number }> {
 			state.updateCalls++;
-			if (state.rejectNextUpdate) {
-				state.rejectNextUpdate = false;
-				return Promise.reject(new Error("Mutation for another knowledge base is already running"));
+			if (state.rejectNextUpdateMessage) {
+				const message = state.rejectNextUpdateMessage;
+				state.rejectNextUpdateMessage = undefined;
+				return Promise.reject(new Error(message));
 			}
 			const deferred = Promise.withResolvers<{ added: number; removed: number; unchanged: number }>();
 			state.updates.push(deferred);
@@ -68,7 +69,7 @@ beforeEach(() => {
 	state.watcherCallback = undefined;
 	state.updates = [];
 	state.updateCalls = 0;
-	state.rejectNextUpdate = false;
+	state.rejectNextUpdateMessage = undefined;
 });
 
 describe("daemon watcher update coordination", () => {
@@ -145,12 +146,44 @@ describe("daemon watcher update coordination", () => {
 		);
 		await service.initialize(true);
 		if (!state.watcherCallback) throw new Error("Watcher callback was not registered");
-		state.rejectNextUpdate = true;
+		state.rejectNextUpdateMessage = "Mutation for another knowledge base is already running";
 
 		state.watcherCallback("watched-kb");
 		await vi.waitFor(() => expect(state.updateCalls).toBe(2));
 		state.updates[0]?.resolve({ added: 1, removed: 0, unchanged: 0 });
 		await service.dispose();
+	});
+
+	it("waits for a new filesystem event after a permanent watcher update failure", async () => {
+		vi.useFakeTimers();
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const { KnowledgeDaemonService } = await import("../../src/daemon/service.ts");
+		const service = new KnowledgeDaemonService(
+			{
+				name: "default",
+				id: "test-profile",
+				storageDir: "/tmp/storage",
+				runtimeDir: "/tmp/storage/.runtime",
+				profileRoot: "/tmp",
+				registryPath: "/tmp/profiles.json",
+			},
+			() => {},
+		);
+		try {
+			await service.initialize(true);
+			if (!state.watcherCallback) throw new Error("Watcher callback was not registered");
+			state.rejectNextUpdateMessage = "Source no longer exists";
+
+			state.watcherCallback("watched-kb");
+			await vi.advanceTimersByTimeAsync(6_000);
+
+			expect(state.updateCalls).toBe(1);
+			expect(error).toHaveBeenCalledWith("Watcher update failed; waiting for a new filesystem change");
+		} finally {
+			await service.dispose();
+			error.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 
 	it("does not attach a new subscriber to an update whose last subscriber cancelled", async () => {

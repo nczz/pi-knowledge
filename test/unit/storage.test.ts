@@ -4,11 +4,16 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createKB,
+	finishIndexingJob,
 	getDefaultKnowledgeDir,
 	getKB,
+	insertChunks,
+	markKBIndexed,
 	openDatabase,
 	resolveHostKnowledgeDir,
+	startIndexingJob,
 	updateKBEmbeddingMetadata,
+	updateKBStatus,
 } from "../../src/storage/sqlite.ts";
 
 describe("knowledge storage path", () => {
@@ -109,6 +114,84 @@ describe("knowledge base embedding metadata", () => {
 			expect(defaulted.embedding_dimension).toBeNull();
 		} finally {
 			db.close();
+		}
+	});
+
+	it("keeps the published index timestamp stable across status bookkeeping", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-indexed-at-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "timestamped", source_type: "text" });
+			expect(kb.indexed_at).toBe(0);
+
+			currentTime = 200;
+			markKBIndexed(db, kb.id);
+			currentTime = 300;
+			updateKBStatus(db, kb.id, "ready");
+
+			const updated = getKB(db, kb.id);
+			expect(updated?.indexed_at).toBe(200);
+			expect(updated?.updated_at).toBe(300);
+		} finally {
+			db.close();
+			now.mockRestore();
+		}
+	});
+
+	it("migrates only trustworthy successful index timestamps", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-migration-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const original = openDatabase(dir);
+		const cancelled = createKB(original, { name: "cancelled", source_type: "text" });
+		const succeeded = createKB(original, { name: "succeeded", source_type: "text" });
+		try {
+			currentTime = 200;
+			insertChunks(original, cancelled.id, [
+				{
+					content_hash: "legacy-content",
+					content: "Legacy content",
+					content_tokenized: "legacy content",
+					file_path: "legacy.md",
+					file_type: "markdown",
+					start_line: 1,
+					end_line: 1,
+					metadata_json: "{}",
+				},
+			]);
+			currentTime = 250;
+			startIndexingJob(original, cancelled.id, "update", "Updating");
+			currentTime = 300;
+			finishIndexingJob(original, cancelled.id, "cancelled", "Cancelled");
+			currentTime = 400;
+			updateKBStatus(original, cancelled.id, "ready");
+
+			currentTime = 220;
+			startIndexingJob(original, succeeded.id, "add", "Adding");
+			currentTime = 230;
+			finishIndexingJob(original, succeeded.id, "succeeded", "Ready");
+			currentTime = 400;
+			updateKBStatus(original, succeeded.id, "ready");
+
+			original.exec("ALTER TABLE knowledge_bases DROP COLUMN indexed_at");
+			original.prepare("UPDATE schema_version SET version = 5").run();
+		} finally {
+			original.close();
+			now.mockRestore();
+		}
+
+		const migrated = openDatabase(dir);
+		try {
+			expect(getKB(migrated, cancelled.id)?.indexed_at).toBe(200);
+			expect(getKB(migrated, succeeded.id)?.indexed_at).toBe(230);
+		} finally {
+			migrated.close();
 		}
 	});
 });

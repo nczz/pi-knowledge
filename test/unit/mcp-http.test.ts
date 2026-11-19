@@ -263,6 +263,76 @@ describe("MCP Streamable HTTP transport", () => {
 		expect(expired.status).toBe(404);
 	});
 
+	it("keeps a legacy session alive after a request exceeds the idle window", async () => {
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const search = tool("knowledge_search", "read", async () => {
+			started.resolve();
+			await finish.promise;
+			return { content: [{ type: "text", text: "Found" }] };
+		});
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 1_000;
+		now.mockImplementation(() => currentTime);
+		try {
+			const server = createHttpServer([search]);
+			const address = await server.start();
+			const initialized = await fetch(address.url, {
+				method: "POST",
+				headers: commonHeaders(),
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "initialize",
+					params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+				}),
+			});
+			const sessionHeaders = {
+				...commonHeaders(),
+				"MCP-Session-Id": initialized.headers.get("mcp-session-id") ?? "",
+				"MCP-Protocol-Version": "2025-11-25",
+			};
+			const longRequest = fetch(address.url, {
+				method: "POST",
+				headers: sessionHeaders,
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 2,
+					method: "tools/call",
+					params: { name: "knowledge_search", arguments: { query: "x" } },
+				}),
+			}).then(async (response) => {
+				await response.text();
+				return response;
+			});
+			await started.promise;
+			currentTime += 31 * 60 * 1_000;
+			finish.resolve();
+			expect((await longRequest).status).toBe(200);
+
+			const anotherSession = await fetch(address.url, {
+				method: "POST",
+				headers: commonHeaders(),
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 3,
+					method: "initialize",
+					params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+				}),
+			});
+			expect(anotherSession.status).toBe(200);
+
+			const listed = await fetch(address.url, {
+				method: "POST",
+				headers: sessionHeaders,
+				body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" }),
+			});
+			expect(listed.status).toBe(200);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
 	it("aborts modern work on stream disconnect and closes idempotently", async () => {
 		const started = Promise.withResolvers<void>();
 		const aborted = Promise.withResolvers<void>();

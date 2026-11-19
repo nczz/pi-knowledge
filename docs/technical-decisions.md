@@ -286,12 +286,12 @@
 **決策**:
 - `extension.js` 是 package entry shim；build 後優先載入 `dist/index.js`，本地開發未 build 時 fallback 到 source `index.ts`。
 - root `index.ts` 保持 startup-light；Pi virtual modules 只允許 type-only 或本地 shim，不在 import 時解析 native runtime。
-- engine、storage、watcher 等 runtime modules 由 `ensureInitialized()` lazy import，只有 lifecycle/tool 實際需要時才載入。
-- 本地 embedding/reranker 透過 model worker 子程序載入 `@huggingface/transformers` / `onnxruntime-node`，不讓 Pi/OMP TUI 主程序直接載入 ONNX native backend。
-- `better-sqlite3` 載入先走一般 resolution，再在 Bun/hoisted dependency 情境用非 literal package name 和 parent walk fallback，避免 install-time pre-resolution 誤判。
-- storage path resolution 順序是 `PI_KNOWLEDGE_DIR`、`OMP_KNOWLEDGE_DIR`、`PI_CODING_AGENT_DIR` / `OMP_CODING_AGENT_DIR` 推導 root、再依 OMP detection 選 `~/.omp` 或 `~/.pi`。
-- OMP detection 的最低合約是 `OMP_PROFILE` 或 executable basename 為 `omp`。這避免依賴未驗證的 OMP host internals。
-- 在預設 home OMP root 且 `~/.omp/knowledge` 不存在時，若 legacy `~/.pi/knowledge` 存在，繼續使用 legacy Pi knowledge dir，避免 OMP migration 時看不到既有 KB。
+- production extension 只 lazy import profile resolver 與 daemon client；engine、storage、watcher、model/document worker由 selected profile daemon載入並持有，session shutdown只釋放 client state。
+- 本地 embedding/reranker 透過 daemon內的 model worker子程序載入 `@huggingface/transformers` / `onnxruntime-node`，不讓 Pi/OMP TUI 主程序直接載入 ONNX native backend。
+- `better-sqlite3` 只在 daemon runtime path載入；resolution仍支援 Bun/hoisted dependency情境的非 literal package name與 parent walk fallback。
+- `default` profile storage選擇順序是 `PI_KNOWLEDGE_DIR`、`OMP_KNOWLEDGE_DIR`、已原子保存的 profile registry、最後才是唯一一個既有 host-derived legacy database；同時找到多個 legacy database時 fail closed並要求明確選擇。
+- 首次 legacy discovery可使用 `PI_CODING_AGENT_DIR` / `OMP_CODING_AGENT_DIR`候選，以及 `~/.pi/knowledge`、`~/.omp/knowledge`；一旦 registry claim成功，Pi、OMP、CLI與 MCP都使用同一 canonical storage，不再按目前 host切換。
+- Named profile完全隔離在 `PI_KNOWLEDGE_PROFILE_ROOT`，且拒絕 `PI_KNOWLEDGE_DIR` / `OMP_KNOWLEDGE_DIR`，避免名稱與 storage override產生模糊 mapping。
 - 所有 runtime override 必須集中記錄在 `docs/configuration.md`，README 保留使用者入口摘要。
 
 **理由**:

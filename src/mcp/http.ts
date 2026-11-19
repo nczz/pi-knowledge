@@ -465,12 +465,14 @@ export class McpHttpServer {
 		}
 		let session: McpProtocolSession;
 		let modern = false;
+		let legacyEntry: LegacyHttpSession | undefined;
 		if (sessionId) {
 			const entry = this.sessions.get(sessionId);
 			if (!entry)
 				throw new HttpRequestError(404, -32600, "Unknown or expired MCP-Session-Id", undefined, rpc.id ?? null);
 			this.validateLegacyVersion(request, entry);
 			entry.lastUsed = Date.now();
+			legacyEntry = entry;
 			session = entry.session;
 		} else {
 			this.validateModernHeaders(request, rpc);
@@ -487,6 +489,7 @@ export class McpHttpServer {
 			}
 			sendJson(response, handled.httpStatus ?? 200, handled.response);
 		} finally {
+			if (legacyEntry) legacyEntry.lastUsed = Date.now();
 			if (modern) {
 				session.abortAll();
 				this.requestSessions.delete(session);

@@ -200,9 +200,10 @@ Daemon 在 startup reconcile，以及 add/update/remove/clear/import 成功後�
 ```
 
 - `kbs` 以 `name`、再以內部 KB ID 的 Unicode code-unit順序排序；順序不受 OS locale影響。`name` 在同一 profile內唯一，也是 `knowledge_update`等工具可使用的 selector。
-- `source_type` 的封閉集合為 `directory | file | url | text`。`source_path` 對 directory/file 是建立或更新時解析的本機絕對路徑，對 URL 是 URL，對 inline text/import 是 `null`。
-- `exclude_paths` 只對 directory source有意義；值使用 `/`、移除前後 `/`，並相對於 source root。值 `archive` 同時匹配 `archive`與其子樹；空值不輸出。
-- `file_count`、`chunk_count`是最近一次成功持久化的 KB計數。`updated_at`是 KB row最近一次狀態/計數/成功更新的 Unix epoch毫秒，不是檔案 freshness watermark。
+- `source_type` 的封閉集合為 `directory | file | url | text`。`source_path` 對 directory/file 是建立或更新時解析的本機絕對路徑，對 URL 是 URL；inline text/import 為 `null`。Consumer 必須把 `null` 視為 scope-agnostic（永遠涵蓋），不能解讀為不涵蓋任何 path。
+- `exclude_paths` 只對 directory source有意義；值使用 `/`、移除前後 `/`，並相對於 source root。值 `archive` 只匹配 `archive` 本身與其子樹，不匹配 `archived_reports`；空值不輸出。
+- `file_count`、`chunk_count`是最近一次成功持久化的 KB計數。`updated_at`是最近一次完整成功 add/update/import 的 Unix epoch毫秒；indexing、error、cancel或其他 row bookkeeping 不得推進此時間。它仍不是 per-file freshness watermark。
+- 既有 v5 database 升級時，daemon 依序以最近保留的成功 indexing job、現存 chunk 的最晚 `indexed_at`、最後 `0` 做保守回填；不得用會被 status bookkeeping 推進的舊 row `updated_at`。`0` 表示沒有可證明的成功時間，consumer 應保持 silent/fail-open。
 - `status` 的封閉集合為 `ready | indexing | error | stale`。`generated_at`是 daemon產生本次 point-in-time snapshot的 Unix epoch毫秒。
 - clear 保留檔案並寫入空 `kbs`。
 - snapshot 與 temp file 都使用 `0600`；tmp + fsync + rename，consumer 永遠只看到完整舊版或完整新版。
@@ -222,7 +223,7 @@ Engine-affecting環境設定由啟動中的 daemon 擁有。Handshake 回報 run
 - auth token 每次 daemon instance 以 crypto 產生至少 256 bits，輪替後舊 token 失效，不寫 log、argv、錯誤或 coverage snapshot。同 UID process 視為本機 trust boundary，但 MCP adapter仍以 read/write/admin launch capability限制 agent surface。
 - RPC 不接受任意方法名稱映射或動態 import；方法 allowlist與輸入 schema在 daemon boundary 再驗證。
 - destructive tool confirmation 只防誤操作，不代表授權；MCP mutation/admin 必須另由 launch capability開啟。
-- direct file、URL、import、inline text與 export path 都有 byte/count/time/redirect bounds。URL 預設拒絕 loopback/private/link-local與 redirect 逃逸，除非使用者以明確設定允許 private endpoint；export 預設拒絕 symlink escape與非預期覆寫。
+- direct file、URL、import、inline text與 export path 都有 byte/count/time/redirect bounds。URL 一律拒絕 loopback/private/link-local與 redirect 逃逸；`--allow-network` 只授權 public URL operation，不會放寬此限制。Export 預設拒絕 symlink escape與非預期覆寫。
 
 ## Clean cutover
 

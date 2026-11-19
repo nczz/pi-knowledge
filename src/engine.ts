@@ -118,6 +118,7 @@ import {
 	type KnowledgeBase,
 	type KnowledgeSymbol,
 	listKBs,
+	markKBIndexed,
 	openDatabase,
 	searchSymbols,
 	startIndexingJob,
@@ -1731,6 +1732,7 @@ export class KnowledgeEngine {
 
 			const savedFileCount = isDir ? getFileCount(this.db, kb.id) : fileCount;
 			updateKBCounts(this.db, kb.id, chunkCount, savedFileCount);
+			markKBIndexed(this.db, kb.id);
 			updateKBStatus(this.db, kb.id, "ready");
 
 			const savedKB = getKB(this.db, kb.id);
@@ -2144,6 +2146,7 @@ export class KnowledgeEngine {
 			);
 			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
 			updateKBSourceOptions(this.db, kb.id, serializeAddOptions(parseAddOptions(kb.source_options)));
+			markKBIndexed(this.db, kb.id);
 			updateKBStatus(this.db, kb.id, "ready");
 			const skippedReadySuffix =
 				latestSkippedTotal > 0 ? `, skipped ${latestSkippedTotal} (${latestSkippedSummary})` : "";
@@ -3413,6 +3416,7 @@ export class KnowledgeEngine {
 			renameSync(tempVectorFile, this.vectorPathFor(kb.id));
 			tempVectorFile = undefined;
 			updateKBCounts(this.db, kb.id, inserted, getFileCount(this.db, kb.id));
+			markKBIndexed(this.db, kb.id);
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);

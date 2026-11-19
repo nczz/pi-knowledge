@@ -15,6 +15,7 @@ export interface KnowledgeBase {
 	source_options: string | null;
 	created_at: number;
 	updated_at: number;
+	indexed_at: number;
 	chunk_count: number;
 	file_count: number;
 	embedding_model: string;
@@ -77,7 +78,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const ITERATION_BATCH_SIZE = 500;
 
 const SCHEMA_SQL = `
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   source_options TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  indexed_at INTEGER NOT NULL DEFAULT 0,
   chunk_count INTEGER NOT NULL DEFAULT 0,
   file_count INTEGER NOT NULL DEFAULT 0,
   embedding_model TEXT NOT NULL DEFAULT 'multilingual-e5-small',
@@ -409,6 +411,30 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			}
 			continue;
 		}
+		if (v === 6) {
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "indexed_at")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN indexed_at INTEGER NOT NULL DEFAULT 0");
+				db.exec(`
+					UPDATE knowledge_bases
+					SET indexed_at = COALESCE(
+						(
+							SELECT updated_at
+							FROM indexing_jobs
+							WHERE indexing_jobs.kb_id = knowledge_bases.id
+								AND indexing_jobs.status = 'succeeded'
+						),
+						(
+							SELECT MAX(indexed_at)
+							FROM chunks
+							WHERE chunks.kb_id = knowledge_bases.id
+						),
+						0
+					)
+				`);
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -489,6 +515,10 @@ export function updateKBCounts(db: Database.Database, id: string, chunkCount: nu
 		Date.now(),
 		id,
 	);
+}
+export function markKBIndexed(db: Database.Database, id: string): void {
+	const now = Date.now();
+	db.prepare("UPDATE knowledge_bases SET indexed_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);
 }
 
 export function updateKBSourceOptions(db: Database.Database, id: string, sourceOptions: string): void {

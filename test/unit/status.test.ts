@@ -15,6 +15,7 @@ const MISMATCH_SNAPSHOT: KnowledgeStatusSnapshot = {
 			source_options: null,
 			created_at: UPDATED_AT,
 			updated_at: UPDATED_AT,
+			indexed_at: UPDATED_AT,
 			chunk_count: 12,
 			file_count: 3,
 			embedding_model: "multilingual-e5-small",

@@ -373,13 +373,18 @@ export class KnowledgeDaemonService {
 		}
 		void this.coordinateUpdate(`watcher:${randomUUID()}`, kbId, undefined, () => {}).catch((error: unknown) => {
 			if (this.shuttingDown) return;
+			const blockedByMutation = error instanceof Error && error.message.includes("already running");
+			if (!blockedByMutation) {
+				this.watcherDirty.delete(kbId);
+				console.error("Watcher update failed; waiting for a new filesystem change");
+				return;
+			}
 			this.watcherDirty.add(kbId);
 			if (this.watcherRetryTimers.has(kbId)) return;
-			const delayMs = error instanceof Error && error.message.includes("already running") ? 250 : 5_000;
 			const timer = setTimeout(() => {
 				this.watcherRetryTimers.delete(kbId);
 				if (this.watcherDirty.delete(kbId)) this.triggerWatcherUpdate(kbId);
-			}, delayMs);
+			}, 250);
 			timer.unref();
 			this.watcherRetryTimers.set(kbId, timer);
 		});

@@ -64,7 +64,7 @@ export function buildCoverageSnapshot(
 				exclude_paths: normalizeExcludePaths(excludePaths(kb.source_options)),
 				file_count: kb.file_count,
 				chunk_count: kb.chunk_count,
-				updated_at: kb.updated_at,
+				updated_at: kb.indexed_at,
 				status: kb.status,
 			})),
 	};
