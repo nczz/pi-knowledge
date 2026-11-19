@@ -6,15 +6,20 @@
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PI_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the directory that stores `knowledge.db`, vectors, and model cache parent data for Pi and OMP. Takes precedence over `OMP_KNOWLEDGE_DIR`. |
-| `OMP_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the knowledge directory when running under OMP. Used when `PI_KNOWLEDGE_DIR` is not set. |
-| `PI_CODING_AGENT_DIR` | unset | Derive the Pi host root from a configured agent directory. Useful for isolated installs and validation. |
-| `OMP_CODING_AGENT_DIR` | unset | Derive the OMP host root from a configured agent directory. Used when `PI_CODING_AGENT_DIR` is not set. |
-| `OMP_PROFILE` | unset | Treat the current process as OMP-hosted for default path selection. |
-| `PI_KNOWLEDGE_MODEL_CACHE_DIR` | `<knowledge-dir>/models` | Override the local Transformers.js model cache directory. |
-| `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, then `NODE`, then `node` on `PATH` | Override the Node 22+ executable used by the isolated runtime worker for local models and PDF/DOCX extraction. Useful for Windows OMP packaged runtimes where the host process is not Node. |
+| `PI_KNOWLEDGE_PROFILE` | `default` | Select the process-wide knowledge profile. Profile names are lowercase ASCII keys; named profiles are an advanced isolation feature. |
+| `PI_KNOWLEDGE_PROFILE_ROOT` | `~/.pi-knowledge/profiles` | Override the root used for named profiles. It does not move or merge an existing default profile. |
+| `PI_KNOWLEDGE_DIR` | persisted default mapping or legacy directory | Override storage for the `default` profile only. The directory contains `knowledge.db`, vectors, model/runtime config, and `coverage.json`. Takes precedence over `OMP_KNOWLEDGE_DIR`. |
+| `OMP_KNOWLEDGE_DIR` | unset | Override default-profile storage when `PI_KNOWLEDGE_DIR` is not set. Named profiles reject both storage overrides. |
+| `PI_CODING_AGENT_DIR` | unset | Candidate used only when first claiming the default profile from an existing host-derived knowledge directory. |
+| `OMP_CODING_AGENT_DIR` | unset | OMP candidate used only when first claiming the default profile. |
+| `OMP_PROFILE` | unset | Retained for host compatibility; profile selection uses `PI_KNOWLEDGE_PROFILE`. |
+| `PI_KNOWLEDGE_RUNTIME_DIR` | per-user private runtime directory | Advanced override for Unix daemon socket placement. The directory must be owner-only. |
+| `PI_KNOWLEDGE_MODEL_CACHE_DIR` | `<profile-storage>/models` | Override the local Transformers.js model cache directory. |
+| `PI_KNOWLEDGE_NODE_PATH` | persisted profile runtime, then worker discovery | Override the Node 22+ executable used by the isolated model/document worker. Daemon startup itself accepts only the current trusted Node runtime or an explicit path persisted by `knowledge_configure`. |
 
-Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under OMP. For the default home OMP root, `pi-knowledge` preserves an existing legacy `~/.pi/knowledge` directory when `~/.omp/knowledge` does not exist, so existing Pi knowledge bases remain visible during migration.
+The zero-configuration path is the `default` profile. On first use, `~/.pi-knowledge/profiles.json` atomically records one canonical default storage directory. A single existing Pi/OMP legacy database is adopted in place; multiple distinct legacy databases fail closed until `PI_KNOWLEDGE_DIR` selects one. Named profiles use `~/.pi-knowledge/profiles/<name>` and never fall back to default.
+
+Each profile has one long-lived daemon that owns its SQLite handle, vectors, model worker, mutations, watchers, and `coverage.json`. Pi/OMP sessions connect to that daemon and do not stop it on session shutdown. Use `pi-knowledge-daemon start|status|stop [--profile <name>]` for explicit lifecycle control.
 
 ## Embeddings
 
@@ -86,7 +91,7 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 | `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES` | profile default | Override how many filtered candidates `deep` mode sends to the reranker. Clamped to 5-100. |
 | `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` | profile default | Override deep rerank top-k multiplier relative to the effective result limit. Clamped to 1-10. |
 
-Search diagnostics include result provenance and applied search tuning in both text output and structured `details`: selected profile, effective limit, snippet length, hybrid threshold, global candidate limit, per-KB retrieval limit, retrieved/threshold-passed/eligibility-passed/metadata-passed/diversity candidate counts, global-pool truncation, chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
+Search diagnostics include result provenance and applied search tuning in both text output and structured `details`: selected profile, effective limit, snippet length, hybrid threshold, global candidate limit, per-KB retrieval limit, retrieved/threshold-passed/eligibility-passed/metadata-passed/diversity candidate counts, global-pool truncation, chunk id, chunk hash, match reason, persisted indexed timestamp, and stale flag derived from persisted KB status. Query-time search reads indexed data only and does not stat retained source paths.
 
 `knowledge_search` supports `file_type`, substring `path_pattern`, `profile`, integer `limit` from 1 to 50, and non-negative integer `offset`. `offset + limit` cannot exceed the 800-candidate global search window. Each KB retrieves up to the profile-derived candidate limit, then merged results are ranked, filtered, and globally capped before deep reranking, adaptive expansion, or diversity. Search profiles tune result count, snippets, hybrid strictness, candidate breadth, adaptive context, and deep rerank breadth at runtime. `auto` chooses from query shape, mode, and KB source type; explicit tool parameters win over env overrides, env overrides win over profile defaults, and profile defaults win over built-in compatibility values. `hybrid` mode remains lexical-anchored to prevent low-evidence semantic false positives; use `semantic` for pure vector search, or `semantic_hybrid` when weak lexical overlap should not block vector-backed weighted fusion. `adaptive` uses bounded same-file context expansion; when AST metadata is present it can prefer same-parent/sibling chunks without claiming caller/callee graph semantics.
 
@@ -97,6 +102,31 @@ Empty `knowledge_search` responses always include structured `details.miss` with
 `knowledge_configure` writes runtime configuration to the knowledge directory's `config.json`. It validates Node 22+ before persisting `node_path`, so agents can configure a Codex- or user-installed `node.exe` once without relying on environment variables being injected into an already-running OMP process.
 
 `knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find AST-backed methods/functions/classes/interfaces/types/variables for supported code files, route-like handlers, Markdown headings, config keys, and environment variables. It is not a full LSP or code graph; it does not answer caller/callee or rename-safety questions. Empty lookups distinguish missing KBs, unavailable KBs, empty symbol metadata, exact-name misses, metadata filters, pagination, and ordinary no-match results. If the symbol index itself is empty, use `knowledge_update` for source-backed KBs; imported portable KBs and inline text KBs do not retain an active source path and must be re-imported or re-added from the original content.
+
+### Standalone MCP server
+
+`pi-knowledge-mcp [--profile <name>]` connects to the selected daemon. It uses stdio by default; `--transport http` starts an authenticated Streamable HTTP endpoint for multiple local clients. Both transports are read-only by default and list only indexed search, symbol search, and show. These paths do not rescan retained source directories.
+
+| Option or variable | Default | Purpose |
+|--------------------|---------|---------|
+| `--transport stdio\|http` | `stdio` | Select a per-client stdio adapter or a shared local HTTP process. |
+| `PI_KNOWLEDGE_MCP_HTTP_TOKEN` | unset | Required only for HTTP. Must contain 32–512 visible ASCII characters and is accepted as a bearer token. Keep it out of arguments, source control, logs, and shared config. |
+| `--host` | `127.0.0.1` | HTTP bind host. Only `127.0.0.1`, `::1`, and `localhost` are accepted. |
+| `--port` | `3210` | HTTP TCP port; `0` requests an ephemeral port. |
+| `--endpoint` | `/mcp` | One absolute HTTP endpoint path without query or fragment. |
+| `--allow-origin <origin>` | none | Repeatable exact HTTP(S) supplied origin. Requests without `Origin` are allowed; an unlisted supplied origin is rejected. This validation does not enable browser CORS/preflight. |
+
+HTTP mode does not provide TLS, OAuth, or remote binding. It is a same-machine transport; use stdio when one client owns the adapter. For several local clients, start one persistent HTTP adapter and give each client the same loopback URL and token. Separate endpoints are required when clients need different capability sets.
+
+- `--allow-root <canonical-dir>` may be repeated; it enables `knowledge_plan` and authorizes local source/import/export paths inside those roots. Roots must be current-user-owned and not group/world-writable on Unix, or private by Windows ACL. The adapter canonicalizes arguments for early rejection; the daemon independently rebinds the root inode and revalidates containment at operation time.
+- `--allow-network` authorizes public URL sources; the normal private-network and redirect policy still applies.
+- `--allow-write` exposes add/update/import/export, subject to the root/network capabilities above.
+- `--allow-admin` exposes live status/doctor diagnostics plus configure/remove/clear. Status and doctor can rescan every retained source, so they are not exposed to the capability-free MCP surface. Tool confirmation remains required for destructive calls, but confirmation is not authorization.
+
+The server supports legacy `initialize` protocols `2025-11-25`, `2025-06-18`, and `2025-03-26`, plus modern `2026-07-28` `server/discover`, tool progress, and cancellation. Stdio uses newline-delimited JSON-RPC. HTTP uses POST with JSON or request-scoped SSE, mandatory modern mirrored headers, negotiated legacy session IDs, and DELETE session termination; GET intentionally returns `405`. Valid tool execution/cancellation failures use an MCP tool result with `isError: true`; malformed JSON-RPC requests remain protocol errors.
+
+Client shutdown cancels adapter requests without stopping the profile daemon. HTTP shutdown stops admission, aborts active session work, drains bounded operations, and is idempotent. See [MCP Client Setup](mcp-clients.md) for npm installation, Claude Code, Codex, Cursor, VS Code Copilot, capability, profile, upgrade, and token examples.
+
 
 ## Test and Release Fixtures
 

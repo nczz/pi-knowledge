@@ -71,25 +71,25 @@
 
 **狀態**: 已決定
 
-**行為**: 首次 add/search 載入本地 embedding/reranker → Pi/OMP 主程序啟動隔離 Node model worker → worker 內載入 transformers.js / `onnxruntime-node` → session 內保留 worker 到 shutdown → `session_shutdown` 等 active runs 完成後用 `SIGKILL` 收掉 worker。Transport 優先使用 Node `fork()` IPC；若 Windows OMP 或其他相容層沒有提供 `child.send()`，自動改用 `spawn(node, ... --stdio)` 的 stdin/stdout JSONL protocol。Node resolution 順序是 env override、持久化 runtime config、目前 Node process、Windows 常見安裝位置、Codex `cua_node` runtime、最後才是 PATH。`PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 是明確 opt-in，不是預設。
+**行為**: 首次 add/search 時，由 selected profile daemon 啟動隔離 Node model worker，worker 內載入 transformers.js / `onnxruntime-node`。Pi/OMP extension 與 MCP adapter都不載入 native backend；session shutdown只釋放 client state，不停止 daemon或 worker。Daemon explicit shutdown／authenticated build replacement才等待 active runs、停止 worker並關閉 engine resources。Worker transport優先使用 Node `fork()` IPC；若 Windows OMP 或相容層沒有 `child.send()`，改用 `spawn(node, ... --stdio)` JSONL。Daemon executable只接受目前可信 Node 22+或明確持久化路徑；model worker仍可使用完整 discovery。`PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 是明確 opt-in，不是預設。
 
-**理由**: 大多數 session 不用 knowledge → 0 memory cost；一旦使用本地模型，穩定退出優先於把 native backend 留在 Pi/OMP TUI 主程序。已驗證 macOS arm64 上主程序載入 native backend 後 `/quit` 會觸發 onnxruntime `mutex lock failed` abort。Windows OMP 的 host runtime 可能無法提供完整 Node fork IPC，且 agent 在已啟動 session 內設定的 env 不一定會傳到 plugin runner；因此 worker transport 必須先驗證 IPC 能力、以 stdio JSONL fallback 保持隔離子程序與相同 request/response contract，並提供持久化 `knowledge_configure` 設定作為 env 之外的配置渠道。
-
----
-
-## ADR-006: 儲存 ~/.pi/knowledge/ (global) + .pi/knowledge/ (project)
-
-**狀態**: 已決定
-
-**理由**: 知識庫是獨立功能，不嵌套 agent/ 下。
+**理由**: 大多數 session 不用 knowledge → extension保持 startup-light；多個 Pi/OMP/MCP client共用 daemon時，不能由任一 session回收共享 worker。隔離 native backend仍避免 macOS arm64 `/quit` 的 onnxruntime `mutex lock failed`；Windows fallback和持久化 `knowledge_configure`則處理 host IPC/runtime差異。
 
 ---
 
-## ADR-007: pi install 會跑 postinstall (confirmed from source)
+## ADR-006: Default-first profile storage
 
-**狀態**: 已確認
+**狀態**: 已由 ADR-024取代原本「global + project-local DB」設計
 
-**證據**: `package-manager.ts` getNpmInstallArgs() 無 --ignore-scripts。
+**決策**: 一般使用者使用 registry穩定映射的 `default` profile；可原地採用一份 legacy `~/.pi/knowledge`或 `~/.omp/knowledge`。Named profiles提供進階隔離。不存在 project-local `.pi/knowledge` active storage mode。
+
+---
+
+## ADR-007: Dependency install-script approval
+
+**狀態**: 原始「沒有 `--ignore-scripts` 就會執行」結論已被 npm 12行為取代
+
+**決策**: Repository以 exact-version `allowScripts`核准已審查的 dependency scripts，release執行 `npm install-scripts ls`。Global install使用 install-time `--allow-scripts`；host-managed install必須檢查實際 package manager與 skipped-script output。
 
 ---
 
@@ -468,3 +468,32 @@ CommonJS dependencies。
 - OMP packaged host 需要可用的 Node 22+ executable；可用 `knowledge_configure` 持久化路徑。
 - Extracted text 會經 worker transport 回傳，受既有 10 MiB directory source limit 與 process memory 約束。
 - 不改變 KB schema、chunk identity、embedding signature 或既有 KB；升級後不需 reindex。
+
+---
+
+## ADR-024: Default-first profile singleton daemon 與 capability-gated MCP transports
+
+**狀態**: 已決定
+
+**背景**: Extension、CLI 與其他 agent 若各自建立 `KnowledgeEngine`，會同時持有 SQLite、vector、watcher 與 model-worker lifecycle。Issue #25 的交接狀態檔也會因此出現多個 writer，無法定義唯一輸出。
+
+**決策**:
+- 一個 profile 是 storage/runtime domain，可包含多個 KB；未指定時固定使用 `default`。
+- 每個 canonical profile storage 只允許一個 authenticated long-lived daemon。Pi/OMP extension、CLI 與 MCP 都是 client，不做 local-engine fallback。
+- Named profile 只供進階隔離情境；DB、vectors、config、watchers、daemon 與 `coverage.json` 全部分離。
+- Extension session shutdown 只釋放 client reference，不停止 daemon。Watcher enable 是 monotonic profile state。
+- MCP stdio 與 Streamable HTTP 共用 transport-independent protocol/capability core，預設唯讀；local root、network、write、admin 必須由啟動參數分別授權，host approval 與 `confirm` 不視為 authorization。Adapter 的 early canonicalization 只改善錯誤回報；daemon 必須在實際 filesystem operation 綁定 root identity 並再次驗證 containment，避免跨 process check/use race。
+- stdio 是單一 local client 預設；HTTP 供多個本機 agent 共用一個 adapter，只允許 loopback bind，強制 bearer token 與 supplied-Origin 驗證。使用 Node HTTP primitives，不新增 production dependency；不內建 remote bind、TLS 或 OAuth。
+- `coverage.json` 只由 daemon service 在 startup reconcile 與成功 mutation 後，以 `0600` temp + fsync + rename 產生。寫入失敗不回滾 mutation，錯誤透過 status/manifest 呈現；watcher背景 mutation也使用同一診斷更新路徑。
+
+**理由**:
+- 單一 owner 移除多 writer、重複 watcher、DB close race 與狀態檔競爭。
+- Default-first 保持一般使用者零設定；profile 複雜度留在 process/CLI boundary。
+- MCP 與 extension 共用工具定義，避免 schema/描述漂移，同時在 adapter boundary 保留最小權限。
+- Request-scoped HTTP SSE 保留長工具的 progress/cancellation；legacy session 與 modern stateless request 可共用同一工具 contract，而不讓 transport 成為第二個 lifecycle owner。
+
+**限制**:
+- Daemon 只支援同一使用者、本機 endpoint，不是跨機器服務。
+- MCP HTTP 也是同機 transport；不是跨機器、多使用者或未受信網路服務。需要不同 capability 的 client 必須使用不同 endpoint/token/process。
+- `coverage.json` 是敏感且 advisory 的 profile scope/status，不是 per-file freshness authority，也不能反向控制 daemon。
+- 不相容 build 由 authenticated retirement 後重啟；client 不得直接以 PID 猜測 kill。

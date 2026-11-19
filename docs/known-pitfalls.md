@@ -357,10 +357,57 @@ Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能�
 - 預設本地模型在隔離子程序中載入 transformers.js / `onnxruntime-node`，Pi TUI 主程序不得直接 import native ONNX backend。
 - 預設不要在 Pi 互動 session 內 idle-dispose native ONNX pipelines。已驗證「Pi 主程序載入 native backend 後，`knowledge_search` 後 idle 超過 30 秒再 `/quit`」會噴 `mutex lock failed`。
 - `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 只作為明確 opt-in 記憶體回收選項；商用品質預設必須偏向穩定退出。
-- `session_shutdown` 等待 active runs 後以 `SIGKILL` 收掉 model worker，避免 native destructor 在 Pi TUI 主程序 teardown 路徑執行。
-- Embedding/reranker dispose 仍必須是 idempotent。測試或明確 dispose path 可能重複呼叫；必須先清空 pipeline reference 再 await native `dispose()`，避免同一個 ONNX session 被 double-dispose。
-- Pi `session_shutdown` 不應主動 dispose ONNX pipelines。關閉 session 時只清 timers、等待 active runs 完成、關閉 DB/watcher；讓 process exit 接管 native runtime teardown，避免在 Pi shutdown path 觸發 onnxruntime native mutex crash。
-- `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` 目前只啟用 idle coordination timers，不保證立刻釋放 model-worker 內的 native ONNX memory。真正的 worker process shutdown 仍由 engine/session shutdown 控制；若未來要 idle kill worker，必須先有 embedding/reranker 共用的 active-run accounting。
+- Pi/OMP `session_shutdown` 只釋放 daemon client state，不停止共享 daemon/model worker；任一 client都不能回收其他 client正在使用的 native runtime。
+- Embedding/reranker dispose 仍必須是 idempotent。Daemon explicit shutdown或測試 dispose path可能重複呼叫；必須先清空 pipeline reference再 await native `dispose()`，避免同一個 ONNX session被 double-dispose。
+- `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` 目前只啟用 idle coordination timers，不保證立刻釋放 model-worker內的 native ONNX memory。若未來要 idle kill worker，必須先有 embedding/reranker共用的 active-run accounting，且不能與 daemon shutdown重複釋放。
 - 不要在 extension 內提供未完整驗證的 custom TUI renderer。已驗證 tool result/warning 行寬超過 Pi TUI 寬度時會先觸發 `Rendered line ... exceeds terminal width`，接著因 native runtime teardown 出現同一個 `mutex lock failed` 二次崩潰。
 
 **根本修復**: 等 Microsoft 修正 → 升級 onnxruntime。無法從 JS 端解決。
+
+## Profile daemon ownership 不能退回 extension-local engine
+
+Profile daemon 的目的不只是常駐效能，而是唯一 writer 與 lifecycle owner。Extension 或 MCP 在 daemon 無法連線時若自行建立 `KnowledgeEngine`，會重新引入 SQLite/vector 競寫、watcher 重複、shutdown close race，以及 `coverage.json` 多 writer。
+
+- Singleton identity 必須來自 canonical storage path，不可只用可變 profile name。
+- Live-but-unresponsive owner、foreign endpoint、PID identity 不明時 fail closed；heartbeat 不能授權 takeover。
+- Authenticated shutdown 必須在 package/build 不相容時仍可達，讓新 client 能安全 retire 舊 daemon。
+- RPC boundary 必須驗證 nested options、集合數量、字串與 response bounds；只限制外層 frame 不足以防止持久化膨脹。
+- Session shutdown 不停止 daemon；daemon shutdown 才依序停止 admission/watchers、abort/drain、dispose engine、釋放 ownership。
+
+## coverage.json 是 daemon 輸出，不是控制檔
+
+`coverage.json` 可能含本機 absolute source path或 URL，應以 `0600` 視為敏感資料。Consumer只能把它當成 profile scope/status的 point-in-time handoff：
+
+- 處理 absent、stale、unknown schema version與前一版完整檔案。
+- 不依此檔判定 per-file freshness，也不修改它要求 daemon執行 mutation。
+- Snapshot寫入失敗不能把已成功的 add/update/remove/clear/import回滾成失敗；錯誤另由 status/manifest回報，包含 watcher背景更新。
+- 只有 profile daemon service可寫入，保持 startup reconcile與 mutation completion的單一順序。
+
+## Streamable HTTP 不能因為綁 localhost 就省略授權
+
+Loopback listener 仍可能被同機惡意程序或 DNS rebinding 觸及。`pi-knowledge-mcp --transport http` 必須同時保持以下邊界：
+
+- 只接受 `127.0.0.1`、`::1`、`localhost`；不能用方便測試為理由開 `0.0.0.0`。
+- bearer token 必須來自 `PI_KNOWLEDGE_MCP_HTTP_TOKEN`，不能進 argv、URL、log 或 error。Capability flags 是整個 endpoint 的 authority；不同 trust level 使用不同 port/token/process。
+- supplied `Origin` 必須 exact match own origin 或 explicit allow-list。`--allow-origin` 只是 request validation，不等於實作 browser CORS；目前不提供 OPTIONS/preflight 或 browser-direct remote service。
+- modern metadata 與 mirrored headers 要先於 tool execution驗證；legacy session ID 不能繞過 negotiated protocol version。
+- SSE/client disconnect、DELETE、process signal與 repeated close可能重疊。Guard state要在任何 `await` 前停止 admission/標記 close；每個 active request只取消自己的 work，server close才取消全部 adapter requests；兩者都不能停止 profile daemon。
+- Request body、single event、queued output、active request、legacy session、idle session與 shutdown drain都要有上限。只限制 Content-Length 不足以處理 chunked request。
+
+## Kiro stdio process cleanup可能停止由adapter衍生的daemon
+
+Kiro CLI 3.5 one-shot chat在退出時可能清理stdio MCP process tree。若該adapter剛好首次spawn profile daemon，Kiro的host cleanup可能連detached daemon一起停止；資料不受影響，下次client會重建daemon，但模型與watcher不會保持warm。
+
+- 需要跨Kiro session常駐時，先從Kiro process tree外執行`pi-knowledge-daemon start [--profile <name>]`；實測Kiro退出後同一instance仍ready。
+- 多個Kiro/ACP client共用時，優先使用獨立啟動的loopback HTTP adapter。
+- 這是client host的descendant cleanup行為，不應把MCP adapter shutdown改成主動停止daemon；其他Pi/OMP/MCP client仍可能正在使用同一profile。
+- Kiro CLI V3的modern `tools/list`嚴格驗證`2026-07-28` cacheable result。`ttlMs`與`cacheScope`缺失會在tool discovery階段直接拒絕server，必須保留對應protocol regression test。
+
+## npm 12 install scripts 需要 version-pinned review
+
+npm 12 預設阻擋 dependency lifecycle scripts。這個專案的 SQLite、ONNX、image/document transitive runtime與 tree-sitter grammars需要 install script下載 prebuild或編譯 native binding；靜默跳過後，package可能安裝成功但 daemon/MCP第一次載入 native module才失敗。
+
+- Repository 使用 `package.json` 的 exact-version `allowScripts`，不得改成未 pin 的 name-only blanket approval。
+- Dependency upgrade先讀新的 package script，再用 `npm install-scripts approve <name>`更新 exact pin；最後執行 `npm install-scripts ls`，不能把 pending/unused warning當成成功。
+- Global install沒有 project `package.json`可寫，必須在 install command使用 `--allow-scripts=<reviewed names>`；完整名單放在 `docs/mcp-clients.md`。
+- `npm install-scripts approve --all` 只適合已逐一審查目前完整 dependency tree的情境；release文件不能把它當一般使用者捷徑。

@@ -100,19 +100,17 @@ private getNpmInstallRoot(scope, temporary) {
 }
 ```
 
-### Install Args — 不含 --ignore-scripts
+### Install Args 與 dependency scripts
+
+Pi 的歷史 install args沒有 `--ignore-scripts`：
 
 ```typescript
 // npm:
-["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps"]
-// bun:
-["install", ...specs, "--cwd", installRoot, "--omit=peer"]
-// pnpm:
-["install", ...specs, "--prefix", installRoot, "--config.auto-install-peers=false", ...]
+[\"install\", ...specs, \"--prefix\", installRoot, \"--legacy-peer-deps\"]
+// bun/pnpm use their corresponding install forms
 ```
 
-**關鍵: 沒有 `--ignore-scripts`。** Native deps 的 postinstall 會正常執行。
-
+這不再等於「所有 native postinstall 一定執行」。npm 12 預設阻擋未由 root project `allowScripts` 或 install-time `--allow-scripts`核准的 dependency scripts。`pi-knowledge` repository 的 version-pinned `allowScripts`保護本地 checkout；global/host-managed install仍須依實際 package manager檢查 skipped-script output。外部 MCP global install的 reviewed allow-list在 `docs/mcp-clients.md`。
 ### 完整安裝流程
 
 ```
@@ -160,10 +158,10 @@ interface ToolDefinition<TParams extends TSchema> {
 
 | Event | 用途 | pi-knowledge 使用 |
 |-------|------|------------------|
-| `session_start` | 初始化 | ✅ warm up index, check staleness |
-| `session_shutdown` | Cleanup | ✅ flush writes, stop watcher, close DB; do not actively dispose native ONNX models |
-| `before_agent_start` | 修改 system prompt | ✅ inject KB metadata |
-| `context` | 修改 messages | ✅ auto-inject search results (opt-in) |
+| `session_start` | 初始化 | ✅ ensure selected profile daemon；必要時 monotonic enable watcher |
+| `session_shutdown` | Cleanup | ✅ 釋放 extension client/session state；不停止 daemon、不關 DB/watcher/model worker |
+| `before_agent_start` | 修改 system prompt | ✅ 從 daemon 注入 KB metadata |
+| `context` | 修改 messages | ✅ 透過 daemon auto-inject search results (opt-in) |
 | `tool_call` | 攔截 | ❌ 不需要 |
 | `input` | 攔截輸入 | ❌ 不需要 |
 
@@ -211,11 +209,11 @@ export function loadClipboardNative() {
 
 ## 6. 對 pi-knowledge 的設計啟示
 
-1. **入口**: default export ExtensionFactory，async 可做初始化
-2. **Tool 註冊**: registerTool + TypeBox schema，自帶 promptSnippet/Guidelines
-3. **State**: 用 filesystem (SQLite + vectors)，不用 appendEntry（太大）
-4. **Lifecycle**: session_start 初始化 → before_agent_start 注入 metadata → session_shutdown cleanup
-5. **進度**: onUpdate callback in execute() + ctx.ui.notify
-6. **Background work**: session_start 中 fire-and-forget 的 staleness check
-7. **Model lifecycle**: local models are lazy-loaded in an isolated worker process; Pi's TUI process never imports `onnxruntime-node`, and shutdown kills the worker after active runs finish because native teardown can crash on `/quit` on macOS arm64.
-8. **RPC 相容**: 標準 execute() 在所有 mode 都能工作
+1. **入口**: default export ExtensionFactory；root `index.ts`保持 startup-light
+2. **Tool 註冊**: registerTool + TypeBox schema；同一份 public tool definitions也供 MCP使用
+3. **State ownership**: production extension只持有 daemon client；SQLite、vectors、watchers、model/document worker與 `coverage.json`都由 selected profile daemon擁有
+4. **Lifecycle**: session_start ensure daemon → before_agent_start/context讀取狀態 → session_shutdown只釋放 client state
+5. **進度/取消**: onUpdate與 AbortSignal跨 authenticated daemon RPC轉送
+6. **Background work**: watcher與 indexing job state在 daemon，不掛在單一 Pi session
+7. **Model lifecycle**: local models只在 daemon擁有的隔離 worker載入；Pi TUI與 MCP adapter都不 import `onnxruntime-node`
+8. **RPC/MCP 相容**: Pi/OMP execute contract、stdio MCP與 loopback Streamable HTTP共用 tool schema和 daemon operation

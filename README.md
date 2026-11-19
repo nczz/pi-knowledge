@@ -1,14 +1,14 @@
 # pi-knowledge
 
-Local-first RAG knowledge base for Pi and OMP coding agents.
+Local-first RAG knowledge server for Pi, OMP, and MCP-compatible coding agents.
 
-Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi and [OMP](https://omp.sh/) can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
+Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases shared through a profile daemon. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
 
-Built as a native [Pi extension](https://pi.dev/docs/latest/extensions) with verified [OMP](https://omp.sh/) compatibility through the packaged extension entry. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
+Pi and [OMP](https://omp.sh/) use the packaged extension entry with their native hooks and tool guidance. External agents use the standalone MCP command over stdio or loopback Streamable HTTP.
 
 ## Why It Matters
 
-Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi and OMP durable, searchable project memory:
+Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi, OMP, and MCP clients durable, searchable project memory:
 
 - Search code and documentation by meaning, exact symbols, or both.
 - Look up lightweight code symbols, Markdown headings, config keys, and environment variables before broader search.
@@ -21,7 +21,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 ## Highlights
 
-- **Local-first project memory**: stores indexes under the active host knowledge directory (`~/.pi/knowledge/` for Pi or `~/.omp/knowledge/` for OMP); no project files are modified.
+- **Default-first shared service**: Pi, OMP, CLI, and MCP share one long-lived daemon and storage domain for the zero-config `default` profile; advanced users can select isolated named profiles.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
 - **Code- and document-aware indexing**: recursive AST chunking for supported code, heading-aware Markdown chunks, and an embedding-safe finalizer that preserves oversized multilingual tails without adding a heavy document runtime.
 - **Structured URL indexing**: preserves HTML headings, paragraphs, lists, tables, and entities as lightweight Markdown-like text without a browser, Docling runtime, or new dependency.
@@ -29,6 +29,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
 - **Private by default**: local embeddings run without an API key.
+- **Standalone MCP**: `pi-knowledge-mcp` provides stdio and authenticated loopback Streamable HTTP; both are read-only by default, with explicit local-root, network, write, and admin capabilities.
 
 ## Feature Comparison
 
@@ -103,6 +104,14 @@ sudo apt-get install -y build-essential python3
 omp plugin install npm:pi-knowledge
 ```
 
+For Claude Code, Codex, Cursor, VS Code Copilot, or another MCP client, install the command globally and follow [docs/mcp-clients.md](docs/mcp-clients.md):
+
+```bash
+npm install -g pi-knowledge
+```
+
+npm 12 requires explicit approval for native/runtime dependency install scripts; the MCP guide provides the reviewed allow-list and verification steps.
+
 For a local checkout, install dependencies and build before registration:
 
 ```bash
@@ -137,6 +146,21 @@ opt-in. Set one or both variables before starting Pi or OMP:
 export PI_KNOWLEDGE_AUTO_INJECT=true # retrieve context before every model call
 export PI_KNOWLEDGE_WATCH=true       # update directory KBs after file changes
 ```
+
+The Pi/OMP extension and every MCP transport automatically ensure the selected profile daemon and leave it running when the client exits. Explicit daemon and MCP entry points are also available:
+
+```bash
+pi-knowledge-daemon status
+pi-knowledge-daemon start --profile research
+pi-knowledge-mcp                         # stdio; indexed search/symbol/show only
+pi-knowledge-mcp --allow-root "$PWD" --allow-write
+PI_KNOWLEDGE_MCP_HTTP_TOKEN="$(openssl rand -hex 32)" \
+  pi-knowledge-mcp --transport http      # http://127.0.0.1:3210/mcp
+```
+
+HTTP mode is loopback-only and requires the bearer token. See [MCP Client Setup](docs/mcp-clients.md) for standard client configuration, capability flags, token handling, profiles, and lifecycle.
+
+Most users should not set a profile. Advanced users can set `PI_KNOWLEDGE_PROFILE=research` or pass `--profile research` to isolate the database, vectors, daemon, watchers, and coverage snapshot.
 
 Per-turn injection adds retrieval work and prompt context to every model call.
 File watching applies only to directory-backed knowledge bases.
@@ -174,6 +198,14 @@ Install the unversioned Pi source (`npm:pi-knowledge`) to follow the npm
 2. Pass the exact pinned source shown there to `pi remove`.
 3. Run `pi install npm:pi-knowledge`.
 
+
+For a globally installed standalone MCP command:
+
+```bash
+npm install -g pi-knowledge
+```
+
+With npm 12, repeat the reviewed `--allow-scripts` list from [docs/mcp-clients.md](docs/mcp-clients.md). Restart persistent HTTP adapters and reconnect stdio clients after upgrading. A compatible client safely replaces an older profile daemon when the package/build protocol requires it; Pi/OMP session shutdown and MCP client shutdown do not stop the shared daemon.
 ### Local checkout
 
 A linked checkout is updated from Git, not from the npm registry. Finish,
@@ -244,7 +276,7 @@ Mode selection contract:
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty, follow the returned classified cause and action. `auto` records its attempted modes; do not retry a mode already listed.
 
-Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. In `adaptive` mode, code chunks with AST metadata can prefer same-parent/sibling chunks inside the same bounded file window; this is metadata-driven context expansion, not caller/callee analysis. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, source freshness, and adaptive `source_chunk_ids` where available.
+Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. In `adaptive` mode, code chunks with AST metadata can prefer same-parent/sibling chunks inside the same bounded file window; this is metadata-driven context expansion, not caller/callee analysis. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and indexed-only provenance such as chunk id, chunk hash, indexed timestamp, persisted stale flag, match reason, and adaptive `source_chunk_ids` where available.
 
 Zero-result responses are self-classifying. `knowledge_search` distinguishes missing or unavailable KBs, KBs with no indexed chunks, embedding incompatibility, retrieval misses, score-threshold rejection, lexical-evidence rejection, metadata filtering, empty reranker output, and out-of-range pages. `knowledge_symbol_search` distinguishes missing symbol metadata, exact-name misses, symbol filters, unavailable KBs, and pagination. Both return concise two-line guidance plus a structured `details.miss` object; classification uses request and search-pipeline facts without running a source diagnostics scan.
 
@@ -312,9 +344,10 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 
 | Area | Environment variables |
 |------|-----------------------|
-| Storage path | `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR`, `OMP_PROFILE` |
-| Runtime worker and model cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
+| Profile and storage | `PI_KNOWLEDGE_PROFILE`, `PI_KNOWLEDGE_PROFILE_ROOT`, `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR` |
+| Runtime worker and model cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH`, `PI_KNOWLEDGE_RUNTIME_DIR` |
 | Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `PI_KNOWLEDGE_EMBEDDING_API_KEY`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_PREFIXES`, `PI_KNOWLEDGE_EMBEDDING_TASK`, `PI_KNOWLEDGE_EMBEDDING_QUERY_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_DOCUMENT_INSTRUCTION`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
+| MCP HTTP | `PI_KNOWLEDGE_MCP_HTTP_TOKEN` |
 | Reranker provider | `PI_KNOWLEDGE_RERANKER`, `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE`, `PI_KNOWLEDGE_RERANKER_RAW_LOGITS`, `PI_KNOWLEDGE_RERANKER_API_ENDPOINT`, `PI_KNOWLEDGE_RERANKER_API_BASE_URL`, `PI_KNOWLEDGE_RERANKER_API_KEY`, `PI_KNOWLEDGE_RERANKER_API_FORMAT`, `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS`, `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS`, `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH`, `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` |
 | Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
 | Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT`, `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER`, `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES`, `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS`, `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET`, `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES`, `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` |
@@ -324,11 +357,11 @@ For Hugging Face Text Embeddings Inference rerankers, use `PI_KNOWLEDGE_RERANKER
 
 ## Pi and OMP Support
 
-`pi-knowledge` supports Pi and [OMP](https://omp.sh/) extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
+`pi-knowledge` supports Pi and [OMP](https://omp.sh/) through the packaged `extension.js` entry shim. The startup-light extension lazily connects to the selected profile daemon; it no longer opens SQLite, vectors, model workers, or watchers inside the host process.
 
-Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
+The default profile atomically adopts one existing legacy Pi/OMP knowledge directory or creates `~/.pi-knowledge/profiles/default`. `~/.pi-knowledge/profiles.json` keeps that choice stable across Pi, OMP, CLI, and MCP. Explicit `PI_KNOWLEDGE_DIR` / `OMP_KNOWLEDGE_DIR` overrides apply only to the default profile. Named profiles are isolated under `~/.pi-knowledge/profiles/<name>`.
 
-OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated worker startup, Windows-safe worker transport fallback, document parser stdio isolation, and idempotent shutdown. Local embeddings and PDF/DOCX extraction require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
+OMP compatibility covers packaged entry loading, native SQLite dependency resolution in the daemon, trusted Node 22+ startup, Windows-safe worker transport, parser stdio isolation, and idempotent shutdown. `knowledge_configure` persists an explicit trusted Node path when a packaged host cannot launch the daemon directly.
 
 ## Large Project Indexing
 
@@ -353,21 +386,25 @@ the repository retains the broader design history.
 
 ## Data Storage
 
-All data is stored under the active host knowledge directory unless overridden;
-indexed projects are never used for internal storage:
+Storage is profile-scoped and never placed inside an indexed project:
 
 ```
-<knowledge-dir>/
-├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
-├── vectors/          ← Embedding vectors per KB (binary)
-└── models/           ← ONNX cache (embedding ~32MB; rerankers add artifacts)
+<profile-storage>/
+├── knowledge.db      ← SQLite metadata, chunks, FTS, symbols, and job state
+├── vectors/          ← Embedding vectors per KB
+├── models/           ← Local model cache
+├── config.json       ← Profile runtime configuration
+├── coverage.json     ← Advisory atomic profile scope/status snapshot
+└── .runtime/         ← Private daemon ownership and manifest state
 ```
 
-- **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`
-- **Reset**: delete the active knowledge directory to start fresh
-- **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
-- **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
-- **Updates**: schema migrations run automatically, but index-time behavior changes are not applied to existing vectors at startup. `knowledge_doctor` reports actionable reindex requirements without loading the embedding model.
+- **Default**: stable mapping recorded in `~/.pi-knowledge/profiles.json`
+- **Named profiles**: `~/.pi-knowledge/profiles/<name>` unless `PI_KNOWLEDGE_PROFILE_ROOT` overrides the root
+- **Backup**: stop the profile daemon, then copy the profile storage directory
+- **Reset**: use confirmed `knowledge_clear`; do not delete live daemon files
+- **Project safety**: indexed directories remain read-only
+- **Coverage snapshot**: `coverage.json` contains absolute source paths and is sensitive, advisory point-in-time state; consumers must handle absence, staleness, and unknown schema versions
+- **Updates**: schema migrations run automatically, but index-time behavior changes are reported by `knowledge_doctor` rather than silently rebuilding vectors at startup
 - **Symbol and chunk-policy indexes**: `knowledge.db` stores lightweight symbol/config/heading metadata plus an embedding input policy version. File, directory, and URL KBs with retained source paths can rebuild them with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
 
 ## Development

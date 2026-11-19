@@ -26,7 +26,7 @@ Coding agents operate within limited context windows. When working on complex pr
 3. **Incremental indexing** — content-addressed chunks; only re-embed changed/new content
 4. **Code-aware chunking** — AST-based splitting for supported languages; fallback to semantic boundaries
 5. **100% local** — local ONNX embedding model, zero API keys required for core functionality
-6. **Deep Pi integration** — lifecycle hooks, auto-injection, TUI render, RPC support
+6. **Native + standard agent integration** — keep Pi/OMP lifecycle hooks while exposing the same tools to external MCP clients
 7. **Observable** — real-time progress, index health diagnostics, chunk coverage stats
 8. **Self-correcting agent UX** — auto mode selection, fallback metadata, and doctor actions make retrieval failures actionable
 
@@ -35,35 +35,37 @@ Coding agents operate within limited context windows. When working on complex pr
 ## 3. Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Pi Agent Process                    │
-├─────────────────────────────────────────────────────┤
-│  pi-knowledge extension (index.ts)                   │
-│  ├── Tool Registry (knowledge_*)                     │
-│  ├── Lifecycle Hooks (session_start, context, etc.)  │
-│  ├── TUI Renderers (search results, progress)        │
-│  └── System Prompt Injection (promptGuidelines)       │
-├─────────────────────────────────────────────────────┤
-│  Core Engine                                         │
-│  ├── Indexer          → chunking + embedding + store │
-│  ├── Searcher         → hybrid retrieval + rerank    │
-│  ├── Watcher          → fs.watch + debounced update  │
-│  └── Diagnostics      → coverage, staleness, health  │
-├─────────────────────────────────────────────────────┤
-│  Storage Layer                                       │
-│  ├── SQLite (metadata, BM25 FTS5, chunk registry)    │
-│  └── Vector Store (streamed binary float32 embeddings) │
-├─────────────────────────────────────────────────────┤
-│  Embedding Layer                                     │
-│  ├── Local ONNX (multilingual-e5-small, 384d) [default]  │
-│  └── OpenAI-compatible env provider [optional]       │
-└─────────────────────────────────────────────────────┘
+Pi / OMP process               External MCP agents              Operator CLI
+┌──────────────────┐           ┌──────────────────────┐          ┌──────────────────┐
+│ extension.js     │           │ pi-knowledge-mcp     │          │ daemon start/... │
+│ hooks + tools    │           │ stdio or loopback    │          └────────┬─────────┘
+│ prompt guidance  │           │ Streamable HTTP      │                   │
+└────────┬─────────┘           └──────────┬───────────┘                   │
+         └──────────────────────┬─────────┴───────────────────────────────┘
+                                │ authenticated local RPC
+                     ┌──────────▼───────────┐
+                     │ profile daemon       │  one owner per canonical storage
+                     │ engine + watchers    │
+                     │ mutation lifecycle   │
+                     │ coverage.json writer │
+                     └──────────┬───────────┘
+              ┌─────────────────┼──────────────────┐
+              │                 │                  │
+        SQLite + FTS5     vector files      isolated model/
+        symbols/jobs      streamed reads    document worker
+```
 
-Persistence: ~/.pi/knowledge/
-├── knowledge.db          (SQLite: metadata + FTS5 + chunk registry)
+Pi/OMP and MCP share public tool definitions and the selected daemon; no production client opens SQLite or constructs a fallback `KnowledgeEngine`. Pi/OMP session shutdown and MCP adapter shutdown release only client/transport state. The daemon remains until an explicit daemon stop or authenticated package/build replacement.
+
+Persistence for the default profile is recorded in `~/.pi-knowledge/profiles.json` and normally uses `~/.pi-knowledge/profiles/default`. A single existing legacy Pi/OMP directory may be adopted in place. Named profiles use isolated storage:
+
+```
+<profile-storage>/
+├── knowledge.db
 ├── vectors/
-│   └── <kb-id>.bin       (streamed float32 vectors per knowledge base)
-└── models/               (cached ONNX models)
+├── models/
+├── config.json
+└── coverage.json
 ```
 
 ---
@@ -171,7 +173,7 @@ Query prefix: "query: {text}"
 Document prefix: "passage: {text}"
 ```
 
-Downloaded on first use, cached at `~/.pi/knowledge/models/`.
+Downloaded on first use and cached under the selected profile's `models/` directory.
 
 Note: multilingual-e5-small chosen over all-MiniLM-L6-v2 because:
 - Same 384 dimensions (identical index size)
@@ -270,39 +272,29 @@ promptGuidelines: [
 ### Lifecycle Hooks
 
 ```typescript
-// session_start: warm up index, check staleness
-api.on("session_start", async (event, ctx) => {
-  await engine.initialize(ctx.cwd);
-  await engine.checkStaleness();
+// session_start: connect to or ensure the selected profile daemon
+api.on("session_start", async () => {
+  await ensureDaemonClient(profile);
 });
 
-// session_shutdown: flush pending writes, stop watcher
+// session_shutdown: release this extension client's state only
 api.on("session_shutdown", async () => {
-  await engine.flush();
-  engine.stopWatcher();
+  releaseClientState();
 });
 
-// context: auto-inject relevant snippets (opt-in)
-api.on("context", async (event, ctx) => {
+// context: ask the daemon for relevant snippets (opt-in)
+api.on("context", async (event) => {
   if (config.autoInject) {
     const lastUserMsg = getLastUserMessage(event.messages);
     if (lastUserMsg) {
-      const results = await engine.search(lastUserMsg, { limit: 3, mode: "fast" });
-      // Inject as context prefix
+      const results = await daemon.search(lastUserMsg, { limit: 3, mode: "fast" });
+      // Inject a bounded context prefix.
     }
   }
 });
-
-// before_agent_start: inject KB metadata into system prompt
-api.on("before_agent_start", (event) => {
-  const kbs = engine.listKnowledgeBases();
-  if (kbs.length === 0) return undefined;
-  const desc = kbs.map(kb => `"${kb.name}" (${kb.chunk_count} chunks)`).join(", ");
-  return {
-    systemPrompt: `${event.systemPrompt}\n\nAvailable knowledge bases: ${desc}`,
-  };
-});
 ```
+
+The profile daemon owns initialization, SQLite, model/document workers, persisted jobs, watchers, and shutdown ordering. A host session never flushes/closes those shared resources.
 
 ### TUI Rendering
 
@@ -338,7 +330,7 @@ Non-blocking, fire-and-forget. Errors reported via `knowledge_status`.
 Knowledge Engine Status
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Embedding model: multilingual-e5-small (local ONNX, 384d)
-Storage: ~/.pi/knowledge/ (12.4 MB)
+Storage: <default-profile-storage> (12.4 MB)
 Knowledge bases: 3
 
   "API Docs"          ready     142 chunks   8 files   updated 2m ago
@@ -359,11 +351,11 @@ Environment overrides:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PI_KNOWLEDGE_DIR` | Storage directory | `~/.pi/knowledge` |
+| `PI_KNOWLEDGE_PROFILE` | Process-wide storage/runtime profile | `default` |
+| `PI_KNOWLEDGE_DIR` | Explicit default-profile storage override | persisted mapping or adopted legacy directory |
 | `PI_KNOWLEDGE_EMBEDDING` | provider:model | `local:multilingual-e5-small` |
-| `PI_KNOWLEDGE_WATCH` | Enable file watchers | `false` |
+| `PI_KNOWLEDGE_WATCH` | Enable daemon-owned file watchers | `false` |
 | `PI_KNOWLEDGE_AUTO_INJECT` | Auto-inject per turn | `false` |
-| `PI_KNOWLEDGE_RERANK` | Enable cross-encoder | `false` |
 
 ---
 
@@ -412,8 +404,8 @@ Environment overrides:
 - [x] BM25 search via FTS5
 - [x] Semantic search via flat cosine similarity
 - [x] Tools: add, search, remove, show, clear
-- [x] Persistence at `~/.pi/knowledge/`
-- [x] Pi extension lifecycle hooks
+- [x] Default-first profile storage with stable legacy adoption
+- [x] Pi/OMP extension lifecycle hooks through the profile daemon
 - [x] Unit tests
 
 ### Phase 2: Hybrid + Incremental
@@ -476,26 +468,20 @@ Current vector search uses exact streamed scan from the per-KB binary vector fil
 ```
 pi-knowledge/
 ├── extension.js          ← Package entry shim (loads dist first, source fallback)
-├── index.ts              ← Extension source entry (ExtensionFactory)
+├── index.ts              ← Startup-light Pi/OMP extension client + shared tool definitions
 ├── dist/                 ← Build output included in npm package
-├── package.json
-├── tsconfig.json
-├── biome.json
-├── README.md
-├── DESIGN.md
-├── CHANGELOG.md
 ├── src/
-│   ├── engine.ts         ← KnowledgeEngine facade
-│   ├── tools/            ← Tool definitions (add, search, remove, etc.)
-│   ├── indexer/          ← Chunking + embedding orchestration
-│   │   ├── chunkers/    ← markdown, code-ast, semantic, fixed
-│   │   └── ...
-│   ├── embedding/        ← Provider interface + local ONNX + pi-ai
-│   ├── search/           ← BM25, vector, fusion, reranker
+│   ├── daemon/           ← Profile singleton, authenticated RPC, lifecycle, CLI
+│   ├── mcp/              ← Shared protocol core, stdio, Streamable HTTP
+│   ├── profiles.ts       ← Default-first profile registry and storage resolution
+│   ├── engine.ts         ← Daemon-owned KnowledgeEngine facade
+│   ├── indexer/          ← Scanning, chunking, embedding orchestration
+│   ├── embedding/        ← Provider interface, worker client, vector I/O
+│   ├── search/           ← BM25, vector, fusion, reranker, context
 │   ├── storage/          ← SQLite persistence
-│   ├── watcher/          ← File watching
-│   ├── diagnostics/      ← Health checks
-│   └── config.ts
+│   ├── watcher/          ← Daemon-owned file watching
+│   └── diagnostics/      ← Health checks
+├── docs/
 └── test/
     ├── unit/
     ├── e2e/
@@ -506,14 +492,18 @@ pi-knowledge/
 
 ## 17. Security
 
-- **No network by default**: Local ONNX — data never leaves machine
-- **Explicit paths only**: Only indexes what user provides
-- **Secret skip**: Ignores `.env`, `*.key`, `*.pem`, credentials
-- **ONNX model verification**: SHA-256 check on download
+- **Local-first by default**: local embeddings do not send indexed content to an API.
+- **Single owner**: only the selected profile daemon opens SQLite/vectors and owns watchers.
+- **Explicit source scope**: risky or low-signal text is suggested for exclusion and requires confirmed inclusion; technical skips are reserved for unsupported/unreadable/oversized content.
+- **Capability-gated MCP**: read-only default; local roots, network, writes, and admin are independent launch capabilities.
+- **HTTP boundary**: loopback-only, mandatory bearer token, exact supplied-Origin validation, bounded requests/sessions/output, and no built-in remote bind/TLS/OAuth.
+- **Private runtime state**: daemon token/manifest/socket and `coverage.json` use owner-only storage and never carry MCP credentials.
 
 ---
 
 ## 18. Performance Targets
+
+Historical numeric targets below are directional only; current release decisions use benchmark and smoke evidence rather than treating these values as verified guarantees.
 
 | Operation | Target |
 |-----------|--------|
@@ -526,10 +516,10 @@ pi-knowledge/
 
 ---
 
-## 19. Open Questions
+## 19. Current Boundaries
 
-1. **Native/runtime portability**: better-sqlite3, tree-sitter, and the ONNX runtime bundled through `@huggingface/transformers` must remain compatible with supported Node/macOS/Linux environments.
-2. **Multilingual**: all-MiniLM-L6-v2 vs multilingual-e5-small for zh-TW support.
-3. **tree-sitter loading**: Lazy-load grammars per language to avoid bundle bloat.
-4. **Auto-injection stability**: keep context injection opt-in and bounded so retrieved snippets do not crowd out the user's active task.
-5. **Scope**: Global `~/.pi/knowledge/` + project-local `.pi/knowledge/` both supported.
+1. Native/runtime portability for SQLite, tree-sitter, and ONNX remains release-gated on supported Node/macOS/Linux/Windows paths.
+2. Vector search is exact and streamed; an ANN dependency requires measured evidence and explicit approval.
+3. Auto-injection remains opt-in and bounded.
+4. Profiles are global storage/runtime domains, not project-local databases. Most users use `default`; named profiles are advanced isolation.
+5. HTTP MCP is a same-machine transport. Remote/multi-user serving requires a separate TLS/OAuth design.

@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-> pi-knowledge 使用 `extension.js` 作為 package entry shim：已 build 時載入 `dist/index.js`，本地開發尚未 build 時 fallback 到 `index.ts`。請同時用 `node -e "import('./extension.js')"` 和 `pi -e ./extension.js` 檢查載入行為。
+> pi-knowledge 使用 `extension.js` 作為 package entry shim：已 build 時載入 `dist/index.js`，本地開發尚未 build 時 fallback 到 `index.ts`。`index.ts`只建立 selected profile daemon client；不直接開 DB/vector/watcher/model worker。請同時用 `node --experimental-strip-types -e "import('./index.ts')"`、`node -e "import('./extension.js')"` 和 `pi -e ./extension.js` 檢查載入行為。
 
 ### 測試
 
@@ -185,13 +185,13 @@ Do this for: $ARGUMENTS
 
 ```
 ✅ 可用: better-sqlite3, tree-sitter, onnxruntime-node
-✅ Pi 的 `pi install` 會跑 postinstall (native prebuilt 正常下載)
-✅ jiti 載入 extension 後，native require() 正常解析 node_modules/
-
-注意: tree-sitter 版本必須配對:
-  core 0.22.x + grammars 0.23.x ✅
-  core 0.25.x gyp build failure ❌
+✅ jiti 載入 extension 後，native require() 可從 package node_modules解析
+⚠️ npm 12 預設阻擋未核准的 dependency install scripts
 ```
+
+「install command沒有 `--ignore-scripts`」不保證 native prebuild已下載。Repository必須用 exact-version `allowScripts`管理 reviewed scripts並執行 `npm install-scripts ls`；global install要用 install-time `--allow-scripts`。pi-knowledge的外部 MCP清單在 `docs/mcp-clients.md`。
+
+tree-sitter core/grammar ABI必須以實際 pinned dependency與 parser smoke驗證，不能只靠 semver猜測相容。
 
 ### Runtime imports and virtual modules
 
@@ -247,19 +247,20 @@ pi.on("session_shutdown", async () => {
 });
 ```
 
-對 ONNX/native model：
+對 ONNX/native model，優先使用 extension process外的 worker。若多個 host/client要共用資料，不要把 worker、DB或 watcher生命週期綁在 session：
 
 ```typescript
-// Prefer a model worker. Do not import onnxruntime-node in Pi's TUI process.
-const model = await requestModelWorker({ task, modelId, input });
+// pi-knowledge: extension only connects to the selected profile daemon.
+pi.on("session_start", async () => {
+  await ensureProfileDaemon();
+});
 
 pi.on("session_shutdown", async () => {
-  clearIdleTimer();
-  await waitForNoActiveRuns();
-  shutdownModelWorkerWithSigkill();
-  closeDatabaseAndWatchers();
+  releaseClientState(); // Do not stop the shared daemon or its worker/watchers.
 });
 ```
+
+只有真正由單一 extension session獨占的普通資源，才在該 session shutdown dispose。Shared daemon的 explicit stop必須自行處理 admission、active work、worker、DB、watcher與 ownership的 idempotent順序。
 
 ---
 
@@ -317,20 +318,22 @@ npm publish
 - [ ] `npm test` 通過
 - [ ] `npm run check` 通過（包含 Biome config 本身）
 - [ ] `npm run typecheck` 通過
-- [ ] `npm run build` 通過，且 `dist/index.js` 和 `dist/src/model-worker.js` 已產生
-- [ ] `node -e "import('./extension.js')"` 通過
-- [ ] `npm pack --dry-run` package contents 正確，包含 `extension.js` 和 `dist/`
+- [ ] `npm run build` 通過，且所有 package bins/worker build output已產生
+- [ ] `node --experimental-strip-types -e "import('./index.ts')"` 與 `node -e "import('./extension.js')"` 通過
+- [ ] `npm pack --dry-run` package contents 正確；實際從 packed artifact smoke package bins
 - [ ] `pi -e ./extension.js -p "use my_tool"` dogfood 通過
 - [ ] `npm run test:e2e` smoke 通過，且明確記錄 skipped cases
 - [ ] 帶外部 `PI_KNOWLEDGE_E2E_PDF` / `PI_KNOWLEDGE_E2E_DOCX` 的 release-grade e2e 通過（若 extension 支援 PDF/DOCX）
-- [ ] README 描述和實作對齊（不 overclaim）
+- [ ] README、configuration、architecture與實作對齊（不 overclaim）
 - [ ] CHANGELOG 更新
 - [ ] 新 tool 有 promptSnippet + promptGuidelines
 - [ ] 長操作支援 AbortSignal
 - [ ] onUpdate 回報進度
-- [ ] 資源有 dispose (session_shutdown)
+- [ ] 每個資源的 owner與 dispose boundary明確；session shutdown不能停止 shared daemon
 - [ ] 新 source type 覆蓋 add + update + status/diagnostics
 - [ ] import/export 保持跨機器 portable，不依賴本機 absolute source path
+- [ ] npm 12 `npm install-scripts ls`沒有未審查項目，`allowScripts`保持 exact-version pins
+- [ ] 若提供 MCP，packed stdio/HTTP 都完成真實 list/call、auth/capability與 clean-shutdown smoke
 
 ### Release flow
 
@@ -350,12 +353,12 @@ npm publish
 | 陷阱 | 解法 |
 |------|------|
 | tool 沒有被 LLM 呼叫 | 確認 description 清楚描述「何時用」+ promptGuidelines 指引 |
-| native dep 載入失敗 | 確認 tree-sitter 版本配對；確認 `pi install` 有跑 postinstall |
+| native dep 載入失敗 | 檢查 npm 12 skipped scripts、exact `allowScripts` pins、prebuild/compile輸出與實際 parser/native smoke |
 | TUI render crash | 不要提供未完整驗證的 custom renderer；先用 Pi 預設 renderer |
-| Session state 遺失 | 用 filesystem 持久化，不要存在記憶體 |
-| 多個 Pi session 衝突 | SQLite WAL mode + busy_timeout |
-| Exit 時 native crash | onnxruntime macOS bug；不要在 idle timer 或 session_shutdown 主動 dispose ONNX pipeline |
-| `process.env` 讀不到 | env var 在 extension load 時讀取（module scope），不是 tool execute 時 |
+| Session state 遺失 | 持久狀態交給 profile daemon/filesystem，不只存在單一 session記憶體 |
+| 多個 Pi/OMP/MCP client 衝突 | 每個 canonical profile只允許一個 daemon owner；client不得 fallback直接開 SQLite/vector |
+| Exit 時 native crash | onnxruntime macOS bug；Pi TUI不 import native backend，shared daemon worker不由 session shutdown停止 |
+| `process.env` 讀不到 | env var 在 process啟動前設定；engine-affecting設定由已啟動 daemon擁有，變更後依契約 restart |
 
 ---
 

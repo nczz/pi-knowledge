@@ -75,7 +75,7 @@ function vectorSearch(queryVec: Float32Array, vectors: Float32Array[], topK: num
 
 ```
 Format: [count: uint32] [dim: uint32] [vec0: float32[384]] [vec1: float32[384]] ...
-Path: ~/.pi/knowledge/vectors/<kb-id>.bin
+Path: <profile-storage>/vectors/<kb-id>.bin
 ```
 
 Semantic and hybrid search read this file with ranged vector reads and stream chunk IDs from SQLite in row order. The search path must keep only top-K candidate vectors for ranking/diversity, not the full vector file or a full chunk-id array.

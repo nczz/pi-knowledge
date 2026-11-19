@@ -1,7 +1,9 @@
 # pi-knowledge — 技術研究報告
 
 日期: 2026-06-14
-狀態: 所有高風險項目已驗證，結論可執行
+狀態: 歷史研究快照；後續架構決策已取代部分結論
+
+> Historical research snapshot. Storage, install-script, lifecycle, daemon, MCP, and release conclusions have since changed. Current behavior is defined by `README.md`, `AGENTS.md`, `docs/configuration.md`, `docs/daemon-profiles.md`, `docs/technical-decisions.md`, and the implementation; do not use older examples below as current operating instructions.
 
 ---
 

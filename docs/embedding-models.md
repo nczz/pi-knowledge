@@ -79,7 +79,7 @@ Preset 只負責輸入 instruction，**不會**改變外部 server 的 pooling �
 ```typescript
 import { pipeline, env } from '@huggingface/transformers';
 
-env.cacheDir = '~/.pi/knowledge/models/';
+env.cacheDir = '<profile-storage>/models/'; // or PI_KNOWLEDGE_MODEL_CACHE_DIR
 
 const extractor = await pipeline('feature-extraction', 'Xenova/multilingual-e5-small', {
   progress_callback: (progress) => { /* download progress */ }

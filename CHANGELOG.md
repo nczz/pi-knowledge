@@ -1,6 +1,24 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Added default-first isolated knowledge profiles with one authenticated long-lived daemon per profile, explicit daemon CLI lifecycle, and automatic Pi/OMP client startup.
+- Added a dependency-free MCP server with stdio and authenticated loopback Streamable HTTP transports, legacy and modern protocol contracts, request-scoped SSE progress, cancellation, shared public tool schemas, and explicit root/network/write/admin capabilities.
+- Added daemon-owned atomic `coverage.json` profile snapshots for issue #25, including startup reconciliation, mutation hooks, and non-rollback failure diagnostics.
+- Added external-agent setup for Claude Code, Codex, Cursor, VS Code Copilot, and Kiro CLI/ACP, including npm 12 install-script approvals, profile selection, token handling, and upgrade lifecycle.
+
+### Changed
+- Moved production SQLite, vector, model-worker, mutation, and watcher ownership out of the Pi/OMP extension into the profile daemon; extension shutdown no longer stops shared knowledge state.
+- Stabilized default storage selection across Pi, OMP, CLI, and MCP through an atomic profile registry while preserving one existing legacy knowledge database in place.
+- Version-pinned the reviewed native/runtime dependency install-script approvals required by npm 12.
+
+### Fixed
+- Enforced MCP local-root and network capabilities again at daemon operation time, with canonical immutable update targets, bounded import metadata, Windows ACL checks, and race-aware directory root binding.
+- Bounded Unix socket fallback paths, diagnostic working sets, RPC/MCP queues and frames, and watcher polling so long scans do not trigger uninterrupted immediate rescans.
+- Restricted capability-free MCP to indexed search/symbol/show data; live status/doctor rescans now require admin capability, and burst/slow-drip framing remains bounded without terminating active work.
+- Added required modern MCP caching hints to cacheable complete results so strict `2026-07-28` clients such as Kiro CLI 3.5 can initialize and call tools.
+- Hardened profile storage to owner-only permissions, removed persisted KB labels from system prompts, preserved technically skipped files during updates, and resolved PowerShell from the active Windows system root.
+
 
 ## [0.15.0] - 2026-11-15
 

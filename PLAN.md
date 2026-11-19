@@ -1,5 +1,7 @@
 # pi-knowledge — 開發計劃
 
+> Historical v0.3.0 plan, not current project status. Current capabilities and workflow are documented in `README.md`, `CHANGELOG.md`, `AGENTS.md`, `docs/daemon-profiles.md`, and `CONTRIBUTING.md`.
+
 ## 當前狀態
 
 **v0.3.0 已發佈** (npm + GitHub) — 2026-06-15

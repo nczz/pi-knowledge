@@ -116,7 +116,7 @@ kiro-cli 是 closed-source，但我透過日常使用已知其完整行為。見
 pi-knowledge 的 unique value proposition:
 
 1. **不是 memory** — 索引使用者的既有文件，不是 agent 自己的筆記
-2. **不是 MCP server** — 深度整合 Pi lifecycle、TUI、RPC，而非外掛協議
+2. **Pi/OMP native + MCP** — Pi/OMP 保留 lifecycle hooks、prompt guidance、RPC與 opt-in context injection；外部 agent 透過同一 profile daemon 的 stdio/Streamable HTTP MCP surface 使用相同工具，而不是建立第二份 engine
 3. **Hybrid search 是預設** — BM25 + vector + weighted score fusion，不需要使用者選模式
 4. **Incremental** — content-addressed，只 re-embed 變更的 chunk
 5. **本地 + 多語言** — multilingual-e5-small，支持 zh-TW，零 API key

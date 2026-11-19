@@ -5,8 +5,8 @@
 ## 1. 預下載 Model
 
 ```bash
-# 有網路時觸發一次 knowledge_add → model 自動下載到 ~/.pi/knowledge/models/
-# 或手動從 https://huggingface.co/Xenova/multilingual-e5-small/tree/main/onnx 下載
+# 有網路時在 selected profile觸發一次 knowledge_add，模型會下載到 <profile-storage>/models/
+# 或設定 PI_KNOWLEDGE_MODEL_CACHE_DIR後，從可信來源預先填入該目錄
 ```
 
 ---
@@ -19,10 +19,10 @@ export PI_KNOWLEDGE_OFFLINE=true
 export PI_KNOWLEDGE_MODEL_CACHE_DIR=/path/to/models
 ```
 
-Extension 行為:
+Model worker行為:
 ```typescript
 import { env } from '@huggingface/transformers';
-env.cacheDir = process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? '<knowledge-dir>/models';
+env.cacheDir = process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? '<profile-storage>/models';
 env.allowRemoteModels = false;
 env.localModelPath = env.cacheDir;
 ```
@@ -42,8 +42,8 @@ export NODE_EXTRA_CA_CERTS=/path/to/corp-ca.pem
 ## 4. Air-Gapped 部署
 
 ```bash
-# Build machine (有網路): 觸發下載，打包 ~/.pi/knowledge/models/
-# Target machine: 解壓到同路徑，或設定 PI_KNOWLEDGE_MODEL_CACHE_DIR 指向解壓後路徑
+# Build machine (有網路): 觸發下載，打包 selected profile的 models/或自訂 cache
+# Target machine: 解壓到 owner-only目錄並設定 PI_KNOWLEDGE_MODEL_CACHE_DIR
 export PI_KNOWLEDGE_OFFLINE=true
 ```
 
