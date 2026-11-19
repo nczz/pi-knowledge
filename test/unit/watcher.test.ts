@@ -23,16 +23,24 @@ describe("file watcher exclusions", () => {
 
 	it("does not trigger updates for suggested-excluded files", async () => {
 		const updates: string[] = [];
-		startWatcher("kb", testDir, (kbId) => updates.push(kbId));
+		await startWatcher("kb", testDir, (kbId) => updates.push(kbId));
 
 		writeFileSync(join(testDir, "node_modules", "pkg.js"), "export const IgnoredVendor = 2;");
 		await vi.advanceTimersByTimeAsync(5_000);
 
 		expect(updates).toEqual([]);
 
-		writeFileSync(join(testDir, "src.ts"), "export const WatchSource = 2;");
-		await vi.advanceTimersByTimeAsync(5_000);
+		writeFileSync(join(testDir, "src.ts"), "export const WatchSource = 200; // changed");
+		await vi.waitFor(() => expect(updates).toEqual(["kb"]), { timeout: 5_000, interval: 100 });
+	});
+	it("detects files created while the initial polling baseline is still scanning", async () => {
+		const updates: string[] = [];
+		const initialScan = startWatcher("baseline-race", testDir, (kbId) => updates.push(kbId));
+		writeFileSync(join(testDir, "created-during-baseline.txt"), "new source");
 
-		expect(updates).toEqual(["kb"]);
+		await initialScan;
+		await vi.advanceTimersByTimeAsync(2_100);
+
+		expect(updates).toEqual(["baseline-race"]);
 	});
 });

@@ -1,14 +1,17 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	buildChunkEmbeddingText,
+	chunkFile,
 	chunkIdentityHash,
 	chunkMarkdown,
 	chunkText,
 	contentHash,
 	createSkippedScanStats,
 	iterateScannableFiles,
+	iterateScannableFilesAsync,
 	iterateScannedFiles,
 	preTokenizeForFTS,
 	summarizeSkippedScan,
@@ -240,8 +243,6 @@ describe("walkDir", () => {
 	});
 });
 
-import { chunkFile } from "../../src/indexer/chunker.ts";
-
 describe("chunkFile (async)", () => {
 	it("dispatches .md to markdown chunker", async () => {
 		const chunks = await chunkFile(
@@ -261,5 +262,51 @@ describe("chunkFile (async)", () => {
 		const text = Array(15).fill("A paragraph with enough meaningful content for testing purposes here.").join("\n\n");
 		const chunks = await chunkFile(text, "data.csv");
 		expect(chunks.length).toBeGreaterThan(0);
+	});
+});
+
+describe("async bounded directory scanning", () => {
+	it.skipIf(process.platform === "win32")("does not follow symbolic links outside the source root", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pk-async-scan-"));
+		const outside = mkdtempSync(join(tmpdir(), "pk-async-outside-"));
+		writeFileSync(join(outside, "outside.ts"), "export const OutsideScanToken = true;");
+		symlinkSync(outside, join(root, "linked"));
+		try {
+			const files: string[] = [];
+			for await (const file of iterateScannableFilesAsync(root)) files.push(file.relPath);
+			expect(files).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an oversized gitignore before loading it into memory", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pk-async-scan-"));
+		writeFileSync(join(root, ".gitignore"), "x".repeat(1024 * 1024 + 1));
+		try {
+			const collect = async (): Promise<void> => {
+				for await (const _file of iterateScannableFilesAsync(root)) {
+					/* consume */
+				}
+			};
+			await expect(collect()).rejects.toThrow("Scan configuration exceeds");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects known binary extensions before opening their text-like payload", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pk-async-scan-"));
+		writeFileSync(join(root, "archive.zip"), "text payload without NUL bytes");
+		try {
+			const skipped = createSkippedScanStats();
+			const files: string[] = [];
+			for await (const file of iterateScannableFilesAsync(root, skipped)) files.push(file.relPath);
+			expect(files).toEqual([]);
+			expect(skipped.by_reason.binary).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

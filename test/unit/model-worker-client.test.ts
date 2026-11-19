@@ -178,13 +178,17 @@ describe("model worker client", () => {
 		const second = embedInModelWorker(["keep me"], "passage");
 		if (!child.send) throw new Error("Fake IPC child missing send");
 		const sendMock = vi.mocked(child.send);
+		const firstMessage = sendMock.mock.calls[0]?.[0] as { id: number } | undefined;
 		const secondMessage = sendMock.mock.calls[1]?.[0] as { id: number } | undefined;
+		if (!firstMessage) throw new Error("First request was not sent");
 		if (!secondMessage) throw new Error("Second request was not sent");
 
+		const firstRejected = expect(first).rejects.toThrow("Cancelled");
 		firstController.abort();
+		expect(sendMock).toHaveBeenNthCalledWith(3, { id: firstMessage.id, type: "cancel" }, expect.any(Function));
 		child.emit("message", { id: secondMessage.id, result: [[0.25, 0.75]] });
 
-		await expect(first).rejects.toThrow("Cancelled");
+		await firstRejected;
 		await expect(second).resolves.toEqual([new Float32Array([0.25, 0.75])]);
 	});
 
@@ -284,6 +288,24 @@ describe("model worker client", () => {
 		child.emit("message", { id: message.id, result: { counts: [5], maximum: "512" } });
 
 		await expect(request).rejects.toThrow("Invalid embedding input measurement from worker");
+	});
+
+	it("rejects document extraction responses above the shared text limit", async () => {
+		const child = createFakeChild();
+		childProcessMock.fork.mockReturnValue(child);
+		const { extractDocumentInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = extractDocumentInModelWorker("/tmp/document.pdf", "pdf");
+		if (!child.send) throw new Error("Fake IPC child missing send");
+		const sendMock = vi.mocked(child.send);
+		const message = sendMock.mock.calls[0]?.[0] as { id: number } | undefined;
+		if (!message) throw new Error("Request was not sent");
+		child.emit("message", {
+			id: message.id,
+			result: { content: "x".repeat(8 * 1024 * 1024 + 1), fileType: "pdf" },
+		});
+
+		await expect(request).rejects.toThrow("Extracted document exceeds");
 	});
 
 	it("fails before spawning when no Node executable can be resolved", async () => {

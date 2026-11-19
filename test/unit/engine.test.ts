@@ -4,6 +4,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	unlinkSync,
 	utimesSync,
 	writeFileSync,
@@ -14,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import type * as ModelWorkerClient from "../../src/model-worker-client.ts";
+import type * as SafeFetch from "../../src/network/safe-fetch.ts";
 import {
 	createKB,
 	getChunksByKB,
@@ -27,10 +29,18 @@ import {
 const documentWorkerMock = vi.hoisted(() => ({
 	extractDocument: vi.fn(),
 }));
+const safeFetchMock = vi.hoisted(() => ({
+	fetchPublicText: vi.fn(),
+}));
 
 vi.mock("../../src/model-worker-client.ts", async (importOriginal) => ({
 	...(await importOriginal<typeof ModelWorkerClient>()),
 	extractDocumentInModelWorker: documentWorkerMock.extractDocument,
+}));
+
+vi.mock("../../src/network/safe-fetch.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof SafeFetch>()),
+	fetchPublicText: safeFetchMock.fetchPublicText,
 }));
 
 const TEST_DIR = "/tmp/pk-test-engine";
@@ -42,6 +52,7 @@ describe("KnowledgeEngine", () => {
 		rmSync(TEST_DIR, { recursive: true, force: true });
 		engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
+		safeFetchMock.fetchPublicText.mockReset();
 		documentWorkerMock.extractDocument.mockReset();
 	});
 
@@ -246,6 +257,35 @@ describe("KnowledgeEngine", () => {
 			expect(engine.list()).toHaveLength(0);
 		});
 
+		it.skipIf(process.platform === "win32")(
+			"rejects symlink file sources without creating a knowledge base",
+			async () => {
+				const target = join(TEST_DIR, "source-target.txt");
+				const link = join(TEST_DIR, "source-link.txt");
+				writeFileSync(target, "Symlink targets must not be indexed through a path alias.");
+				symlinkSync(target, link);
+				expect(() => engine.plan(link)).toThrow("non-symlink path");
+				await expect(engine.planAsync(link)).rejects.toThrow("non-symlink file");
+
+				await expect(engine.add(link, "Symlink Source")).rejects.toThrow("non-symlink file");
+				expect(engine.list()).toHaveLength(0);
+			},
+		);
+
+		it("plans and rejects oversized inline text before embedding", async () => {
+			const source = "x".repeat(10 * 1024 * 1024 + 1);
+			const plan = await engine.planAsync(source);
+
+			expect(plan).toMatchObject({
+				source_type: "text",
+				scannable_files: 0,
+				scannable_bytes: 0,
+			});
+			expect(plan.skipped.by_reason.oversized).toBe(1);
+			await expect(engine.add(source, "Oversized Inline")).rejects.toThrow("Inline text exceeds");
+			expect(engine.list()).toHaveLength(0);
+		});
+
 		it("persists and retrieves the tail of an oversized multilingual paragraph", async () => {
 			const content = `開頭主題${"這是一段必須完整建立向量與全文索引的繁體中文內容".repeat(180)}TailBudgetToken`;
 
@@ -261,21 +301,15 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("preserves URL heading boundaries for chunk metadata and retrieval", async () => {
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(
-					async () =>
-						new Response(
-							[
-								"<html><body>",
-								"<h1>Billing Guide</h1>",
-								"<p>BillingHtmlToken explains invoices, payment retries, account balances, and reconciliation details.</p>",
-								"<h2>Refund Policy</h2>",
-								"<p>RefundHtmlTailToken explains approval rules, audit records, review ownership, and settlement timing.</p>",
-								"</body></html>",
-							].join(""),
-						),
-				),
+			safeFetchMock.fetchPublicText.mockResolvedValueOnce(
+				[
+					"<html><body>",
+					"<h1>Billing Guide</h1>",
+					"<p>BillingHtmlToken explains invoices, payment retries, account balances, and reconciliation details.</p>",
+					"<h2>Refund Policy</h2>",
+					"<p>RefundHtmlTailToken explains approval rules, audit records, review ownership, and settlement timing.</p>",
+					"</body></html>",
+				].join(""),
 			);
 
 			const { kb, chunkCount } = await engine.add("https://example.test/guide", "Structured HTML");
@@ -702,10 +736,7 @@ describe("KnowledgeEngine", () => {
 
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
-			vi.stubGlobal(
-				"fetch",
-				vi.fn(async () => new Response(body, { status: 200 })),
-			);
+			safeFetchMock.fetchPublicText.mockImplementation(async () => body);
 
 			const added = await engine.add("https://example.test/docs", "URL");
 			const db = openDatabase(TEST_DIR);
@@ -853,42 +884,36 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
-		it("skips failed document extraction during directory update without marking the KB error", async () => {
-			const projectDir = mkdtempSync(join(tmpdir(), "pk-directory-docx-update-skip-"));
+		it("skips a failed directory extraction while preserving prior chunks for that file", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-directory-docx-update-failure-"));
 			try {
 				const docxPath = join(projectDir, "handbook.docx");
 				const validPath = join(projectDir, "valid.ts");
 				writeFileSync(validPath, "export const InitialValidUpdateToken = 'indexed';");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
 				documentWorkerMock.extractDocument.mockResolvedValueOnce({
-					content: "更新前 DOCX：InitialSkippedDocToken。",
+					content: "更新前 DOCX：InitialPreservedDocToken。",
 					fileType: "docx",
 				});
 
-				const added = await engine.add(projectDir, "Directory Docx Update Skip");
+				const added = await engine.add(projectDir, "Directory Docx Update Failure");
 				writeFileSync(validPath, "export const ChangedValidUpdateToken = 'indexed';");
 				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xfe, 0x00]));
 				documentWorkerMock.extractDocument.mockRejectedValueOnce(new Error("corrupt updated document"));
 
-				const updated = await engine.update("Directory Docx Update Skip");
+				const updated = await engine.update("Directory Docx Update Failure");
 
 				const db = openDatabase(TEST_DIR);
 				const job = getIndexingJob(db, added.kb.id);
+				const chunks = getChunksByKB(db, added.kb.id);
 				db.close();
-				expect(updated.added).toBe(1);
-				expect(updated.removed).toBe(2);
+				expect(updated).toMatchObject({ added: 1, removed: 1 });
 				expect(engine.list().find((kb) => kb.id === added.kb.id)?.status).toBe("ready");
 				expect(job?.status).toBe("succeeded");
 				expect(job?.skipped_total).toBe(1);
-				expect(job?.message).toContain("extraction_failed: 1");
-				expect(
-					(await engine.search("ChangedValidUpdateToken", { mode: "fast", kb_id: "Directory Docx Update Skip" }))
-						.total_count,
-				).toBe(1);
-				expect(
-					(await engine.search("InitialSkippedDocToken", { mode: "fast", kb_id: "Directory Docx Update Skip" }))
-						.total_count,
-				).toBe(0);
+				expect(chunks.some((chunk) => chunk.content.includes("InitialValidUpdateToken"))).toBe(false);
+				expect(chunks.some((chunk) => chunk.content.includes("InitialPreservedDocToken"))).toBe(true);
+				expect(chunks.some((chunk) => chunk.content.includes("ChangedValidUpdateToken"))).toBe(true);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}
@@ -1839,6 +1864,29 @@ describe("KnowledgeEngine", () => {
 				),
 			).toBe(false);
 		});
+
+		it("surfaces persistent scanner failures in async status and doctor diagnostics", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-diagnostic-scan-error-"));
+			try {
+				writeFileSync(join(projectDir, "source.ts"), "export const DiagnosticScanToken = true;");
+				await engine.add(projectDir, "Diagnostic Scan Error");
+				writeFileSync(join(projectDir, ".gitignore"), "x".repeat(1024 * 1024 + 1));
+
+				const snapshot = await engine.statusSnapshotAsync();
+				const diagnostic = snapshot.diagnostics.find((item) => item.kb_name === "Diagnostic Scan Error");
+				const report = await engine.doctorAsync();
+
+				expect(diagnostic?.coverage_percent).toBe(0);
+				expect(diagnostic?.scan_error).toContain("Scan configuration exceeds");
+				expect(
+					report.issues.some(
+						(issue) => issue.kb_name === "Diagnostic Scan Error" && issue.action_code === "check_source",
+					),
+				).toBe(true);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	describe("import/export", () => {
@@ -1850,6 +1898,75 @@ describe("KnowledgeEngine", () => {
 			await expect(engine.importKB(inputPath)).rejects.toThrow();
 			expect(engine.list()).toEqual([]);
 		});
+
+		it("rejects oversized imported knowledge-base metadata before persistence", async () => {
+			const oversizedName = join(TEST_DIR, "oversized-name.jsonl");
+			const oversizedDescription = join(TEST_DIR, "oversized-description.jsonl");
+			writeFileSync(oversizedName, `${JSON.stringify({ name: "x".repeat(513) })}\n`);
+			writeFileSync(
+				oversizedDescription,
+				`${JSON.stringify({ name: "Bounded Import", description: "x".repeat(4 * 1024 + 1) })}\n`,
+			);
+
+			await expect(engine.importKB(oversizedName)).rejects.toThrow("name exceeds");
+			await expect(engine.importKB(oversizedDescription)).rejects.toThrow("description exceeds");
+			expect(engine.list()).toEqual([]);
+		});
+
+		it("rejects malformed and oversized imported chunk fields before embedding", async () => {
+			const oversizedMetadata = join(TEST_DIR, "oversized-chunk-metadata.jsonl");
+			const malformedField = join(TEST_DIR, "malformed-chunk-field.jsonl");
+			const base = {
+				content: "bounded content",
+				file_path: "import.md",
+				file_type: "markdown",
+				start_line: 1,
+				end_line: 1,
+			};
+			writeFileSync(
+				oversizedMetadata,
+				[
+					JSON.stringify({ name: "Oversized Chunk Metadata" }),
+					JSON.stringify({ ...base, metadata_json: JSON.stringify({ heading: "x".repeat(8 * 1024 + 1) }) }),
+				].join("\n"),
+			);
+			writeFileSync(
+				malformedField,
+				[JSON.stringify({ name: "Malformed Chunk Field" }), JSON.stringify({ ...base, file_path: 42 })].join("\n"),
+			);
+
+			await expect(engine.importKB(oversizedMetadata)).rejects.toThrow("embedding metadata exceeds");
+			await expect(engine.importKB(malformedField)).rejects.toThrow("file_path must be a string");
+			expect(engine.list()).toEqual([]);
+		});
+
+		it("enforces daemon filesystem roots again at engine operation time", async () => {
+			const allowedRoot = join(TEST_DIR, "allowed");
+			const outsideInput = join(TEST_DIR, "outside.jsonl");
+			mkdirSync(allowedRoot, { recursive: true });
+			writeFileSync(outsideInput, `${JSON.stringify({ name: "Outside Import" })}\n`);
+
+			await expect(
+				engine.importKB(outsideInput, undefined, undefined, {
+					allowedRoots: [allowedRoot],
+					allowNetwork: false,
+				}),
+			).rejects.toThrow("outside the allowed filesystem roots");
+			expect(engine.list()).toEqual([]);
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"rejects symlink import sources without creating a knowledge base",
+			async () => {
+				const target = join(TEST_DIR, "import-target.jsonl");
+				const link = join(TEST_DIR, "import-link.jsonl");
+				writeFileSync(target, `${JSON.stringify({ name: "Symlink Import" })}\n`);
+				symlinkSync(target, link);
+
+				await expect(engine.importKB(link)).rejects.toThrow("non-symlink file");
+				expect(engine.list()).toEqual([]);
+			},
+		);
 
 		it("blocks clear while import is in flight", async () => {
 			const inputPath = join(TEST_DIR, "guarded-import.jsonl");
@@ -1952,28 +2069,15 @@ describe("KnowledgeEngine", () => {
 			expect(existsSync(outputPath)).toBe(true);
 		});
 
-		it("keeps an existing export file when export is cancelled", async () => {
-			const projectDir = mkdtempSync(join(tmpdir(), "pk-export-cancel-"));
-			try {
-				for (let i = 0; i < 70; i++) {
-					writeFileSync(
-						join(projectDir, `doc-${i}.txt`),
-						`Export cancel document ${i} about ExportCancelToken stable indexing. `.repeat(3),
-					);
-				}
-				await engine.add(projectDir, "Export Cancel");
-				const outputPath = join(TEST_DIR, "existing-export.jsonl");
-				writeFileSync(outputPath, "existing user export\n");
-				const controller = new AbortController();
+		it("refuses to overwrite an existing export file", async () => {
+			await engine.add("Export no-clobber content about authentication tokens.", "Export No Clobber");
+			const outputPath = join(TEST_DIR, "existing-export.jsonl");
+			writeFileSync(outputPath, "existing user export\n");
 
-				await expect(
-					engine.exportKB("Export Cancel", outputPath, controller.signal, () => controller.abort()),
-				).rejects.toThrow("Cancelled");
-
-				expect(readFileSync(outputPath, "utf-8")).toBe("existing user export\n");
-			} finally {
-				rmSync(projectDir, { recursive: true, force: true });
-			}
+			await expect(engine.exportKB("Export No Clobber", outputPath)).rejects.toThrow(
+				"Refusing to overwrite existing file",
+			);
+			expect(readFileSync(outputPath, "utf-8")).toBe("existing user export\n");
 		});
 
 		it("keeps an existing export file when cancellation arrives after the final chunk progress", async () => {
@@ -1986,8 +2090,7 @@ describe("KnowledgeEngine", () => {
 					);
 				}
 				await engine.add(projectDir, "Export Final Cancel");
-				const outputPath = join(TEST_DIR, "existing-final-export.jsonl");
-				writeFileSync(outputPath, "existing final export\n");
+				const outputPath = join(TEST_DIR, "cancelled-final-export.jsonl");
 				const controller = new AbortController();
 				const updates: string[] = [];
 
@@ -1999,7 +2102,7 @@ describe("KnowledgeEngine", () => {
 				).rejects.toThrow("Cancelled");
 
 				expect(updates).toEqual(["Exported 64/64 chunks..."]);
-				expect(readFileSync(outputPath, "utf-8")).toBe("existing final export\n");
+				expect(existsSync(outputPath)).toBe(false);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}
