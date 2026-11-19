@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.16.0] - 2026-11-19
+
 ### Added
 - Added default-first isolated knowledge profiles with one authenticated long-lived daemon per profile, explicit daemon CLI lifecycle, and automatic Pi/OMP client startup.
 - Added a dependency-free MCP server with stdio and authenticated loopback Streamable HTTP transports, legacy and modern protocol contracts, request-scoped SSE progress, cancellation, shared public tool schemas, and explicit root/network/write/admin capabilities.
@@ -17,6 +20,8 @@
 - Bounded Unix socket fallback paths, diagnostic working sets, RPC/MCP queues and frames, and watcher polling so long scans do not trigger uninterrupted immediate rescans.
 - Restricted capability-free MCP to indexed search/symbol/show data; live status/doctor rescans now require admin capability, and burst/slow-drip framing remains bounded without terminating active work.
 - Added required modern MCP caching hints to cacheable complete results so strict `2026-07-28` clients such as Kiro CLI 3.5 can initialize and call tools.
+- Made coverage `updated_at` advance only after a complete successful index refresh, including a schema migration for existing knowledge bases.
+- Stopped permanent watcher update failures from retrying indefinitely, and refreshed legacy HTTP session age after long-running requests complete.
 - Hardened profile storage to owner-only permissions, removed persisted KB labels from system prompts, preserved technically skipped files during updates, and resolved PowerShell from the active Windows system root.
 
 

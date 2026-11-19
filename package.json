@@ -1,6 +1,6 @@
 {
 	"name": "pi-knowledge",
-	"version": "0.15.0",
+	"version": "0.16.0",
 	"description": "Local-first RAG knowledge server for Pi, OMP, and MCP agents with hybrid code/doc search, reranking, diagnostics, and large-project indexing",
 	"type": "module",
 	"main": "dist/index.js",
@@ -19,8 +19,9 @@
 		"dist/",
 		".pi/",
 		"docs/configuration.md",
-		"docs/offline-mode.md",
+		"docs/daemon-profiles.md",
 		"docs/mcp-clients.md",
+		"docs/offline-mode.md",
 		"README.md",
 		"CHANGELOG.md",
 		"LICENSE"
