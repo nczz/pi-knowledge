@@ -1,7 +1,31 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+	closeSync,
+	constants,
+	createReadStream,
+	createWriteStream,
+	existsSync,
+	fstatSync,
+	fsyncSync,
+	lstatSync,
+	openSync,
+	renameSync,
+	rmSync,
+	statSync,
+	type WriteStream,
+} from "node:fs";
+import {
+	lstat as lstatFile,
+	mkdtemp,
+	open as openFile,
+	realpath as realpathFile,
+	rm as rmAsync,
+	writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import type Database from "better-sqlite3";
-import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
+import { type DiagnosticResult, diagnoseKB, diagnoseKBAsync } from "./diagnostics/health.ts";
 import type { EmbeddingCompatibility, EmbeddingConfig } from "./embedding/provider.ts";
 import {
 	describeEmbeddingCompatibility,
@@ -18,6 +42,14 @@ import {
 } from "./embedding/provider.ts";
 import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import {
+	assertNetworkAccess,
+	assertOpenedPathAuthorized,
+	assertOutputPathAuthorized,
+	authorizeExistingPath,
+	authorizeOutputPath,
+	type FilesystemAccessPolicy,
+} from "./filesystem-access.ts";
+import {
 	addSkippedScanEntry,
 	analyzeIndexableContent,
 	buildChunkEmbeddingText,
@@ -28,6 +60,7 @@ import {
 	isReadableTextFile,
 	isSupportedDocumentFile,
 	iterateScannableFiles,
+	iterateScannableFilesAsync,
 	preTokenizeForFTS,
 	type ScannableFile,
 	type ScanOptions,
@@ -37,6 +70,7 @@ import { finalizeChunksForEmbedding } from "./indexer/embedding-safe-chunks.ts";
 import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { extractDocumentInModelWorker, shutdownModelWorker } from "./model-worker-client.ts";
+import { fetchPublicText } from "./network/safe-fetch.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { MAX_SEARCH_WINDOW } from "./search/contracts.ts";
 import { diversifyRankedChunks, interleaveByFile, type RankedChunk } from "./search/diversity.ts";
@@ -59,6 +93,7 @@ import {
 	summarizeSearchTuning,
 } from "./search/tuning.ts";
 import { searchVectorFile } from "./search/vector.ts";
+import { ensureOwnerOnlyDirectory, prepareSafeNewFile, publishNewFile } from "./secure-files.ts";
 import {
 	type Chunk,
 	type ChunkInsert,
@@ -75,6 +110,7 @@ import {
 	getKB,
 	getKBByName,
 	getSymbolCount,
+	getSymbolsByFile,
 	insertChunks,
 	insertSymbols,
 	iterateChunkIdsByKB,
@@ -410,11 +446,12 @@ function matchReasonFor(mode: SearchMode): NonNullable<SearchResult["provenance"
 	return "hybrid";
 }
 
-function toScanOptions(options: AddOptions = {}): ScanOptions {
+function toScanOptions(options: AddOptions = {}, accessPolicy?: FilesystemAccessPolicy): ScanOptions {
 	return {
 		includeSuggestedText: options.include_suggested_text === true,
 		includePaths: options.include_paths,
 		excludePaths: options.exclude_paths,
+		accessPolicy,
 	};
 }
 function serializeAddOptions(options: AddOptions = {}): string {
@@ -478,14 +515,26 @@ function planDirectoryScan(dirPath: string, options: ScanOptions = {}, signal?: 
 	};
 }
 
-function sourceMtimeFor(kb: KnowledgeBase | undefined, filePath: string): number | undefined {
-	if (!kb?.source_path) return undefined;
-	const absPath = kb.source_type === "directory" ? join(kb.source_path, filePath) : kb.source_path;
-	try {
-		return statSync(absPath).mtimeMs;
-	} catch {
-		return undefined;
+async function planDirectoryScanAsync(
+	dirPath: string,
+	options: ScanOptions = {},
+	signal?: AbortSignal,
+): Promise<DirectoryScanPlan> {
+	const skipped = createSkippedScanStats();
+	let files = 0;
+	let bytes = 0;
+	for await (const file of iterateScannableFilesAsync(dirPath, skipped, options, signal)) {
+		throwIfAborted(signal);
+		files++;
+		bytes += file.size;
 	}
+	return {
+		files,
+		bytes,
+		skippedTotal: skipped.total,
+		skippedSummary: summarizeSkippedScan(skipped),
+		skipped,
+	};
 }
 
 function kbTrustMultiplier(kb: KnowledgeBase): number {
@@ -942,14 +991,60 @@ function isWeakAutoResponse(
 	return false;
 }
 
+const MAX_DIRECT_TEXT_BYTES = 10 * 1024 * 1024;
+const MAX_DIRECT_DOCUMENT_BYTES = 64 * 1024 * 1024;
+const MAX_IMPORT_BYTES = 256 * 1024 * 1024;
+const MAX_IMPORT_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_IMPORT_LINES = 1_000_001;
+const MAX_IMPORT_CHUNKS = 1_000_000;
+const MAX_EXPORT_BYTES = MAX_IMPORT_BYTES;
+const MAX_EXPORT_CHUNKS = MAX_IMPORT_CHUNKS;
+const MAX_EXPORT_DURATION_MS = 60 * 60_000;
+const MAX_KB_NAME_BYTES = 512;
+const MAX_KB_DESCRIPTION_BYTES = 4 * 1024;
+const MAX_IMPORT_CONTENT_BYTES = 12 * 1024 * 1024;
+const MAX_IMPORT_FILE_PATH_BYTES = 4_096;
+const MAX_IMPORT_FILE_TYPE_BYTES = 256;
+const MAX_IMPORT_METADATA_BYTES = 64 * 1024;
+const MAX_IMPORT_METADATA_CONTEXT_BYTES = 8 * 1024;
+const MAX_IMPORT_METADATA_SCOPE_ITEMS = 128;
+const MAX_IMPORT_LINE_NUMBER = 2_147_483_647;
+const MAX_IMPORT_FIXED_CONTEXT_BYTES = 64 * 1024;
+const IMPORTED_CHUNK_KEYS = new Set(["content", "file_path", "file_type", "start_line", "end_line", "metadata_json"]);
+const IMPORTED_CONTEXT_STRING_KEYS = [
+	"heading",
+	"breadcrumb",
+	"language",
+	"symbol",
+	"function_name",
+	"symbol_kind",
+	"parent_symbol",
+	"signature",
+] as const;
+
 async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
-	const res = await fetch(source, { signal });
-	if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-	const html = await res.text();
+	const html = await fetchPublicText(source, signal);
 	throwIfAborted(signal);
 	const text = htmlToStructuredMarkdown(html);
 	const structuredChunks = chunkMarkdown(text, source, "html");
 	return structuredChunks.length > 0 ? structuredChunks : chunkFile(text, source);
+}
+function validateKnowledgeBaseMetadata(name: unknown, description: unknown): ImportHeader {
+	if (typeof name !== "string" || !name.trim()) throw new Error("Knowledge base name must be a non-empty string");
+	if (Buffer.byteLength(name) > MAX_KB_NAME_BYTES) {
+		throw new Error(`Knowledge base name exceeds the ${MAX_KB_NAME_BYTES}-byte limit`);
+	}
+	const normalizedDescription = description === null ? undefined : description;
+	if (normalizedDescription !== undefined && typeof normalizedDescription !== "string") {
+		throw new Error("Knowledge base description must be a string");
+	}
+	if (
+		typeof normalizedDescription === "string" &&
+		Buffer.byteLength(normalizedDescription) > MAX_KB_DESCRIPTION_BYTES
+	) {
+		throw new Error(`Knowledge base description exceeds the ${MAX_KB_DESCRIPTION_BYTES}-byte limit`);
+	}
+	return { name, description: normalizedDescription };
 }
 
 interface ExtractedSourceFile {
@@ -957,25 +1052,108 @@ interface ExtractedSourceFile {
 	fileType: string;
 }
 
-async function extractSourceFileContent(filePath: string, signal?: AbortSignal): Promise<ExtractedSourceFile> {
+async function readBoundedRegularFile(
+	filePath: string,
+	maxBytes: number,
+	signal?: AbortSignal,
+	expected?: ScannableFile,
+	access?: FilesystemAccessPolicy,
+): Promise<Buffer> {
+	if (expected?.rootPath) {
+		const canonical = await realpathFile(filePath);
+		const rel = relative(expected.rootPath, canonical);
+		if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+			throw new Error(`Source file escaped its scanned root: ${filePath}`);
+		}
+	}
+	const direct = lstatSync(filePath);
+	if (direct.isSymbolicLink() || !direct.isFile())
+		throw new Error(`Source is not a regular non-symlink file: ${filePath}`);
+	if (
+		expected?.device !== undefined &&
+		expected.inode !== undefined &&
+		(direct.dev !== expected.device || direct.ino !== expected.inode)
+	) {
+		throw new Error(`Source file changed after scanning: ${filePath}`);
+	}
+	const handle = await openFile(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const opened = await handle.stat();
+		if (!opened.isFile()) throw new Error(`Source is not a regular file: ${filePath}`);
+		assertOpenedPathAuthorized(filePath, opened.dev, opened.ino, access);
+		if (expected?.rootPath) {
+			const canonical = await realpathFile(filePath);
+			const current = await lstatFile(filePath);
+			const rel = relative(expected.rootPath, canonical);
+			if (
+				rel === ".." ||
+				rel.startsWith(`..${sep}`) ||
+				isAbsolute(rel) ||
+				current.isSymbolicLink() ||
+				current.dev !== opened.dev ||
+				current.ino !== opened.ino
+			) {
+				throw new Error(`Source file changed outside its scanned root: ${filePath}`);
+			}
+		}
+		if (
+			expected?.device !== undefined &&
+			expected.inode !== undefined &&
+			(opened.dev !== expected.device || opened.ino !== expected.inode)
+		) {
+			throw new Error(`Source file changed while opening: ${filePath}`);
+		}
+		if (opened.size > maxBytes) {
+			throw new Error(`Source file exceeds the ${maxBytes}-byte direct indexing limit: ${filePath}`);
+		}
+		const chunks: Buffer[] = [];
+		let bytes = 0;
+		while (bytes <= maxBytes) {
+			throwIfAborted(signal);
+			const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes - bytes + 1));
+			const result = await handle.read(buffer, 0, buffer.length, null);
+			if (result.bytesRead === 0) break;
+			bytes += result.bytesRead;
+			if (bytes > maxBytes) {
+				throw new Error(`Source file exceeds the ${maxBytes}-byte direct indexing limit: ${filePath}`);
+			}
+			chunks.push(buffer.subarray(0, result.bytesRead));
+		}
+		return Buffer.concat(chunks, bytes);
+	} finally {
+		await handle.close();
+	}
+}
+
+async function extractSourceFileContent(
+	filePath: string,
+	signal?: AbortSignal,
+	expected?: ScannableFile,
+	access?: FilesystemAccessPolicy,
+): Promise<ExtractedSourceFile> {
+	filePath = authorizeExistingPath(filePath, access);
 	const lowerPath = filePath.toLowerCase();
-	if (lowerPath.endsWith(".pdf")) {
-		throwIfAborted(signal);
-		const extracted = await extractDocumentInModelWorker(filePath, "pdf", signal);
+	const isDocument = lowerPath.endsWith(".pdf") || lowerPath.endsWith(".docx") || lowerPath.endsWith(".doc");
+	const maxBytes = isDocument ? MAX_DIRECT_DOCUMENT_BYTES : MAX_DIRECT_TEXT_BYTES;
+	const content = await readBoundedRegularFile(filePath, maxBytes, signal, expected, access);
+	if (!isDocument) {
+		if (content.subarray(0, 8_000).includes(0x00)) {
+			throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
+		}
+		return { content: content.toString("utf8"), fileType: "text" };
+	}
+
+	const tempDirectory = ensureOwnerOnlyDirectory(await mkdtemp(join(tmpdir(), "pi-knowledge-document-")));
+	const tempPath = join(tempDirectory, "source");
+	try {
+		await writeFile(tempPath, content, { flag: "wx", mode: 0o600 });
+		const fileType = lowerPath.endsWith(".pdf") ? "pdf" : "docx";
+		const extracted = await extractDocumentInModelWorker(tempPath, fileType, signal);
 		throwIfAborted(signal);
 		return extracted;
+	} finally {
+		await rmAsync(tempDirectory, { recursive: true, force: true });
 	}
-	if (lowerPath.endsWith(".docx") || lowerPath.endsWith(".doc")) {
-		throwIfAborted(signal);
-		const extracted = await extractDocumentInModelWorker(filePath, "docx", signal);
-		throwIfAborted(signal);
-		return extracted;
-	}
-	if (!isReadableTextFile(filePath)) {
-		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
-	}
-	throwIfAborted(signal);
-	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
 }
 
 interface ClassifiedSource {
@@ -995,11 +1173,14 @@ function looksLikeLocalPath(source: string): boolean {
 	return /\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(trimmed);
 }
 
-function classifySource(source: string): ClassifiedSource {
-	const resolvedSource = resolve(source);
+function classifySource(source: string, access?: FilesystemAccessPolicy): ClassifiedSource {
 	const isUrl = source.startsWith("http://") || source.startsWith("https://");
-	const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
-	const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
+	if (isUrl) assertNetworkAccess(access);
+	const requestedSource = resolve(source);
+	const exists = !isUrl && existsSync(requestedSource);
+	const resolvedSource = exists ? authorizeExistingPath(requestedSource, access) : requestedSource;
+	const isDir = exists && statSync(resolvedSource).isDirectory();
+	const isFile = exists && statSync(resolvedSource).isFile();
 	if (!isUrl && !isDir && !isFile && looksLikeLocalPath(source)) {
 		throw new Error(`Local path does not exist: ${source}. Pass inline text only when the source itself is text.`);
 	}
@@ -1013,7 +1194,7 @@ function classifySource(source: string): ClassifiedSource {
 }
 
 async function extractScannableFileContent(file: ScannableFile, signal?: AbortSignal): Promise<ExtractedSourceFile> {
-	return extractSourceFileContent(file.path, signal);
+	return extractSourceFileContent(file.path, signal, file);
 }
 
 async function extractScannableFileContentOrSkip(
@@ -1048,6 +1229,99 @@ function embeddingMismatchWarning(kb: KnowledgeBase, compatibility: EmbeddingCom
 }
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
+}
+
+function boundedImportString(value: unknown, field: string, maxBytes: number): string {
+	if (typeof value !== "string") throw new Error(`Imported chunk ${field} must be a string`);
+	if (Buffer.byteLength(value) > maxBytes) {
+		throw new Error(`Imported chunk ${field} exceeds the ${maxBytes}-byte limit`);
+	}
+	return value;
+}
+
+function validateImportedMetadata(metadataJson: string): void {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(metadataJson);
+	} catch {
+		throw new Error("Imported chunk metadata_json must contain valid JSON");
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("Imported chunk metadata_json must contain an object");
+	}
+	const metadata = parsed as Record<string, unknown>;
+	let contextBytes = 0;
+	for (const key of IMPORTED_CONTEXT_STRING_KEYS) {
+		const value = metadata[key];
+		if (value === undefined) continue;
+		if (typeof value !== "string") throw new Error(`Imported chunk metadata ${key} must be a string`);
+		contextBytes += Buffer.byteLength(value);
+	}
+	const scope = metadata.scope;
+	if (scope !== undefined) {
+		if (!Array.isArray(scope) || scope.length > MAX_IMPORT_METADATA_SCOPE_ITEMS) {
+			throw new Error("Imported chunk metadata scope is invalid");
+		}
+		for (const item of scope) {
+			if (typeof item !== "string") throw new Error("Imported chunk metadata scope must contain strings");
+			contextBytes += Buffer.byteLength(item);
+		}
+	}
+	if (contextBytes > MAX_IMPORT_METADATA_CONTEXT_BYTES) {
+		throw new Error(`Imported chunk embedding metadata exceeds the ${MAX_IMPORT_METADATA_CONTEXT_BYTES}-byte limit`);
+	}
+}
+
+function parseImportedChunk(value: unknown): ImportedChunk {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("Imported chunk must be an object");
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of Object.keys(record)) {
+		if (!IMPORTED_CHUNK_KEYS.has(key)) throw new Error(`Imported chunk contains unknown field: ${key}`);
+	}
+	const content = boundedImportString(record.content, "content", MAX_IMPORT_CONTENT_BYTES);
+	const filePath = boundedImportString(record.file_path, "file_path", MAX_IMPORT_FILE_PATH_BYTES);
+	const fileType = boundedImportString(record.file_type, "file_type", MAX_IMPORT_FILE_TYPE_BYTES);
+	if (!content) throw new Error("Imported chunk content must not be empty");
+	if (!filePath) throw new Error("Imported chunk file_path must not be empty");
+	if (!fileType) throw new Error("Imported chunk file_type must not be empty");
+	const startLine = record.start_line;
+	const endLine = record.end_line;
+	if (
+		!Number.isSafeInteger(startLine) ||
+		typeof startLine !== "number" ||
+		startLine < 0 ||
+		startLine > MAX_IMPORT_LINE_NUMBER
+	) {
+		throw new Error("Imported chunk start_line is invalid");
+	}
+	if (
+		!Number.isSafeInteger(endLine) ||
+		typeof endLine !== "number" ||
+		endLine < startLine ||
+		endLine > MAX_IMPORT_LINE_NUMBER
+	) {
+		throw new Error("Imported chunk end_line is invalid");
+	}
+	const metadataJson =
+		record.metadata_json === undefined
+			? "{}"
+			: boundedImportString(record.metadata_json, "metadata_json", MAX_IMPORT_METADATA_BYTES);
+	validateImportedMetadata(metadataJson);
+	const imported = {
+		content,
+		file_path: filePath,
+		file_type: fileType,
+		start_line: startLine,
+		end_line: endLine,
+		metadata_json: metadataJson,
+	};
+	const fixedContext = buildChunkEmbeddingText({ ...imported, content: "" });
+	if (Buffer.byteLength(fixedContext) > MAX_IMPORT_FIXED_CONTEXT_BYTES) {
+		throw new Error(`Imported chunk fixed embedding context exceeds the ${MAX_IMPORT_FIXED_CONTEXT_BYTES}-byte limit`);
+	}
+	return imported;
 }
 
 function importedChunkToInsert(chunk: ImportedChunk): ChunkInsert {
@@ -1149,9 +1423,12 @@ export class KnowledgeEngine {
 		rmSync(this.vectorPathFor(kbId), { force: true });
 	}
 
-	plan(source: string, options: AddOptions = {}, signal?: AbortSignal): IndexPlan {
+	plan(source: string, options: AddOptions = {}, signal?: AbortSignal, access?: FilesystemAccessPolicy): IndexPlan {
 		throwIfAborted(signal);
-		const { resolvedSource, isDir, isFile, sourceType } = classifySource(source);
+		const { resolvedSource, isDir, isFile, sourceType } = classifySource(source, access);
+		if ((isDir || isFile) && lstatSync(resolvedSource).isSymbolicLink()) {
+			throw new Error(`Source is not a regular non-symlink path: ${resolvedSource}`);
+		}
 		if (isDir) {
 			const plan = planDirectoryScan(resolvedSource, toScanOptions(options), signal);
 			return {
@@ -1196,16 +1473,60 @@ export class KnowledgeEngine {
 		};
 	}
 
+	async planAsync(
+		source: string,
+		options: AddOptions = {},
+		signal?: AbortSignal,
+		access?: FilesystemAccessPolicy,
+	): Promise<IndexPlan> {
+		throwIfAborted(signal);
+		const { resolvedSource, isDir, isFile, sourceType } = classifySource(source, access);
+		if (isDir) {
+			const plan = await planDirectoryScanAsync(resolvedSource, toScanOptions(options, access), signal);
+			return {
+				source_type: "directory",
+				scannable_files: plan.files,
+				scannable_bytes: plan.bytes,
+				skipped: plan.skipped,
+				summary: `Directory plan: ${plan.files} scannable files, ${formatBytes(plan.bytes)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`,
+			};
+		}
+		if (isFile && lstatSync(resolvedSource).isSymbolicLink()) {
+			throw new Error(`Source is not a regular non-symlink file: ${resolvedSource}`);
+		}
+		const skipped = createSkippedScanStats();
+		const sourceBytes = isFile ? statSync(resolvedSource).size : Buffer.byteLength(source);
+		const maxBytes =
+			isFile && isSupportedDocumentFile(resolvedSource) ? MAX_DIRECT_DOCUMENT_BYTES : MAX_DIRECT_TEXT_BYTES;
+		if (sourceType !== "url" && sourceBytes > maxBytes) {
+			addSkippedScanEntry(skipped, {
+				path: isFile ? resolvedSource : "<inline>",
+				reason: "oversized",
+				size: sourceBytes,
+			});
+			return {
+				source_type: sourceType,
+				scannable_files: 0,
+				scannable_bytes: 0,
+				skipped,
+				summary: `${isFile ? "File" : "Inline text"} plan: 0 scannable sources; source exceeds ${formatBytes(maxBytes)}`,
+			};
+		}
+		return this.plan(source, options, signal, access);
+	}
+
 	async add(
 		source: string,
 		name: string,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
 		options: AddOptions = {},
+		access?: FilesystemAccessPolicy,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		throwIfAborted(signal);
+		validateKnowledgeBaseMetadata(name, undefined);
 		return this.runExclusive(["global:mutation", `kb-name:${name}`], `Mutation for "${name}"`, () =>
-			this.addUnlocked(source, name, onProgress, signal, options),
+			this.addUnlocked(source, name, onProgress, signal, options, access),
 		);
 	}
 
@@ -1215,12 +1536,13 @@ export class KnowledgeEngine {
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
 		options: AddOptions = {},
+		access?: FilesystemAccessPolicy,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
 		const db = this.db;
-		const { resolvedSource, isUrl, isDir, isFile, sourceType } = classifySource(source);
-		const scanOptions = toScanOptions(options);
+		const { resolvedSource, isUrl, isDir, isFile, sourceType } = classifySource(source, access);
+		const scanOptions = toScanOptions(options, access);
 
 		const existingKB = getKBByName(db, name);
 		if (existingKB) {
@@ -1339,12 +1661,12 @@ export class KnowledgeEngine {
 				addSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), source, "html");
 				await addChunks(chunks);
 			} else if (isFile) {
-				const extracted = await extractSourceFileContent(resolvedSource, signal);
+				const extracted = await extractSourceFileContent(resolvedSource, signal, undefined, access);
 				fileCount = 1;
 				const chunks = await analyzeAndAddSymbols(extracted.content, resolvedSource, extracted.fileType);
 				await addChunks(chunks);
 			} else if (isDir) {
-				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
+				const plan = await planDirectoryScanAsync(resolvedSource, scanOptions, signal);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
 				)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`;
@@ -1365,7 +1687,7 @@ export class KnowledgeEngine {
 				onProgress?.(scanningMessage);
 				const skipped = createSkippedScanStats();
 				let processedFiles = 0;
-				for (const file of iterateScannableFiles(resolvedSource, skipped, scanOptions)) {
+				for await (const file of iterateScannableFilesAsync(resolvedSource, skipped, scanOptions, signal)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
 					if (!extracted) {
@@ -1394,6 +1716,9 @@ export class KnowledgeEngine {
 				onProgress?.(finalizingMessage);
 			} else {
 				fileCount = 1;
+				if (Buffer.byteLength(source) > MAX_DIRECT_TEXT_BYTES) {
+					throw new Error(`Inline text exceeds the ${MAX_DIRECT_TEXT_BYTES}-byte indexing limit`);
+				}
 				const chunks = await analyzeAndAddSymbols(source, "inline-text", "text");
 				await addChunks(chunks);
 			}
@@ -1448,6 +1773,7 @@ export class KnowledgeEngine {
 		nameOrId: string,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
+		access?: FilesystemAccessPolicy,
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		if (this.disposing) throw new Error("Knowledge engine is shutting down");
@@ -1457,7 +1783,14 @@ export class KnowledgeEngine {
 		if (!kb.source_path || (kb.source_type !== "url" && !existsSync(kb.source_path))) {
 			throw new Error(`Source path not available or missing: ${kb.source_path}`);
 		}
-		const updateableKB: UpdateableKnowledgeBase = { ...kb, source_path: kb.source_path };
+		let sourcePath: string;
+		if (kb.source_type === "url") {
+			assertNetworkAccess(access);
+			sourcePath = kb.source_path;
+		} else {
+			sourcePath = authorizeExistingPath(kb.source_path, access);
+		}
+		const updateableKB: UpdateableKnowledgeBase = { ...kb, source_path: sourcePath };
 
 		const activeUpdate = this.activeUpdates.get(updateableKB.id);
 		if (activeUpdate) {
@@ -1468,7 +1801,7 @@ export class KnowledgeEngine {
 		const updateRun = this.runExclusive(
 			["global:mutation", `kb:${updateableKB.id}`],
 			`Mutation for "${updateableKB.name}"`,
-			() => this.runUpdate(updateableKB, onProgress, signal),
+			() => this.runUpdate(updateableKB, onProgress, signal, access),
 		).finally(() => {
 			if (this.activeUpdates.get(updateableKB.id) === updateRun) this.activeUpdates.delete(updateableKB.id);
 		});
@@ -1480,10 +1813,11 @@ export class KnowledgeEngine {
 		kb: UpdateableKnowledgeBase,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
+		access?: FilesystemAccessPolicy,
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
-		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
+		const scanOptions = toScanOptions(parseAddOptions(kb.source_options), access);
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
 		updateKBStatus(this.db, kb.id, "indexing");
@@ -1635,8 +1969,8 @@ export class KnowledgeEngine {
 					...extractSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), kb.source_path, "html"),
 				);
 				await processChunks(chunks);
-			} else if (statSync(kb.source_path).isDirectory()) {
-				const plan = planDirectoryScan(kb.source_path, scanOptions, signal);
+			} else if (kb.source_type === "directory") {
+				const plan = await planDirectoryScanAsync(kb.source_path, scanOptions, signal);
 				plannedTotalFiles = plan.files;
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
@@ -1649,10 +1983,25 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(planningMessage);
 				const skipped = createSkippedScanStats();
-				for (const file of iterateScannableFiles(kb.source_path, skipped, scanOptions)) {
+				for await (const file of iterateScannableFilesAsync(kb.source_path, skipped, scanOptions, signal)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
-					if (!extracted) continue;
+					if (!extracted) {
+						for (const chunk of getChunksByFile(this.db, kb.id, file.relPath, 0, Number.MAX_SAFE_INTEGER)) {
+							const entries = existingHashes.get(chunk.content_hash);
+							const retainedIndex = entries?.findIndex((entry) => entry.id === chunk.id) ?? -1;
+							if (!entries || retainedIndex < 0) continue;
+							const [retained] = entries.splice(retainedIndex, 1);
+							if (canReuseExistingVectors && retained) {
+								const indexes = oldVectorIndexByHash.get(chunk.content_hash) ?? [];
+								indexes.push(retained.vectorIndex);
+								oldVectorIndexByHash.set(chunk.content_hash, indexes);
+							}
+							unchanged++;
+						}
+						stagedSymbols.push(...getSymbolsByFile(this.db, kb.id, file.relPath));
+						continue;
+					}
 					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
 					scannedFiles++;
 					stagedSymbols.push(...analysis.symbols);
@@ -1687,7 +2036,7 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(message);
 			} else {
-				const extracted = await extractSourceFileContent(kb.source_path, signal);
+				const extracted = await extractSourceFileContent(kb.source_path, signal, undefined, access);
 				scannedFiles = 1;
 				const analysis = await analyzeIndexableContent(extracted.content, kb.source_path, extracted.fileType);
 				stagedSymbols.push(...analysis.symbols);
@@ -2147,7 +2496,7 @@ export class KnowledgeEngine {
 			const page = diversified.slice(offset, offset + limit);
 			const results = page.map((r) => {
 				const kb = kbById.get(r.chunk.kb_id);
-				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				const stale = kb?.status === "stale";
 				return {
 					content: r.content,
 					file_path: r.chunk.file_path,
@@ -2162,8 +2511,7 @@ export class KnowledgeEngine {
 						chunk_id: r.chunk.id,
 						chunk_hash: r.chunk.content_hash,
 						indexed_at: r.chunk.indexed_at,
-						source_mtime: sourceMtime,
-						stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
+						stale,
 						match_reason: matchReasonFor(mode),
 						source_chunk_ids: r.sourceChunkIds,
 					},
@@ -2273,13 +2621,12 @@ export class KnowledgeEngine {
 			end_line: r.endLine,
 			provenance: (() => {
 				const kb = kbById.get(r.chunk.kb_id);
-				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				const stale = kb?.status === "stale";
 				return {
 					chunk_id: r.chunk.id,
 					chunk_hash: r.chunk.content_hash,
 					indexed_at: r.chunk.indexed_at,
-					source_mtime: sourceMtime,
-					stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
+					stale,
 					match_reason: matchReasonFor(mode),
 					source_chunk_ids: r.sourceChunkIds,
 				};
@@ -2337,10 +2684,10 @@ export class KnowledgeEngine {
 		return true;
 	}
 
-	list(signal?: AbortSignal): KnowledgeBase[] {
+	list(signal?: AbortSignal, limit?: number): KnowledgeBase[] {
 		if (!this.db) return [];
 		throwIfAborted(signal);
-		return listKBs(this.db);
+		return listKBs(this.db, limit);
 	}
 
 	clear(): void {
@@ -2363,15 +2710,40 @@ export class KnowledgeEngine {
 		});
 	}
 
-	statusSnapshot(signal?: AbortSignal): KnowledgeStatusSnapshot {
+	async diagnoseAsync(
+		signal?: AbortSignal,
+		knowledgeBasesOverride?: KnowledgeBase[],
+		maxDiagnosticPaths = Number.POSITIVE_INFINITY,
+	): Promise<DiagnosticResult[]> {
+		if (!this.db) return [];
+		throwIfAborted(signal);
+		const db = this.db;
+		const diagnostics: DiagnosticResult[] = [];
+		let remainingPaths = maxDiagnosticPaths;
+		for (const kb of knowledgeBasesOverride ?? listKBs(db)) {
+			throwIfAborted(signal);
+			const diagnostic = await diagnoseKBAsync(db, kb, signal, Math.max(0, remainingPaths));
+			diagnostics.push(diagnostic);
+			remainingPaths = Math.max(0, remainingPaths - diagnostic.stale_files.length - diagnostic.orphan_files.length);
+		}
+		return diagnostics;
+	}
+
+	statusSnapshot(
+		signal?: AbortSignal,
+		diagnosticsOverride?: DiagnosticResult[],
+		knowledgeBasesOverride?: KnowledgeBase[],
+	): KnowledgeStatusSnapshot {
 		if (!this.db) return { knowledge_bases: [], diagnostics: [], embeddings: [] };
 		throwIfAborted(signal);
 		const db = this.db;
-		const knowledgeBases = listKBs(db);
-		const diagnostics = knowledgeBases.map((kb) => {
-			throwIfAborted(signal);
-			return diagnoseKB(db, kb, signal);
-		});
+		const knowledgeBases = knowledgeBasesOverride ?? listKBs(db);
+		const diagnostics =
+			diagnosticsOverride ??
+			knowledgeBases.map((kb) => {
+				throwIfAborted(signal);
+				return diagnoseKB(db, kb, signal);
+			});
 		try {
 			const config = resolveEmbeddingConfig();
 			const activeModel = embeddingConfigLabel(config);
@@ -2405,6 +2777,23 @@ export class KnowledgeEngine {
 				embedding_error: error instanceof Error ? error.message : String(error),
 			};
 		}
+	}
+
+	async statusSnapshotAsync(
+		signal?: AbortSignal,
+		maxKnowledgeBases = Number.POSITIVE_INFINITY,
+		maxDiagnosticPaths = Number.POSITIVE_INFINITY,
+	): Promise<KnowledgeStatusSnapshot> {
+		if (!this.db) return { knowledge_bases: [], diagnostics: [], embeddings: [] };
+		const knowledgeBases = listKBs(this.db, Number.isFinite(maxKnowledgeBases) ? maxKnowledgeBases + 1 : undefined);
+		if (knowledgeBases.length > maxKnowledgeBases) {
+			throw new Error(`Knowledge status exceeds the ${maxKnowledgeBases}-knowledge-base RPC limit`);
+		}
+		return this.statusSnapshot(
+			signal,
+			await this.diagnoseAsync(signal, knowledgeBases, maxDiagnosticPaths),
+			knowledgeBases,
+		);
 	}
 
 	symbolSearch(query: string, options: SymbolSearchOptions = {}, signal?: AbortSignal): SymbolSearchResponse {
@@ -2498,11 +2887,15 @@ export class KnowledgeEngine {
 		};
 	}
 
-	doctor(signal?: AbortSignal): DoctorReport {
+	doctor(
+		signal?: AbortSignal,
+		diagnosticsOverride?: DiagnosticResult[],
+		knowledgeBasesOverride?: KnowledgeBase[],
+	): DoctorReport {
 		throwIfAborted(signal);
-		const diagnostics = this.diagnose(signal);
+		const diagnostics = diagnosticsOverride ?? this.diagnose(signal);
 		const issues: DoctorIssue[] = [];
-		const kbs = this.list();
+		const kbs = knowledgeBasesOverride ?? this.list();
 		if (kbs.length === 0) {
 			issues.push({
 				severity: "blocking",
@@ -2534,7 +2927,15 @@ export class KnowledgeEngine {
 					action_code: "rebuild_kb",
 				});
 			}
-			if (diagnostic.coverage_percent < 80) {
+			if (diagnostic.scan_error) {
+				issues.push({
+					severity: "warning",
+					kb_name: diagnostic.kb_name,
+					message: `Source diagnostics scan failed: ${diagnostic.scan_error}`,
+					action: "Check source accessibility and scanner limits, then run knowledge_doctor again.",
+					action_code: "check_source",
+				});
+			} else if (diagnostic.coverage_percent < 80) {
 				issues.push({
 					severity: "warning",
 					kb_name: diagnostic.kb_name,
@@ -2543,20 +2944,22 @@ export class KnowledgeEngine {
 					action_code: "review_skipped_scope",
 				});
 			}
-			if (diagnostic.stale_files.length > 0) {
+			const staleFileCount = diagnostic.stale_file_count ?? diagnostic.stale_files.length;
+			if (staleFileCount > 0) {
 				issues.push({
 					severity: "warning",
 					kb_name: diagnostic.kb_name,
-					message: `${diagnostic.stale_files.length} files changed after indexing.`,
+					message: `${staleFileCount} files changed after indexing.`,
 					action: "Run knowledge_update for this KB.",
 					action_code: "run_update",
 				});
 			}
-			if (diagnostic.orphan_files.length > 0) {
+			const orphanFileCount = diagnostic.orphan_file_count ?? diagnostic.orphan_files.length;
+			if (orphanFileCount > 0) {
 				issues.push({
 					severity: "warning",
 					kb_name: diagnostic.kb_name,
-					message: `${diagnostic.orphan_files.length} indexed files no longer exist in the source.`,
+					message: `${orphanFileCount} indexed files no longer exist in the source.`,
 					action: "Run knowledge_update or rebuild the KB.",
 					action_code: "run_update",
 				});
@@ -2680,18 +3083,32 @@ export class KnowledgeEngine {
 		};
 	}
 
+	async doctorAsync(
+		signal?: AbortSignal,
+		maxKnowledgeBases = Number.POSITIVE_INFINITY,
+		maxDiagnosticPaths = Number.POSITIVE_INFINITY,
+	): Promise<DoctorReport> {
+		if (!this.db) return this.doctor(signal, [], []);
+		const knowledgeBases = listKBs(this.db, Number.isFinite(maxKnowledgeBases) ? maxKnowledgeBases + 1 : undefined);
+		if (knowledgeBases.length > maxKnowledgeBases) {
+			throw new Error(`Knowledge doctor exceeds the ${maxKnowledgeBases}-knowledge-base RPC limit`);
+		}
+		return this.doctor(signal, await this.diagnoseAsync(signal, knowledgeBases, maxDiagnosticPaths), knowledgeBases);
+	}
+
 	async exportKB(
 		nameOrId: string,
 		outputPath: string,
 		signal?: AbortSignal,
 		onProgress?: ProgressCallback,
+		access?: FilesystemAccessPolicy,
 	): Promise<number> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
 		return this.runExclusive(["global:mutation", `kb:${kb.id}`], `Operation for "${kb.name}"`, () =>
-			this.exportKBUnlocked(kb, outputPath, signal, onProgress),
+			this.exportKBUnlocked(kb, outputPath, signal, onProgress, access),
 		);
 	}
 
@@ -2700,13 +3117,50 @@ export class KnowledgeEngine {
 		outputPath: string,
 		signal?: AbortSignal,
 		onProgress?: ProgressCallback,
+		access?: FilesystemAccessPolicy,
 	): Promise<number> {
 		if (!this.db) throw new Error("Engine not initialized");
-		const { createWriteStream } = await import("node:fs");
-		const tempOutputPath = tempVectorPath(outputPath);
-		const stream = createWriteStream(tempOutputPath, { encoding: "utf-8" });
+		if (kb.chunk_count > MAX_EXPORT_CHUNKS) {
+			throw new Error(`Export exceeds the ${MAX_EXPORT_CHUNKS}-chunk limit`);
+		}
+		const target = prepareSafeNewFile(authorizeOutputPath(outputPath, access));
+		let tempFd: number | undefined;
+		let tempDevice: number;
+		let tempInode: number;
+		try {
+			tempFd = openSync(
+				target.tempPath,
+				constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+				0o600,
+			);
+			const opened = fstatSync(tempFd);
+			if (!opened.isFile()) throw new Error(`Export target is not a regular file: ${target.tempPath}`);
+			tempDevice = opened.dev;
+			tempInode = opened.ino;
+			assertOpenedPathAuthorized(target.tempPath, tempDevice, tempInode, access);
+			assertOutputPathAuthorized(target.outputPath, target.parentDevice, target.parentInode, access);
+		} catch (error) {
+			if (tempFd !== undefined) closeSync(tempFd);
+			throw error;
+		}
+		const stream = createWriteStream("", {
+			autoClose: false,
+			encoding: "utf-8",
+			fd: tempFd,
+		}) as WriteStream & { fd: number | null };
 		const progressBatchSize = resolveIndexEmbedBatchSize();
 		let count = 0;
+		let bytes = 0;
+		const deadline = Date.now() + MAX_EXPORT_DURATION_MS;
+		const writeBoundedLine = async (line: string): Promise<void> => {
+			if (Date.now() > deadline) throw new Error(`Export exceeded ${MAX_EXPORT_DURATION_MS}ms`);
+			const lineBytes = Buffer.byteLength(line) + 1;
+			if (bytes + lineBytes > MAX_EXPORT_BYTES) {
+				throw new Error(`Export exceeds the ${MAX_EXPORT_BYTES}-byte limit`);
+			}
+			bytes += lineBytes;
+			await writeLine(stream, line);
+		};
 		const header = JSON.stringify({
 			name: kb.name,
 			description: kb.description,
@@ -2714,31 +3168,56 @@ export class KnowledgeEngine {
 			chunk_count: kb.chunk_count,
 		});
 		try {
-			await writeLine(stream, header);
+			await writeBoundedLine(header);
 			for (const chunk of iterateChunksByKB(this.db, kb.id)) {
 				throwIfAborted(signal);
-				await writeLine(
-					stream,
-					JSON.stringify({
-						content: chunk.content,
-						file_path: chunk.file_path,
-						file_type: chunk.file_type,
-						start_line: chunk.start_line,
-						end_line: chunk.end_line,
-						metadata_json: chunk.metadata_json,
-					}),
-				);
+				const line = JSON.stringify({
+					content: chunk.content,
+					file_path: chunk.file_path,
+					file_type: chunk.file_type,
+					start_line: chunk.start_line,
+					end_line: chunk.end_line,
+					metadata_json: chunk.metadata_json,
+				});
+				await writeBoundedLine(line);
 				count++;
 				if (count % progressBatchSize === 0) onProgress?.(`Exported ${count}/${kb.chunk_count} chunks...`);
 			}
 			await finishWriteStream(stream);
 			throwIfAborted(signal);
-			renameSync(tempOutputPath, outputPath);
+			fsyncSync(tempFd);
+			if (stream.fd === tempFd) stream.fd = null;
+			closeSync(tempFd);
+			tempFd = undefined;
+			stream.destroy();
+			assertOpenedPathAuthorized(target.tempPath, tempDevice, tempInode, access);
+			assertOutputPathAuthorized(target.outputPath, target.parentDevice, target.parentInode, access);
+			publishNewFile(target.tempPath, target);
 			onProgress?.(`Exported ${count}/${kb.chunk_count} chunks.`);
 			return count;
 		} catch (error) {
+			if (tempFd !== undefined) {
+				const descriptor = tempFd;
+				tempFd = undefined;
+				if (stream.fd === descriptor) stream.fd = null;
+				try {
+					closeSync(descriptor);
+				} catch (closeError) {
+					if ((closeError as NodeJS.ErrnoException).code !== "EBADF") {
+						console.error(`Failed to close export descriptor: ${String(closeError)}`);
+					}
+				}
+			}
 			stream.destroy();
-			rmSync(tempOutputPath, { force: true });
+			try {
+				const current = lstatSync(target.tempPath);
+				if (!current.isSymbolicLink() && current.dev === tempDevice && current.ino === tempInode) {
+					assertOpenedPathAuthorized(target.tempPath, tempDevice, tempInode, access);
+					rmSync(target.tempPath, { force: true });
+				}
+			} catch {
+				// Leave an unverified path untouched rather than deleting outside the authorized root.
+			}
 			throw error;
 		}
 	}
@@ -2747,10 +3226,11 @@ export class KnowledgeEngine {
 		inputPath: string,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
+		access?: FilesystemAccessPolicy,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		return this.runExclusive("global:mutation", "Knowledge-base import", () =>
-			this.importKBUnlocked(inputPath, onProgress, signal),
+			this.importKBUnlocked(inputPath, onProgress, signal, access),
 		);
 	}
 
@@ -2758,15 +3238,64 @@ export class KnowledgeEngine {
 		inputPath: string,
 		onProgress?: ProgressCallback,
 		signal?: AbortSignal,
+		access?: FilesystemAccessPolicy,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
-		const { createReadStream } = await import("node:fs");
-		const { createInterface } = await import("node:readline");
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
-		const stream = createReadStream(inputPath, { encoding: "utf-8" });
+		inputPath = authorizeExistingPath(inputPath, access);
+		const directInput = lstatSync(inputPath);
+		if (directInput.isSymbolicLink() || !directInput.isFile()) {
+			throw new Error(`Import source is not a regular non-symlink file: ${inputPath}`);
+		}
+		const inputFd = openSync(inputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		const inputInfo = fstatSync(inputFd);
+		if (inputInfo.dev !== directInput.dev || inputInfo.ino !== directInput.ino) {
+			closeSync(inputFd);
+			throw new Error(`Import source changed while opening: ${inputPath}`);
+		}
+		if (!inputInfo.isFile()) {
+			closeSync(inputFd);
+			throw new Error(`Import source is not a regular file: ${inputPath}`);
+		}
+		try {
+			assertOpenedPathAuthorized(inputPath, inputInfo.dev, inputInfo.ino, access);
+		} catch (error) {
+			closeSync(inputFd);
+			throw error;
+		}
+		if (inputInfo.size > MAX_IMPORT_BYTES) {
+			closeSync(inputFd);
+			throw new Error(`Import file exceeds the ${MAX_IMPORT_BYTES}-byte limit: ${inputPath}`);
+		}
+		const stream = createReadStream("", { autoClose: true, encoding: "utf-8", fd: inputFd });
 		const lines = createInterface({ input: stream, crlfDelay: Infinity });
+		let observedBytes = 0;
+		let observedLineBytes = 0;
+		stream.on("data", (chunk: string | Buffer) => {
+			observedBytes += Buffer.byteLength(String(chunk));
+			if (observedBytes > MAX_IMPORT_BYTES) {
+				stream.destroy(new Error(`Import exceeds the ${MAX_IMPORT_BYTES}-byte limit`));
+				return;
+			}
+			const parts = String(chunk).split("\n");
+			if (parts.length === 1) {
+				observedLineBytes += Buffer.byteLength(parts[0] ?? "");
+			} else {
+				observedLineBytes += Buffer.byteLength(parts[0] ?? "");
+				for (let index = 1; index < parts.length - 1; index++) {
+					if (Buffer.byteLength(parts[index] ?? "") > MAX_IMPORT_LINE_BYTES) {
+						stream.destroy(new Error(`Import line exceeds the ${MAX_IMPORT_LINE_BYTES}-byte limit`));
+						return;
+					}
+				}
+				observedLineBytes = Buffer.byteLength(parts.at(-1) ?? "");
+			}
+			if (observedLineBytes > MAX_IMPORT_LINE_BYTES) {
+				stream.destroy(new Error(`Import line exceeds the ${MAX_IMPORT_LINE_BYTES}-byte limit`));
+			}
+		});
 		let header: ImportHeader | undefined;
 		let kb: KnowledgeBase | undefined;
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -2816,11 +3345,28 @@ export class KnowledgeEngine {
 			for await (const rawLine of lines) {
 				throwIfAborted(signal);
 				lineNumber++;
+				if (lineNumber > MAX_IMPORT_LINES) throw new Error(`Import exceeds the ${MAX_IMPORT_LINES}-line limit`);
 				const line = rawLine.trim();
+				if (Buffer.byteLength(rawLine) > MAX_IMPORT_LINE_BYTES) {
+					throw new Error(`Import line ${lineNumber} exceeds the ${MAX_IMPORT_LINE_BYTES}-byte limit`);
+				}
 				if (!line) continue;
 				if (!header) {
-					header = JSON.parse(line) as ImportHeader;
-					if (!header.name) throw new Error("Import header is missing a knowledge base name");
+					const parsedHeader = JSON.parse(line) as unknown;
+					if (typeof parsedHeader !== "object" || parsedHeader === null || Array.isArray(parsedHeader)) {
+						throw new Error("Import header must be an object");
+					}
+					const headerRecord = parsedHeader as Record<string, unknown>;
+					header = {
+						...validateKnowledgeBaseMetadata(headerRecord.name, headerRecord.description),
+						chunk_count: headerRecord.chunk_count === undefined ? undefined : (headerRecord.chunk_count as number),
+					};
+					if (
+						header.chunk_count !== undefined &&
+						(!Number.isInteger(header.chunk_count) || header.chunk_count < 0 || header.chunk_count > MAX_IMPORT_CHUNKS)
+					) {
+						throw new Error(`Import header chunk_count must be between 0 and ${MAX_IMPORT_CHUNKS}`);
+					}
 					const existingKB = getKBByName(this.db, header.name);
 					if (existingKB) {
 						throw new Error(
@@ -2848,11 +3394,14 @@ export class KnowledgeEngine {
 					vectorWriter = openVectorWriter(tempVectorFile);
 					continue;
 				}
-				const imported = JSON.parse(line) as ImportedChunk;
+				const imported = parseImportedChunk(JSON.parse(line) as unknown);
 				const chunk = importedChunkToInsert(imported);
 				chunk.content_tokenized = preTokenizeForFTS(buildChunkEmbeddingText(chunk));
 				const finalizedChunks = await finalizeChunksForEmbedding([chunk], embeddingConfig, signal);
 				pendingChunks.push(...finalizedChunks);
+				if (inserted + pendingChunks.length > MAX_IMPORT_CHUNKS) {
+					throw new Error(`Import exceeds the ${MAX_IMPORT_CHUNKS}-chunk limit`);
+				}
 				pendingSymbols.push(...extractSymbols(imported.content, imported.file_path, imported.file_type));
 				while (pendingChunks.length >= embeddingBatchSize) await flushPending();
 			}

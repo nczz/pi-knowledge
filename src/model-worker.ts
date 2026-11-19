@@ -8,6 +8,11 @@ import {
 	type EmbeddingRole,
 	NO_INSTRUCTIONS,
 } from "./embedding/instructions.ts";
+import {
+	assertExtractedDocumentSize,
+	MAX_EXTRACTED_DOCUMENT_BYTES,
+	MAX_WORKER_STDIO_FRAME_BYTES,
+} from "./model-worker-contract.ts";
 import type { HfRerankerConfig } from "./search/reranker-config.ts";
 import {
 	DEFAULT_RERANKER_REMOTE_HOST,
@@ -84,6 +89,12 @@ type WorkerResponse = { id: number; result?: unknown; error?: string };
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let embeddingPipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
 let rerankerPipeline: { key: string; pipe: RerankerPipeline } | null = null;
+const cancelledRequestIds = new Set<number>();
+const activeRequestIds = new Set<number>();
+
+function throwIfCancelled(id: number): void {
+	if (cancelledRequestIds.has(id)) throw new Error("Cancelled");
+}
 
 function getModelCacheDir(): string {
 	return process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? join(getDefaultKnowledgeDir(), "models");
@@ -161,13 +172,16 @@ function applyEmbeddingPrefix(text: string, role: EmbeddingRole, prefixes: Embed
 }
 
 async function handleEmbed(request: EmbedRequest): Promise<number[][]> {
+	throwIfCancelled(request.id);
 	const pipe = await loadEmbeddingPipeline();
 	const vectors: number[][] = [];
 	for (const text of request.texts) {
+		throwIfCancelled(request.id);
 		const output = await pipe(applyEmbeddingPrefix(text, request.prefix, request.prefixes), {
 			pooling: "mean",
 			normalize: true,
 		});
+		throwIfCancelled(request.id);
 		vectors.push(Array.from(output.data));
 	}
 	return vectors;
@@ -183,6 +197,7 @@ function embeddingMaximumTokens(tokenizer: EmbeddingTokenizer): number {
 async function handleMeasureEmbeddingInput(
 	request: MeasureEmbeddingInputRequest,
 ): Promise<{ counts: number[]; maximum: number }> {
+	throwIfCancelled(request.id);
 	const pipe = await loadEmbeddingPipeline();
 	const texts = request.texts.map((text) => applyEmbeddingPrefix(text, request.prefix, request.prefixes));
 	const tokenized = pipe.tokenizer(texts, {
@@ -200,14 +215,18 @@ async function handleMeasureEmbeddingInput(
 	} else {
 		counts = texts.map((text) => pipe.tokenizer.encode(text, { add_special_tokens: true }).length);
 	}
+	throwIfCancelled(request.id);
 	return { counts, maximum: embeddingMaximumTokens(pipe.tokenizer) };
 }
 
 async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: string; score: number }>> {
+	throwIfCancelled(request.id);
 	const pipe = await loadRerankerPipeline(request.reranker);
 	const results: Array<{ chunkId: string; score: number }> = [];
 	for (const candidate of request.candidates) {
+		throwIfCancelled(request.id);
 		const output = await pipe({ text: request.query, text_pair: candidate.content });
+		throwIfCancelled(request.id);
 		const score = Array.isArray(output) ? (output[0]?.score ?? 0) : (output?.score ?? 0);
 		results.push({ chunkId: candidate.chunkId, score });
 	}
@@ -217,20 +236,44 @@ async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: st
 
 const PDFJS_ERRORS_ONLY_VERBOSITY = 0;
 
+function normalizeExtractedDocumentText(text: string | string[]): string {
+	if (typeof text === "string") {
+		assertExtractedDocumentSize(text);
+		return text;
+	}
+	let bytes = 0;
+	for (const page of text) {
+		bytes += Buffer.byteLength(page);
+		if (bytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+			throw new Error(`Extracted document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte text limit`);
+		}
+	}
+	bytes += Math.max(0, text.length - 1) * 2;
+	if (bytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+		throw new Error(`Extracted document exceeds the ${MAX_EXTRACTED_DOCUMENT_BYTES}-byte text limit`);
+	}
+	return text.join("\n\n");
+}
+
 async function handleExtractDocument(request: ExtractDocumentRequest): Promise<{ content: string; fileType: string }> {
+	throwIfCancelled(request.id);
 	if (request.fileType === "pdf") {
 		const { extractText, getDocumentProxy } = await import("unpdf");
 		const bytes = await readFile(request.filePath);
+		throwIfCancelled(request.id);
 		const pdf = await getDocumentProxy(new Uint8Array(bytes), { verbosity: PDFJS_ERRORS_ONLY_VERBOSITY });
 		try {
 			const { text } = await extractText(pdf);
-			return { content: Array.isArray(text) ? text.join("\n\n") : text, fileType: "pdf" };
+			throwIfCancelled(request.id);
+			return { content: normalizeExtractedDocumentText(text), fileType: "pdf" };
 		} finally {
 			await pdf.destroy();
 		}
 	}
 	const mammoth = await import("mammoth");
 	const result = await mammoth.extractRawText({ path: request.filePath });
+	assertExtractedDocumentSize(result.value);
+	throwIfCancelled(request.id);
 	return { content: result.value, fileType: "docx" };
 }
 
@@ -306,13 +349,21 @@ function parseWorkerRequest(message: unknown): WorkerRequest {
 	throw new Error("Unsupported worker request type");
 }
 
-async function handleRequestMessage(message: unknown): Promise<WorkerResponse> {
+async function handleRequestMessage(message: unknown): Promise<WorkerResponse | undefined> {
 	let requestId = 0;
+	let cancelFrame = false;
 	try {
 		if (typeof message === "object" && message !== null && "id" in message && typeof message.id === "number") {
 			requestId = message.id;
 		}
+		if (typeof message === "object" && message !== null && "type" in message && message.type === "cancel") {
+			cancelFrame = true;
+			if (activeRequestIds.has(requestId)) cancelledRequestIds.add(requestId);
+			return undefined;
+		}
 		const request = parseWorkerRequest(message);
+		activeRequestIds.add(request.id);
+		throwIfCancelled(request.id);
 		const result =
 			request.type === "embed"
 				? await handleEmbed(request)
@@ -321,21 +372,37 @@ async function handleRequestMessage(message: unknown): Promise<WorkerResponse> {
 					: request.type === "extract_document"
 						? await handleExtractDocument(request)
 						: await handleRerank(request);
+		throwIfCancelled(request.id);
 		return { id: request.id, result };
 	} catch (error) {
 		return { id: requestId, error: error instanceof Error ? error.message : String(error) };
+	} finally {
+		if (requestId !== 0 && !cancelFrame) {
+			activeRequestIds.delete(requestId);
+			cancelledRequestIds.delete(requestId);
+		}
 	}
 }
 
 function writeStdioResponse(response: WorkerResponse): void {
-	process.stdout.write(`${JSON.stringify(response)}\n`);
+	const line = `${JSON.stringify(response)}\n`;
+	if (Buffer.byteLength(line) <= MAX_WORKER_STDIO_FRAME_BYTES) {
+		process.stdout.write(line);
+		return;
+	}
+	process.stdout.write(
+		`${JSON.stringify({
+			id: response.id,
+			error: `Model worker response exceeds the ${MAX_WORKER_STDIO_FRAME_BYTES}-byte frame limit`,
+		})}\n`,
+	);
 }
 
 function runIpcMode(): void {
 	process.on("message", (message: unknown) => {
 		void (async () => {
 			const response = await handleRequestMessage(message);
-			process.send?.(response);
+			if (response) process.send?.(response);
 		})();
 	});
 }
@@ -351,9 +418,17 @@ function runStdioMode(): void {
 	redirectConsoleOutputToStderr();
 	const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 	lines.on("line", (line) => {
+		if (Buffer.byteLength(line) > MAX_WORKER_STDIO_FRAME_BYTES) {
+			writeStdioResponse({
+				id: 0,
+				error: `Model worker request exceeds the ${MAX_WORKER_STDIO_FRAME_BYTES}-byte frame limit`,
+			});
+			return;
+		}
 		void (async () => {
 			try {
-				writeStdioResponse(await handleRequestMessage(JSON.parse(line)));
+				const response = await handleRequestMessage(JSON.parse(line));
+				if (response) writeStdioResponse(response);
 			} catch (error) {
 				writeStdioResponse({ id: 0, error: error instanceof Error ? error.message : String(error) });
 			}

@@ -462,8 +462,13 @@ export function getKBByName(db: Database.Database, name: string): KnowledgeBase 
 	return db.prepare("SELECT * FROM knowledge_bases WHERE name = ?").get(name) as KnowledgeBase | undefined;
 }
 
-export function listKBs(db: Database.Database): KnowledgeBase[] {
-	return db.prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC").all() as KnowledgeBase[];
+export function listKBs(db: Database.Database, limit?: number): KnowledgeBase[] {
+	if (limit === undefined) {
+		return db.prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC").all() as KnowledgeBase[];
+	}
+	return db
+		.prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC LIMIT ?")
+		.all(Math.max(0, Math.trunc(limit))) as KnowledgeBase[];
 }
 
 export function deleteKB(db: Database.Database, id: string): void {
@@ -830,6 +835,18 @@ export function insertSymbols(db: Database.Database, kbId: string, symbols: Know
 		}
 	});
 	insertMany(symbols);
+}
+
+export function getSymbolsByFile(db: Database.Database, kbId: string, filePath: string): KnowledgeSymbolInsert[] {
+	return db
+		.prepare(
+			`SELECT name, kind, file_path, file_type, start_line, end_line,
+			        container_name, signature, text, metadata_json
+			 FROM symbols
+			 WHERE kb_id = ? AND file_path = ?
+			 ORDER BY indexed_at, rowid`,
+		)
+		.all(kbId, filePath) as KnowledgeSymbolInsert[];
 }
 
 export function deleteSymbolsByKB(db: Database.Database, kbId: string): void {

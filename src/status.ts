@@ -58,13 +58,15 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 			if (diagnostic.job.message) lines.push(`    last: ${diagnostic.job.message}`);
 			if (diagnostic.job.error_message) lines.push(`    error: ${diagnostic.job.error_message}`);
 		}
-		lines.push(
-			`    coverage: ${diagnostic.coverage_percent}% (${diagnostic.indexed_files}/${diagnostic.total_source_files} files)`,
-		);
-		if (diagnostic.stale_files.length > 0)
-			lines.push(`    ⚠️ stale: ${diagnostic.stale_files.length} files modified since last index`);
-		if (diagnostic.orphan_files.length > 0)
-			lines.push(`    ⚠️ orphans: ${diagnostic.orphan_files.length} chunks reference deleted files`);
+		if (diagnostic.scan_error) lines.push(`    ⚠️ source scan failed: ${diagnostic.scan_error}`);
+		else
+			lines.push(
+				`    coverage: ${diagnostic.coverage_percent}% (${diagnostic.indexed_files}/${diagnostic.total_source_files} files)`,
+			);
+		const staleCount = diagnostic.stale_file_count ?? diagnostic.stale_files.length;
+		const orphanCount = diagnostic.orphan_file_count ?? diagnostic.orphan_files.length;
+		if (staleCount > 0) lines.push(`    ⚠️ stale: ${staleCount} files modified since last index`);
+		if (orphanCount > 0) lines.push(`    ⚠️ orphans: ${orphanCount} chunks reference deleted files`);
 		if (diagnostic.stuck_indexing)
 			lines.push(
 				`    ⚠️ indexing appears stuck for ${Math.round(diagnostic.last_progress_age_ms / 60_000)}m; remove and rebuild if no pi process is actively indexing it`,
@@ -78,8 +80,14 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 			);
 	}
 
-	const totalStale = snapshot.diagnostics.reduce((count, diagnostic) => count + diagnostic.stale_files.length, 0);
-	const totalOrphans = snapshot.diagnostics.reduce((count, diagnostic) => count + diagnostic.orphan_files.length, 0);
+	const totalStale = snapshot.diagnostics.reduce(
+		(count, diagnostic) => count + (diagnostic.stale_file_count ?? diagnostic.stale_files.length),
+		0,
+	);
+	const totalOrphans = snapshot.diagnostics.reduce(
+		(count, diagnostic) => count + (diagnostic.orphan_file_count ?? diagnostic.orphan_files.length),
+		0,
+	);
 	const totalStuck = snapshot.diagnostics.filter((diagnostic) => diagnostic.stuck_indexing).length;
 	const totalIndexing = snapshot.knowledge_bases.filter(
 		(kb) => kb.status === "indexing" && !diagnosticsByKb.get(kb.id)?.stuck_indexing,

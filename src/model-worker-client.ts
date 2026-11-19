@@ -3,6 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { assertExtractedDocumentSize, MAX_WORKER_STDIO_FRAME_BYTES } from "./model-worker-contract.ts";
 import { getConfiguredNodePath, writeRuntimeConfig } from "./runtime-config.ts";
 import type { HfRerankerConfig } from "./search/reranker-config.ts";
 
@@ -265,6 +266,7 @@ abstract class ModelWorkerTransport {
 		};
 		if (signal) {
 			abortHandler = () => {
+				this.writeRequest({ id, type: "cancel" }, () => {});
 				this.pending.delete(id);
 				cleanup();
 				reject(new Error("Cancelled"));
@@ -397,6 +399,11 @@ class StdioModelWorkerTransport extends ModelWorkerTransport {
 	}
 
 	private handleStdoutChunk(chunk: Buffer): void {
+		if (Buffer.byteLength(this.stdoutBuffer) + chunk.byteLength > MAX_WORKER_STDIO_FRAME_BYTES) {
+			this.rejectPending(new Error("Model worker stdio response exceeds the configured frame limit"));
+			if (!this.child.killed) this.child.kill("SIGKILL");
+			return;
+		}
 		this.stdoutBuffer += this.decoder.write(chunk);
 		let newlineIndex = this.stdoutBuffer.indexOf("\n");
 		while (newlineIndex >= 0) {
@@ -484,6 +491,7 @@ export async function extractDocumentInModelWorker(
 	) {
 		throw new Error("Invalid document extraction worker response");
 	}
+	assertExtractedDocumentSize(result.content);
 	return { content: result.content, fileType };
 }
 

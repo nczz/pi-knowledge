@@ -1,15 +1,17 @@
-import type { KnowledgeEngine, SearchMiss, SymbolSearchMiss } from "./src/engine.ts";
+import type { KnowledgeDaemonClient } from "./src/daemon/client.ts";
+import type { SearchMiss, SymbolSearchMiss } from "./src/engine.ts";
+import type { FilesystemAccessPolicy } from "./src/filesystem-access.ts";
 import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
 import { formatKnowledgeStatus } from "./src/status.ts";
-
-type KnowledgeEngineInstance = KnowledgeEngine;
-type StorageRuntime = typeof import("./src/storage/sqlite.ts");
-type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
 type ToolUpdate = (result: ToolResult) => void;
 type ToolApproval = "read" | "write" | "exec";
-type ToolDefinition = {
+export interface ToolExecutionContext {
+	profile?: string;
+	filesystemAccess?: FilesystemAccessPolicy;
+}
+export type ToolDefinition = {
 	name: string;
 	label: string;
 	description: string;
@@ -22,7 +24,7 @@ type ToolDefinition = {
 		params: Record<string, unknown>,
 		signal: AbortSignal | undefined,
 		onUpdate: ToolUpdate | undefined,
-		ctx: unknown,
+		ctx: ToolExecutionContext | undefined,
 	) => ToolResult | Promise<ToolResult>;
 };
 type ContextEvent = { messages: Array<{ role: string; content?: unknown }> };
@@ -75,47 +77,13 @@ const Type = {
 	},
 };
 
-type Runtime = {
-	engine: KnowledgeEngineInstance;
-	storage: StorageRuntime;
-	watcher: WatcherRuntime;
-};
-
+let daemonClient: KnowledgeDaemonClient | undefined;
+let ensureClientPromise: Promise<KnowledgeDaemonClient> | undefined;
+let releaseClientPromise: Promise<void> | undefined;
+let clientGeneration = 0;
 const RUNTIME_EXTENSION = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
 const AUTO_INJECT = process.env.PI_KNOWLEDGE_AUTO_INJECT === "true";
-
-let runtime: Runtime | undefined;
-let runtimePromise: Promise<Runtime> | undefined;
-let initializePromise: Promise<Runtime> | undefined;
-let initialized = false;
-let disposePromise: Promise<void> | undefined;
-
-function scanOptionsFromSourceOptions(raw: string | null | undefined): {
-	includeSuggestedText?: boolean;
-	includePaths?: string[];
-	excludePaths?: string[];
-} {
-	if (!raw) return {};
-	try {
-		const parsed = JSON.parse(raw) as {
-			include_suggested_text?: unknown;
-			include_paths?: unknown;
-			exclude_paths?: unknown;
-		};
-		return {
-			includeSuggestedText: parsed.include_suggested_text === true,
-			includePaths: Array.isArray(parsed.include_paths)
-				? parsed.include_paths.filter((item): item is string => typeof item === "string")
-				: undefined,
-			excludePaths: Array.isArray(parsed.exclude_paths)
-				? parsed.exclude_paths.filter((item): item is string => typeof item === "string")
-				: undefined,
-		};
-	} catch {
-		return {};
-	}
-}
 const SEARCH_MISS_ACTION_TEXT: Record<SearchMiss["action"], string> = {
 	add_knowledge_base: "Use knowledge_add to index a directory, file, URL, or text source.",
 	fix_kb_id: "Fix kb_id or omit it to search all knowledge bases.",
@@ -271,125 +239,121 @@ function runtimeModule(modulePath: string): string {
 	return `${modulePath}${RUNTIME_EXTENSION}`;
 }
 
-async function loadRuntime(): Promise<Runtime> {
-	if (disposePromise) await disposePromise;
-	if (runtime) return runtime;
-	runtimePromise ??= Promise.all([
-		import(runtimeModule("./src/engine")),
-		import(runtimeModule("./src/storage/sqlite")),
-		import(runtimeModule("./src/watcher/file-watcher")),
-	]).then(([engineModule, storage, watcher]) => {
-		runtime = { engine: new engineModule.KnowledgeEngine(), storage, watcher };
-		return runtime;
-	});
-	return runtimePromise;
-}
-
-async function ensureInitialized(): Promise<Runtime> {
-	if (disposePromise) await disposePromise;
-	if (initialized && runtime) return runtime;
-	initializePromise ??= (async () => {
-		const loaded = await loadRuntime();
-		await loaded.engine.initialize(loaded.storage.getDefaultKnowledgeDir());
-		initialized = true;
-		return loaded;
-	})();
+async function ensureClient(): Promise<KnowledgeDaemonClient> {
+	if (releaseClientPromise) await releaseClientPromise;
+	if (daemonClient) return daemonClient;
+	ensureClientPromise ??= Promise.all([
+		import(runtimeModule("./src/daemon/client")),
+		import(runtimeModule("./src/profiles")),
+	]).then(([clientModule, profileModule]) => clientModule.ensureDaemonClient(profileModule.resolveKnowledgeProfile()));
 	try {
-		return await initializePromise;
+		daemonClient = await ensureClientPromise;
+		return daemonClient;
 	} catch (error) {
-		initializePromise = undefined;
+		ensureClientPromise = undefined;
 		throw error;
 	}
 }
 
-async function disposeRuntime(): Promise<void> {
-	if (disposePromise) return disposePromise;
-	const pendingInitialize = initializePromise;
-	const pendingRuntime = runtimePromise;
-	disposePromise = (async () => {
-		let loaded = runtime;
-		if (!loaded && pendingInitialize) {
+async function releaseClient(): Promise<void> {
+	if (releaseClientPromise) return releaseClientPromise;
+	clientGeneration++;
+	const pending = ensureClientPromise;
+	releaseClientPromise = (async () => {
+		if (pending) {
 			try {
-				loaded = await pendingInitialize;
+				await pending;
 			} catch {
-				loaded = runtime;
+				// Startup errors are reported by the caller that initiated startup.
 			}
 		}
-		if (!loaded && pendingRuntime) {
-			try {
-				loaded = await pendingRuntime;
-			} catch {
-				loaded = runtime;
-			}
-		}
-		initialized = false;
-		initializePromise = undefined;
-		runtime = undefined;
-		runtimePromise = undefined;
-		if (!loaded) return;
-		loaded.watcher.stopAllWatchers();
-		await loaded.engine.dispose({ disposeModels: false });
+		daemonClient = undefined;
+		if (ensureClientPromise === pending) ensureClientPromise = undefined;
 	})();
 	try {
-		await disposePromise;
+		await releaseClientPromise;
 	} finally {
-		disposePromise = undefined;
+		releaseClientPromise = undefined;
 	}
 }
 
-export default function (pi: ExtensionAPI) {
-	pi.on("session_start", async () => {
-		const { engine, watcher } = await ensureInitialized();
-		if (WATCH_ENABLED) {
-			for (const kb of engine.list()) {
-				if (kb.source_path && kb.source_type === "directory") {
-					watcher.startWatcher(
-						kb.id,
-						kb.source_path,
-						(kbId) => {
-							engine.update(kbId).catch(() => {});
-						},
-						scanOptionsFromSourceOptions(kb.source_options),
-					);
-				}
-			}
+async function configureClient(nodePath: string | undefined, signal?: AbortSignal): Promise<{ node_path: string }> {
+	let client: KnowledgeDaemonClient;
+	try {
+		client = await ensureClient();
+	} catch (error) {
+		if (signal?.aborted) throw new Error("Cancelled");
+		if (!nodePath) {
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Unable to start the profile daemon for automatic Node discovery: ${reason}. Pass an explicit absolute Node 22+ path to bootstrap the profile.`,
+			);
 		}
+		const generation = clientGeneration;
+		const [clientModule, profileModule] = await Promise.all([
+			import(runtimeModule("./src/daemon/client")),
+			import(runtimeModule("./src/profiles")),
+		]);
+		if (signal?.aborted) throw new Error("Cancelled");
+		if (generation !== clientGeneration || releaseClientPromise) {
+			throw new Error("Knowledge client session is shutting down");
+		}
+		const bootstrap = clientModule.configureAndEnsureDaemonClient(
+			profileModule.resolveKnowledgeProfile(),
+			nodePath,
+			signal,
+		);
+		ensureClientPromise = bootstrap;
+		try {
+			client = await bootstrap;
+		} catch (bootstrapError) {
+			if (ensureClientPromise === bootstrap) ensureClientPromise = undefined;
+			throw bootstrapError;
+		}
+		if (generation !== clientGeneration) throw new Error("Knowledge client session was released");
+		if (ensureClientPromise === bootstrap) daemonClient = client;
+	}
+	return client.configure(nodePath, signal);
+}
+
+function registerKnowledgeExtension(pi: ExtensionAPI) {
+	pi.on("session_start", async () => {
+		const client = await ensureClient();
+		if (WATCH_ENABLED) await client.enableWatchers();
 	});
 
 	pi.on("session_shutdown", async () => {
-		await disposeRuntime();
+		await releaseClient();
 	});
 
 	// Auto-inject: search KB for relevant context before each LLM call (opt-in)
 	if (AUTO_INJECT) {
 		pi.on("context", async (event) => {
 			try {
-				const { engine } = await ensureInitialized();
-				const kbs = engine.list();
+				const client = await ensureClient();
+				const kbs = await client.list();
 				if (kbs.length === 0) return;
-				// Find last user message
-				const lastUser = [...event.messages].reverse().find((m) => m.role === "user");
+				const lastUser = [...event.messages].reverse().find((message) => message.role === "user");
 				if (!lastUser) return;
 				const text = "content" in lastUser && typeof lastUser.content === "string" ? lastUser.content : "";
 				if (!text || text.length < 5) return;
-				const results = await engine.search(text, { mode: "fast", limit: 3 });
+				const results = await client.search(text, { mode: "fast", limit: 3 });
 				if (results.results.length === 0) return;
-				const context = results.results.map((r) => `[${r.file_path}]: ${r.snippet}`).join("\n\n");
+				const context = results.results.map((result) => `[${result.file_path}]: ${result.snippet}`).join("\n\n");
 				return {
 					messages: [{ role: "user" as const, content: `[Knowledge context]\n${context}` }, ...event.messages],
 				};
 			} catch {
-				/* silent fail */
+				// Auto-injection must not prevent an agent turn when the daemon is unavailable.
 			}
 		});
 	}
 
 	pi.on("before_agent_start", async (event) => {
-		const { engine } = await ensureInitialized();
-		const kbs = engine.list();
+		const client = await ensureClient();
+		const kbs = await client.list();
 		if (kbs.length === 0) return undefined;
-		const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
-		const guidance = `Available knowledge bases: ${desc}. Use knowledge_symbol_search for exact symbols/config keys/env vars/routes/headings, then use knowledge_search for broader domain or implementation context.`;
+		const guidance = `${kbs.length} knowledge base${kbs.length === 1 ? " is" : "s are"} available. Use knowledge_show to inspect their untrusted labels, knowledge_symbol_search for exact symbols/config keys/env vars/routes/headings, then knowledge_search for broader domain or implementation context.`;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
 		};
@@ -428,15 +392,15 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this plan" })),
 			),
 		}),
-		async execute(_id, params, _signal) {
-			const { engine } = await ensureInitialized();
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const client = await ensureClient();
 			const { source, include_suggested_text, include_paths, exclude_paths } = params as {
 				source: string;
 				include_suggested_text?: boolean;
 				include_paths?: unknown;
 				exclude_paths?: unknown;
 			};
-			const plan = engine.plan(
+			const plan = await client.plan(
 				source,
 				{
 					include_suggested_text: include_suggested_text === true,
@@ -448,6 +412,7 @@ export default function (pi: ExtensionAPI) {
 						: undefined,
 				},
 				_signal,
+				ctx?.filesystemAccess,
 			);
 			const samples = plan.skipped.samples
 				.map((sample) => `- ${sample.reason}: ${sample.path}${sample.size ? ` (${sample.size} bytes)` : ""}`)
@@ -477,7 +442,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use knowledge_configure when knowledge_doctor or knowledge_add reports that local embeddings cannot find a usable Node executable",
 			"On Windows, pass the full node.exe path when the user provides one; paths with spaces are accepted",
-			"If node_path is omitted, the tool auto-discovers a usable Node 22+ executable and persists it for future sessions",
+			"If node_path is omitted, a running daemon auto-discovers and persists Node; a fresh profile whose host cannot start Node requires an explicit absolute Node 22+ path for bootstrap",
 			"Do not switch users to API embeddings unless they explicitly choose a network embedding provider",
 		],
 		parameters: Type.Object({
@@ -490,18 +455,16 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const { configureModelWorkerNodePath } = await import(runtimeModule("./src/model-worker-client"));
-			if (_signal?.aborted) throw new Error("Cancelled");
 			const nodePath = typeof params.node_path === "string" && params.node_path.trim() ? params.node_path : undefined;
-			const configuredPath = configureModelWorkerNodePath(nodePath);
+			const configured = await configureClient(nodePath, _signal);
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Configured isolated worker Node executable: ${configuredPath}`,
+						text: `Configured isolated worker Node executable: ${configured.node_path}`,
 					},
 				],
-				details: { node_path: configuredPath },
+				details: configured,
 			};
 		},
 	});
@@ -547,8 +510,8 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this KB" })),
 			),
 		}),
-		async execute(_id, params, _signal, onUpdate) {
-			const { engine, watcher } = await ensureInitialized();
+		async execute(_id, params, _signal, onUpdate, ctx) {
+			const client = await ensureClient();
 			const { source, name, include_suggested_text, include_paths, exclude_paths } = params as {
 				source: string;
 				name: string;
@@ -556,11 +519,11 @@ export default function (pi: ExtensionAPI) {
 				include_paths?: unknown;
 				exclude_paths?: unknown;
 			};
-			const { kb, chunkCount } = await engine.add(
+			const { kb, chunkCount } = await client.add(
 				source,
 				name,
-				(msg) => {
-					onUpdate?.({ content: [{ type: "text", text: msg }] });
+				(message) => {
+					onUpdate?.({ content: [{ type: "text", text: message }] });
 				},
 				_signal,
 				{
@@ -572,26 +535,8 @@ export default function (pi: ExtensionAPI) {
 						? exclude_paths.filter((item) => typeof item === "string")
 						: undefined,
 				},
+				ctx?.filesystemAccess,
 			);
-			// Start watcher for new directory KB
-			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
-				watcher.startWatcher(
-					kb.id,
-					kb.source_path,
-					(kbId) => {
-						engine.update(kbId).catch(() => {});
-					},
-					{
-						includeSuggestedText: include_suggested_text === true,
-						includePaths: Array.isArray(include_paths)
-							? include_paths.filter((item): item is string => typeof item === "string")
-							: undefined,
-						excludePaths: Array.isArray(exclude_paths)
-							? exclude_paths.filter((item): item is string => typeof item === "string")
-							: undefined,
-					},
-				);
-			}
 			return {
 				content: [
 					{
@@ -677,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_id, params, _signal) {
-			const { engine } = await ensureInitialized();
+			const client = await ensureClient();
 			const { query, mode, profile, limit, kb_id, offset, file_type, path_pattern, diversity, diagnostics } =
 				params as {
 					query: string;
@@ -704,7 +649,7 @@ export default function (pi: ExtensionAPI) {
 					diagnostics?: boolean;
 				};
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
-			const response = await engine.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
+			const response = await client.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
 				if (!response.miss) throw new Error("Search returned no results without a miss classification");
 				return { content: [{ type: "text", text: formatSearchMiss(response.miss) }], details: response };
@@ -785,9 +730,9 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const { engine } = await ensureInitialized();
+			const client = await ensureClient();
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const response = engine.symbolSearch(
+			const response = await client.symbolSearch(
 				(params as { query: string }).query,
 				{
 					kind: (params as { kind?: never }).kind,
@@ -828,14 +773,15 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to update" }),
 		}),
-		async execute(_id, params, _signal, onUpdate) {
-			const { engine } = await ensureInitialized();
-			const { added, removed, unchanged } = await engine.update(
+		async execute(_id, params, _signal, onUpdate, ctx) {
+			const client = await ensureClient();
+			const { added, removed, unchanged } = await client.update(
 				(params as { target: string }).target,
 				(msg) => {
 					onUpdate?.({ content: [{ type: "text", text: msg }] });
 				},
 				_signal,
+				ctx?.filesystemAccess,
 			);
 			return {
 				content: [{ type: "text", text: `Updated: +${added} added, -${removed} removed, ${unchanged} unchanged.` }],
@@ -852,17 +798,22 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const { engine, storage, watcher } = await ensureInitialized();
-			const snapshot = engine.statusSnapshot(_signal);
+			const client = await ensureClient();
+			const [status, ping] = await Promise.all([client.status(_signal), client.ping(_signal)]);
 			return {
 				content: [
 					{
 						type: "text",
-						text: formatKnowledgeStatus({
-							snapshot,
-							storagePath: storage.getDefaultKnowledgeDir(),
-							watchCount: watcher.getActiveWatcherCount(),
-						}),
+						text: [
+							`Profile: ${status.profile.name} (${status.profile.id})`,
+							`Daemon: instance ${ping.instance_id}, protocol ${ping.protocol_version}, pid ${ping.pid}`,
+							...(status.snapshot_error ? [`Coverage snapshot: ⚠️ ${status.snapshot_error}`] : []),
+							formatKnowledgeStatus({
+								snapshot: status.snapshot,
+								storagePath: status.storage_path,
+								watchCount: status.watch_count,
+							}),
+						].join("\n"),
 					},
 				],
 			};
@@ -878,8 +829,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const { engine } = await ensureInitialized();
-			const report = engine.doctor(_signal);
+			const client = await ensureClient();
+			const report = await client.doctor(_signal);
 			const lines = [`Health score: ${report.health_score}/100`, report.summary, ""];
 			if (report.issues.length === 0) {
 				lines.push("No issues found.");
@@ -902,9 +853,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const { engine } = await ensureInitialized();
+			const client = await ensureClient();
 			if (_signal?.aborted) throw new Error("Cancelled");
-			const kbs = engine.list(_signal);
+			const kbs = await client.list(_signal);
 			if (kbs.length === 0) return { content: [{ type: "text", text: "No knowledge bases." }] };
 			const lines = kbs.map((kb) => `• ${kb.name} — ${kb.chunk_count} chunks, ${kb.file_count} files (${kb.status})`);
 			return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -931,8 +882,8 @@ export default function (pi: ExtensionAPI) {
 			if (_signal?.aborted) throw new Error("Cancelled");
 			const { target, confirm } = params as { target: string; confirm?: boolean };
 			if (confirm !== true) throw new Error("Confirmation required: pass confirm=true for destructive removal");
-			const { engine } = await ensureInitialized();
-			const ok = engine.remove(target);
+			const client = await ensureClient();
+			const ok = await client.remove(target, _signal);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
 		},
 	});
@@ -946,12 +897,18 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to export" }),
 			output: Type.String({ description: "Output file path (.jsonl)" }),
 		}),
-		async execute(_id, params, _signal, onUpdate) {
-			const { engine } = await ensureInitialized();
+		async execute(_id, params, _signal, onUpdate, ctx) {
+			const client = await ensureClient();
 			const { target, output } = params as { target: string; output: string };
-			const count = await engine.exportKB(target, output, _signal, (msg) => {
-				onUpdate?.({ content: [{ type: "text", text: msg }] });
-			});
+			const count = await client.exportKB(
+				target,
+				output,
+				_signal,
+				(message) => {
+					onUpdate?.({ content: [{ type: "text", text: message }] });
+				},
+				ctx?.filesystemAccess,
+			);
 			return { content: [{ type: "text", text: `Exported ${count} chunks to ${output}` }] };
 		},
 	});
@@ -964,14 +921,15 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			input: Type.String({ description: "Input JSONL file path" }),
 		}),
-		async execute(_id, params, _signal, onUpdate) {
-			const { engine } = await ensureInitialized();
-			const { kb, chunkCount } = await engine.importKB(
+		async execute(_id, params, _signal, onUpdate, ctx) {
+			const client = await ensureClient();
+			const { kb, chunkCount } = await client.importKB(
 				(params as { input: string }).input,
-				(msg) => {
-					onUpdate?.({ content: [{ type: "text", text: msg }] });
+				(message) => {
+					onUpdate?.({ content: [{ type: "text", text: message }] });
 				},
 				_signal,
+				ctx?.filesystemAccess,
 			);
 			return { content: [{ type: "text", text: `Imported "${kb.name}": ${chunkCount} chunks (re-embedded)` }] };
 		},
@@ -997,9 +955,22 @@ export default function (pi: ExtensionAPI) {
 			if ((params as { confirm?: boolean }).confirm !== true) {
 				throw new Error("Confirmation required: pass confirm=true for destructive clear");
 			}
-			const { engine } = await ensureInitialized();
-			engine.clear();
+			const client = await ensureClient();
+			await client.clear(_signal);
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
 		},
 	});
 }
+
+export function getKnowledgeToolDefinitions(): ToolDefinition[] {
+	const tools: ToolDefinition[] = [];
+	registerKnowledgeExtension({
+		on(): void {},
+		registerTool(tool): void {
+			tools.push(tool);
+		},
+	});
+	return tools;
+}
+
+export default registerKnowledgeExtension;

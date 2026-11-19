@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { hardenPrivateFile, readPrivateJson, writeJsonAtomic } from "./secure-files.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 export type RuntimeConfig = {
@@ -22,7 +23,8 @@ function isRuntimeConfig(value: unknown): value is RuntimeConfig {
 export function readRuntimeConfig(knowledgeDir = getDefaultKnowledgeDir()): RuntimeConfig {
 	const configPath = runtimeConfigPath(knowledgeDir);
 	if (!existsSync(configPath)) return {};
-	const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+	hardenPrivateFile(configPath, "pi-knowledge runtime config");
+	const parsed = readPrivateJson(configPath, "pi-knowledge runtime config");
 	if (!isRuntimeConfig(parsed)) throw new Error(`Invalid pi-knowledge runtime config: ${configPath}`);
 	return parsed;
 }
@@ -32,12 +34,9 @@ export function getConfiguredNodePath(): string | undefined {
 }
 
 export function writeRuntimeConfig(update: RuntimeConfig, knowledgeDir = getDefaultKnowledgeDir()): RuntimeConfig {
-	mkdirSync(knowledgeDir, { recursive: true });
 	const existing = readRuntimeConfig(knowledgeDir);
 	const next: RuntimeConfig = { ...existing, ...update, updated_at: Date.now() };
 	const configPath = runtimeConfigPath(knowledgeDir);
-	const tempPath = `${configPath}.${process.pid}.tmp`;
-	writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`);
-	renameSync(tempPath, configPath);
+	writeJsonAtomic(configPath, next);
 	return next;
 }

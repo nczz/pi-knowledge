@@ -1,7 +1,19 @@
 import { createHash } from "node:crypto";
-import { closeSync, type Dirent, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
-import { extname, join, relative, sep } from "node:path";
+import {
+	closeSync,
+	constants,
+	type Dirent,
+	existsSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	statSync,
+} from "node:fs";
+import { lstat as lstatFile, opendir, open as openFile, realpath as realpathFile } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import ignore from "ignore";
+import { authorizeExistingPath, type FilesystemAccessPolicy } from "../filesystem-access.ts";
 import type { ChunkInsert, KnowledgeSymbolInsert } from "../storage/sqlite.ts";
 import { extractSymbols } from "./symbols.ts";
 
@@ -112,6 +124,7 @@ export interface ScanOptions {
 	includeSuggestedText?: boolean;
 	includePaths?: string[];
 	excludePaths?: string[];
+	accessPolicy?: FilesystemAccessPolicy;
 }
 
 export interface ScannedFile {
@@ -126,6 +139,11 @@ export interface ScannableFile {
 	relPath: string; // relative to root
 	fileType: string;
 	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	device: number;
+	inode: number;
+	rootPath?: string;
 }
 
 export interface SkippedScanEntry {
@@ -275,17 +293,17 @@ function directoryCouldContainIncludedPath(relPath: string, includePaths: string
 	return includePaths.some((includePath) => includePath.startsWith(`${normalized}/`));
 }
 
-export function* iterateScannableFiles(
+export function* iterateScannableFileVisits(
 	dirPath: string,
 	skipped: ScanResult["skipped"] = createSkippedScanStats(),
 	options: ScanOptions = {},
-): Generator<ScannableFile> {
+): Generator<ScannableFile | undefined> {
 	const ig = buildIgnoreMatcher(dirPath);
 	const includePaths = normalizeScanPaths(options.includePaths);
 	const excludePaths = normalizeScanPaths(options.excludePaths);
 	const includeSuggestedText = options.includeSuggestedText === true;
 
-	function* walk(dir: string): Generator<ScannableFile> {
+	function* walk(dir: string): Generator<ScannableFile | undefined> {
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -294,6 +312,7 @@ export function* iterateScannableFiles(
 			return;
 		}
 		for (const entry of entries) {
+			yield undefined;
 			const fullPath = join(dir, entry.name);
 			const relPath = relative(dirPath, fullPath).split(sep).join("/");
 			const explicitlyIncluded = pathMatches(relPath, includePaths);
@@ -323,28 +342,310 @@ export function* iterateScannableFiles(
 				}
 				yield* walk(fullPath);
 			} else if (entry.isFile()) {
-				let size = 0;
+				let info: ReturnType<typeof statSync>;
 				try {
-					size = statSync(fullPath).size;
+					info = statSync(fullPath);
 				} catch {
 					addSkipped(skipped, { path: relPath, reason: "unreadable" });
 					continue;
 				}
-				if (size > MAX_FILE_SIZE) {
-					addSkipped(skipped, { path: relPath, reason: "oversized", size });
+				if (info.size > MAX_FILE_SIZE) {
+					addSkipped(skipped, { path: relPath, reason: "oversized", size: info.size });
 					continue;
 				}
 				if (isBinaryFile(fullPath)) {
-					addSkipped(skipped, { path: relPath, reason: "binary", size });
+					addSkipped(skipped, { path: relPath, reason: "binary", size: info.size });
 					continue;
 				}
 
-				yield { path: fullPath, relPath, fileType: detectFileType(fullPath), size };
+				yield {
+					path: fullPath,
+					relPath,
+					fileType: detectFileType(fullPath),
+					size: info.size,
+					mtimeMs: info.mtimeMs,
+					ctimeMs: info.ctimeMs,
+					device: info.dev,
+					inode: info.ino,
+				};
 			}
 		}
 	}
 
 	yield* walk(dirPath);
+}
+
+const MAX_GITIGNORE_BYTES = 1024 * 1024;
+const MAX_SCAN_ENTRIES = 1_000_000;
+const MAX_SCAN_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
+const MAX_SCAN_DEPTH = 128;
+const MAX_SCAN_DURATION_MS = 5 * 60_000;
+
+function scanPathIsWithin(path: string, root: string): boolean {
+	const rel = relative(root, path);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+async function readBoundedScanFile(filePath: string, maxBytes: number): Promise<string | undefined> {
+	let direct: Awaited<ReturnType<typeof lstatFile>>;
+	try {
+		direct = await lstatFile(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	if (direct.isSymbolicLink() || !direct.isFile()) {
+		throw new Error(`Scan configuration is not a regular non-symlink file: ${filePath}`);
+	}
+	if (direct.size > maxBytes) throw new Error(`Scan configuration exceeds ${maxBytes} bytes: ${filePath}`);
+	const handle = await openFile(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const opened = await handle.stat();
+		if (!opened.isFile() || opened.dev !== direct.dev || opened.ino !== direct.ino) {
+			throw new Error(`Scan configuration changed while opening: ${filePath}`);
+		}
+		if (opened.size > maxBytes) throw new Error(`Scan configuration exceeds ${maxBytes} bytes: ${filePath}`);
+		const buffer = Buffer.alloc(opened.size + 1);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+		if (bytesRead > maxBytes) throw new Error(`Scan configuration exceeds ${maxBytes} bytes: ${filePath}`);
+		return buffer.subarray(0, bytesRead).toString("utf8");
+	} finally {
+		await handle.close();
+	}
+}
+
+async function buildIgnoreMatcherAsync(dirPath: string): Promise<ReturnType<typeof ignore>> {
+	const ig = ignore();
+	ig.add(DEFAULT_SUGGESTED_EXCLUDE);
+	const gitignore = await readBoundedScanFile(join(dirPath, ".gitignore"), MAX_GITIGNORE_BYTES);
+	if (gitignore !== undefined) ig.add(gitignore);
+	return ig;
+}
+
+async function isBinaryFileAsync(filePath: string, expected: { dev: number; ino: number }): Promise<boolean> {
+	if (isSupportedDocumentFile(filePath)) return false;
+	if (BINARY_EXTENSIONS[extname(filePath).toLowerCase()] === true) return true;
+	let handle: Awaited<ReturnType<typeof openFile>> | undefined;
+	try {
+		handle = await openFile(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		const opened = await handle.stat();
+		if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) return true;
+		const sample = Buffer.alloc(8_000);
+		const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
+		return bytesRead > 0 && sample.subarray(0, bytesRead).includes(0x00);
+	} catch {
+		return true;
+	} finally {
+		await handle?.close();
+	}
+}
+
+export async function* iterateScannableFileVisitsAsync(
+	dirPath: string,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
+	signal?: AbortSignal,
+): AsyncGenerator<ScannableFile | undefined> {
+	const authorizedRoot = authorizeExistingPath(dirPath, options.accessPolicy);
+	const initialRootInfo = await lstatFile(authorizedRoot);
+	if (initialRootInfo.isSymbolicLink() || !initialRootInfo.isDirectory()) {
+		throw new Error(`Scan root is not a regular non-symlink directory: ${authorizedRoot}`);
+	}
+	const root = await realpathFile(authorizedRoot);
+	if (authorizeExistingPath(root, options.accessPolicy) !== root) {
+		throw new Error(`Scan root changed while it was being authorized: ${authorizedRoot}`);
+	}
+	const [canonicalRootInfo, currentRootInfo] = await Promise.all([lstatFile(root), lstatFile(authorizedRoot)]);
+	if (
+		canonicalRootInfo.isSymbolicLink() ||
+		!canonicalRootInfo.isDirectory() ||
+		currentRootInfo.isSymbolicLink() ||
+		!currentRootInfo.isDirectory() ||
+		canonicalRootInfo.dev !== initialRootInfo.dev ||
+		canonicalRootInfo.ino !== initialRootInfo.ino ||
+		currentRootInfo.dev !== initialRootInfo.dev ||
+		currentRootInfo.ino !== initialRootInfo.ino
+	) {
+		throw new Error(`Scan root changed while it was being resolved: ${authorizedRoot}`);
+	}
+	const ig = await buildIgnoreMatcherAsync(root);
+	const includePaths = normalizeScanPaths(options.includePaths);
+	const excludePaths = normalizeScanPaths(options.excludePaths);
+	const includeSuggestedText = options.includeSuggestedText === true;
+	const deadline = Date.now() + MAX_SCAN_DURATION_MS;
+	let visitedEntries = 0;
+	let totalBytes = 0;
+
+	const assertScanActive = (): void => {
+		if (signal?.aborted) throw new Error("Cancelled");
+		if (Date.now() > deadline) throw new Error(`Directory scan exceeded ${MAX_SCAN_DURATION_MS}ms`);
+	};
+
+	async function* walk(dir: string, depth: number): AsyncGenerator<ScannableFile | undefined> {
+		assertScanActive();
+		if (depth > MAX_SCAN_DEPTH) throw new Error(`Directory scan exceeds maximum depth ${MAX_SCAN_DEPTH}`);
+		let direct: Awaited<ReturnType<typeof lstatFile>>;
+		let canonical: string;
+		try {
+			direct = await lstatFile(dir);
+			canonical = await realpathFile(dir);
+		} catch {
+			addSkipped(skipped, { path: relative(root, dir).split(sep).join("/") || ".", reason: "inaccessible" });
+			return;
+		}
+		if (
+			direct.isSymbolicLink() ||
+			!direct.isDirectory() ||
+			!scanPathIsWithin(canonical, root) ||
+			(depth === 0 && (direct.dev !== initialRootInfo.dev || direct.ino !== initialRootInfo.ino))
+		) {
+			addSkipped(skipped, { path: relative(root, dir).split(sep).join("/") || ".", reason: "inaccessible" });
+			return;
+		}
+		let directory: Awaited<ReturnType<typeof opendir>>;
+		try {
+			directory = await opendir(canonical);
+		} catch {
+			addSkipped(skipped, { path: relative(root, dir).split(sep).join("/") || ".", reason: "inaccessible" });
+			return;
+		}
+		const assertDirectoryStable = async (): Promise<void> => {
+			const current = await lstatFile(canonical);
+			const currentCanonical = await realpathFile(canonical);
+			if (
+				current.isSymbolicLink() ||
+				!current.isDirectory() ||
+				current.dev !== direct.dev ||
+				current.ino !== direct.ino ||
+				currentCanonical !== canonical
+			) {
+				throw new Error(`Directory changed during scan: ${dir}`);
+			}
+		};
+		try {
+			await assertDirectoryStable();
+		} catch (error) {
+			await directory.close();
+			throw error;
+		}
+		for await (const entry of directory) {
+			assertScanActive();
+			await assertDirectoryStable();
+			visitedEntries++;
+			if (visitedEntries > MAX_SCAN_ENTRIES) {
+				throw new Error(`Directory scan exceeds ${MAX_SCAN_ENTRIES} entries`);
+			}
+			yield undefined;
+			const fullPath = join(canonical, entry.name);
+			const relPath = relative(root, fullPath).split(sep).join("/");
+			const explicitlyIncluded = pathMatches(relPath, includePaths);
+			if (pathMatches(relPath, excludePaths)) {
+				addSkipped(skipped, { path: relPath, reason: "suggested_excluded" });
+				continue;
+			}
+			let info: Awaited<ReturnType<typeof lstatFile>>;
+			try {
+				info = await lstatFile(fullPath);
+			} catch {
+				addSkipped(skipped, { path: relPath, reason: "unreadable" });
+				continue;
+			}
+			if (info.isSymbolicLink()) {
+				addSkipped(skipped, { path: relPath, reason: "inaccessible" });
+				continue;
+			}
+			let safePath: string;
+			try {
+				safePath = await realpathFile(fullPath);
+			} catch {
+				addSkipped(skipped, { path: relPath, reason: "inaccessible" });
+				continue;
+			}
+			if (!scanPathIsWithin(safePath, root)) {
+				addSkipped(skipped, { path: relPath, reason: "inaccessible" });
+				continue;
+			}
+			if (ig.ignores(relPath) && !includeSuggestedText && !explicitlyIncluded) {
+				if (info.isDirectory() && directoryCouldContainIncludedPath(relPath, includePaths)) {
+					yield* walk(safePath, depth + 1);
+					continue;
+				}
+				addSkipped(skipped, { path: relPath, reason: "suggested_excluded" });
+				continue;
+			}
+			if (info.isDirectory()) {
+				if (ig.ignores(`${relPath}/`) && !includeSuggestedText && !explicitlyIncluded) {
+					if (directoryCouldContainIncludedPath(relPath, includePaths)) {
+						yield* walk(safePath, depth + 1);
+						continue;
+					}
+					addSkipped(skipped, { path: `${relPath}/`, reason: "suggested_excluded" });
+					continue;
+				}
+				yield* walk(safePath, depth + 1);
+			} else if (info.isFile()) {
+				totalBytes += info.size;
+				if (totalBytes > MAX_SCAN_TOTAL_BYTES) {
+					throw new Error(`Directory scan exceeds ${MAX_SCAN_TOTAL_BYTES} total bytes`);
+				}
+				if (info.size > MAX_FILE_SIZE) {
+					addSkipped(skipped, { path: relPath, reason: "oversized", size: info.size });
+					continue;
+				}
+				if (await isBinaryFileAsync(safePath, info)) {
+					addSkipped(skipped, { path: relPath, reason: "binary", size: info.size });
+					continue;
+				}
+				await assertDirectoryStable();
+				const [currentFile, currentPath] = await Promise.all([lstatFile(safePath), realpathFile(safePath)]);
+				if (
+					currentFile.isSymbolicLink() ||
+					!currentFile.isFile() ||
+					currentFile.dev !== info.dev ||
+					currentFile.ino !== info.ino ||
+					currentPath !== safePath ||
+					!scanPathIsWithin(currentPath, root)
+				) {
+					addSkipped(skipped, { path: relPath, reason: "inaccessible", size: info.size });
+					continue;
+				}
+				yield {
+					path: safePath,
+					relPath,
+					fileType: detectFileType(safePath),
+					size: info.size,
+					mtimeMs: info.mtimeMs,
+					ctimeMs: info.ctimeMs,
+					device: info.dev,
+					inode: info.ino,
+					rootPath: root,
+				};
+			}
+		}
+	}
+
+	yield* walk(root, 0);
+}
+
+export function* iterateScannableFiles(
+	dirPath: string,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
+): Generator<ScannableFile> {
+	for (const file of iterateScannableFileVisits(dirPath, skipped, options)) {
+		if (file) yield file;
+	}
+}
+
+export async function* iterateScannableFilesAsync(
+	dirPath: string,
+	skipped: ScanResult["skipped"] = createSkippedScanStats(),
+	options: ScanOptions = {},
+	signal?: AbortSignal,
+): AsyncGenerator<ScannableFile> {
+	for await (const file of iterateScannableFileVisitsAsync(dirPath, skipped, options, signal)) {
+		if (file) yield file;
+	}
 }
 
 export function* iterateScannedFiles(
