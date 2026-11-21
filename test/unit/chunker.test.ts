@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildChunkEmbeddingText,
 	chunkFile,
@@ -12,8 +12,10 @@ import {
 	createSkippedScanStats,
 	iterateScannableFiles,
 	iterateScannableFilesAsync,
+	iterateScannableFileVisitsAsync,
 	iterateScannedFiles,
 	preTokenizeForFTS,
+	resolveDirectoryScanTimeoutMs,
 	summarizeSkippedScan,
 	walkDir,
 	walkDirDetailed,
@@ -262,6 +264,46 @@ describe("chunkFile (async)", () => {
 		const text = Array(15).fill("A paragraph with enough meaningful content for testing purposes here.").join("\n\n");
 		const chunks = await chunkFile(text, "data.csv");
 		expect(chunks.length).toBeGreaterThan(0);
+	});
+});
+
+describe("directory scan timeout", () => {
+	it("defaults to no wall-clock limit and validates explicit configuration", () => {
+		expect(resolveDirectoryScanTimeoutMs({})).toBe(0);
+		expect(resolveDirectoryScanTimeoutMs({ PI_KNOWLEDGE_SCAN_TIMEOUT_MS: "0" })).toBe(0);
+		expect(resolveDirectoryScanTimeoutMs({ PI_KNOWLEDGE_SCAN_TIMEOUT_MS: "900000" })).toBe(900_000);
+		for (const value of ["-1", "1.5", "unbounded", "9007199254740992"]) {
+			expect(() => resolveDirectoryScanTimeoutMs({ PI_KNOWLEDGE_SCAN_TIMEOUT_MS: value })).toThrow(
+				"PI_KNOWLEDGE_SCAN_TIMEOUT_MS",
+			);
+		}
+	});
+
+	it("enforces an opt-in timeout while zero remains unbounded", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pk-async-timeout-"));
+		writeFileSync(join(root, "a.ts"), "export const A = true;");
+		writeFileSync(join(root, "b.ts"), "export const B = true;");
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(1_000);
+			const timed = iterateScannableFileVisitsAsync(root, createSkippedScanStats(), { timeoutMs: 100 });
+			await timed.next();
+			await timed.next();
+			vi.setSystemTime(1_101);
+			await expect(timed.next()).rejects.toThrow("configured 100ms timeout");
+
+			vi.setSystemTime(2_000);
+			const unbounded = iterateScannableFileVisitsAsync(root, createSkippedScanStats(), { timeoutMs: 0 });
+			await unbounded.next();
+			await unbounded.next();
+			vi.setSystemTime(60 * 60_000);
+			while (!(await unbounded.next()).done) {
+				// Consume the remaining visits after advancing beyond the former five-minute limit.
+			}
+		} finally {
+			vi.useRealTimers();
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

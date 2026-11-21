@@ -125,6 +125,7 @@ export interface ScanOptions {
 	includePaths?: string[];
 	excludePaths?: string[];
 	accessPolicy?: FilesystemAccessPolicy;
+	timeoutMs?: number;
 }
 
 export interface ScannedFile {
@@ -379,7 +380,28 @@ const MAX_GITIGNORE_BYTES = 1024 * 1024;
 const MAX_SCAN_ENTRIES = 1_000_000;
 const MAX_SCAN_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
 const MAX_SCAN_DEPTH = 128;
-const MAX_SCAN_DURATION_MS = 5 * 60_000;
+const DIRECTORY_SCAN_TIMEOUT_ENV = "PI_KNOWLEDGE_SCAN_TIMEOUT_MS";
+
+export function resolveDirectoryScanTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env[DIRECTORY_SCAN_TIMEOUT_ENV]?.trim();
+	if (!raw) return 0;
+	if (!/^(0|[1-9]\d*)$/.test(raw)) {
+		throw new Error(`${DIRECTORY_SCAN_TIMEOUT_ENV} must be 0 or a positive integer`);
+	}
+	const timeoutMs = Number(raw);
+	if (!Number.isSafeInteger(timeoutMs)) {
+		throw new Error(`${DIRECTORY_SCAN_TIMEOUT_ENV} must be a safe integer`);
+	}
+	return timeoutMs;
+}
+
+function directoryScanTimeoutMs(options: ScanOptions): number {
+	if (options.timeoutMs === undefined) return resolveDirectoryScanTimeoutMs();
+	if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0) {
+		throw new Error("Directory scan timeout must be 0 or a positive safe integer");
+	}
+	return options.timeoutMs;
+}
 
 function scanPathIsWithin(path: string, root: string): boolean {
 	const rel = relative(root, path);
@@ -446,6 +468,8 @@ export async function* iterateScannableFileVisitsAsync(
 	options: ScanOptions = {},
 	signal?: AbortSignal,
 ): AsyncGenerator<ScannableFile | undefined> {
+	const timeoutMs = directoryScanTimeoutMs(options);
+	const startedAt = timeoutMs === 0 ? 0 : Date.now();
 	const authorizedRoot = authorizeExistingPath(dirPath, options.accessPolicy);
 	const initialRootInfo = await lstatFile(authorizedRoot);
 	if (initialRootInfo.isSymbolicLink() || !initialRootInfo.isDirectory()) {
@@ -472,13 +496,16 @@ export async function* iterateScannableFileVisitsAsync(
 	const includePaths = normalizeScanPaths(options.includePaths);
 	const excludePaths = normalizeScanPaths(options.excludePaths);
 	const includeSuggestedText = options.includeSuggestedText === true;
-	const deadline = Date.now() + MAX_SCAN_DURATION_MS;
 	let visitedEntries = 0;
 	let totalBytes = 0;
 
 	const assertScanActive = (): void => {
 		if (signal?.aborted) throw new Error("Cancelled");
-		if (Date.now() > deadline) throw new Error(`Directory scan exceeded ${MAX_SCAN_DURATION_MS}ms`);
+		if (timeoutMs > 0 && Date.now() - startedAt > timeoutMs) {
+			throw new Error(
+				`Directory scan exceeded the configured ${timeoutMs}ms timeout; increase ${DIRECTORY_SCAN_TIMEOUT_ENV} or set it to 0 to disable the wall-clock limit`,
+			);
+		}
 	};
 
 	async function* walk(dir: string, depth: number): AsyncGenerator<ScannableFile | undefined> {
