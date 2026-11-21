@@ -508,6 +508,17 @@ export function updateKBStatus(db: Database.Database, id: string, status: Knowle
 	db.prepare("UPDATE knowledge_bases SET status = ?, updated_at = ? WHERE id = ?").run(status, Date.now(), id);
 }
 
+/**
+ * Change the status column and nothing else.
+ *
+ * `updated_at` is documented as the epoch of the last fully successful add, update or import, and it is what
+ * `knowledge_status` reads. A pass that did not complete must therefore not advance it: use this for bookkeeping-only
+ * status writes, and `updateKBStatus` when the pass actually completed.
+ */
+export function updateKBStatusOnly(db: Database.Database, id: string, status: KnowledgeBase["status"]): void {
+	db.prepare("UPDATE knowledge_bases SET status = ? WHERE id = ?").run(status, id);
+}
+
 export function updateKBCounts(db: Database.Database, id: string, chunkCount: number, fileCount: number): void {
 	db.prepare("UPDATE knowledge_bases SET chunk_count = ?, file_count = ?, updated_at = ? WHERE id = ?").run(
 		chunkCount,
@@ -516,6 +527,18 @@ export function updateKBCounts(db: Database.Database, id: string, chunkCount: nu
 		id,
 	);
 }
+
+/**
+ * Change the count columns and nothing else.
+ *
+ * Progress writes inside an indexing pass, and the rollback of a failed pass, must not advance `updated_at`: that
+ * column is the epoch of the last fully successful add, update or import. Passes that complete still call
+ * `updateKBCounts` on their way to a `ready` status write, which is what legitimately refreshes the timestamp.
+ */
+export function updateKBCountsOnly(db: Database.Database, id: string, chunkCount: number, fileCount: number): void {
+	db.prepare("UPDATE knowledge_bases SET chunk_count = ?, file_count = ? WHERE id = ?").run(chunkCount, fileCount, id);
+}
+
 export function markKBIndexed(db: Database.Database, id: string): void {
 	const now = Date.now();
 	db.prepare("UPDATE knowledge_bases SET indexed_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);

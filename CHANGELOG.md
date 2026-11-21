@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Stopped a failed knowledge-base update from refreshing `updated_at`, which is documented as the epoch of the last fully successful add, update, or import. The pass-start `indexing` marker, the per-batch progress write inside the scan loop, the rollback of inserted chunks, and the terminal failure status write now update their target columns only, so a pass that never completed no longer reports a fresh index. Successful passes still refresh `updated_at` unchanged.
+
 ## [0.16.1] - 2026-11-21
 
 ### Fixed

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as EmbeddingProvider from "../../src/embedding/provider.ts";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import type * as ModelWorkerClient from "../../src/model-worker-client.ts";
@@ -29,6 +30,12 @@ import {
 const documentWorkerMock = vi.hoisted(() => ({
 	extractDocument: vi.fn(),
 }));
+// The real embedding call is replaced only while a test installs an implementation, so every other case in this file
+// keeps embedding through the local model. The injected failures below are plain Errors on purpose: this file must not
+// depend on how a failure is later classified.
+const embeddingMock = vi.hoisted(() => ({
+	impl: null as null | ((texts: string[]) => Promise<Float32Array[]>),
+}));
 const safeFetchMock = vi.hoisted(() => ({
 	fetchPublicText: vi.fn(),
 }));
@@ -43,6 +50,15 @@ vi.mock("../../src/network/safe-fetch.ts", async (importOriginal) => ({
 	fetchPublicText: safeFetchMock.fetchPublicText,
 }));
 
+vi.mock("../../src/embedding/provider.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof EmbeddingProvider>();
+	return {
+		...actual,
+		embedValidatedDocuments: async (texts: string[], signal?: AbortSignal) =>
+			embeddingMock.impl ? embeddingMock.impl(texts) : actual.embedValidatedDocuments(texts, signal),
+	};
+});
+
 const TEST_DIR = "/tmp/pk-test-engine";
 
 describe("KnowledgeEngine", () => {
@@ -54,9 +70,11 @@ describe("KnowledgeEngine", () => {
 		await engine.initialize(TEST_DIR);
 		safeFetchMock.fetchPublicText.mockReset();
 		documentWorkerMock.extractDocument.mockReset();
+		embeddingMock.impl = null;
 	});
 
 	afterEach(async () => {
+		embeddingMock.impl = null;
 		vi.unstubAllGlobals();
 		vi.unstubAllEnvs();
 		await engine.dispose();
@@ -968,6 +986,187 @@ describe("KnowledgeEngine", () => {
 				expect(diagnostics?.orphan_files).toEqual([]);
 				expect(diagnostics?.indexed_files).toBe(1);
 			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	describe("update freshness", () => {
+		// updated_at is documented as the epoch of the last fully successful add, update or import. Every case below
+		// drives a real update pass to a real failure, so the assertion is about the shipped write path rather than
+		// about an error shape assembled by the test.
+		const vectorDim = 8;
+
+		function fakeVectors(texts: string[]): Float32Array[] {
+			return texts.map((text, index) => {
+				const vector = new Float32Array(vectorDim);
+				vector[index % vectorDim] = 1;
+				vector[(index + 1) % vectorDim] = text.length / 1000;
+				return vector;
+			});
+		}
+
+		function makeFreshnessProject(prefix: string, files: number): string {
+			const projectDir = mkdtempSync(join(tmpdir(), prefix));
+			for (let i = 0; i < files; i++) {
+				writeFileSync(
+					join(projectDir, `freshness-${i}.txt`),
+					`Freshness document ${i} about CacheEvictionPolicy and the eviction watermark revision ${i}. `.repeat(3),
+				);
+			}
+			return projectDir;
+		}
+
+		function rewriteFreshnessProject(projectDir: string, files: number): void {
+			for (let i = 0; i < files; i++) {
+				writeFileSync(
+					join(projectDir, `freshness-${i}.txt`),
+					`Rewritten freshness document ${i} about CacheEvictionPolicy revision ${i}.${"z".repeat(120)}`,
+				);
+			}
+		}
+
+		// A stepping clock, so "unchanged" is a real assertion. With a mocked embedding call an add and a following
+		// failed update can land in the same millisecond, and then updated_at would compare equal even when the pass
+		// did refresh it. Each call advances by a second, which makes any write to the column observable.
+		function steppingClock(start: number, step = 1000): { now: () => number; reset: () => void } {
+			let clock = start;
+			return {
+				now() {
+					clock += step;
+					return clock;
+				},
+				reset() {
+					clock = start;
+				},
+			};
+		}
+
+		function rowFor(name: string): { updated_at: number; indexed_at: number; status: string } | undefined {
+			const kb = engine.list().find((item) => item.name === name);
+			if (!kb) return undefined;
+			return { updated_at: kb.updated_at, indexed_at: kb.indexed_at, status: kb.status };
+		}
+
+		function storedBatchCount(name: string): number {
+			const db = openDatabase(TEST_DIR);
+			try {
+				const kb = engine.list().find((item) => item.name === name);
+				const job = kb ? getIndexingJob(db, kb.id) : undefined;
+				return job?.added_chunks ?? 0;
+			} finally {
+				db.close();
+			}
+		}
+
+		it("leaves updated_at untouched when an update fails before storing any batch", async () => {
+			const projectDir = makeFreshnessProject("pk-fresh-past-", 3);
+			const clock = steppingClock(1_700_000_000_000);
+			const nowSpy = vi.spyOn(Date, "now").mockImplementation(clock.now);
+			try {
+				embeddingMock.impl = async (texts) => fakeVectors(texts);
+				await engine.add(projectDir, "Fail Before Batch");
+				const before = rowFor("Fail Before Batch");
+				expect(before?.status).toBe("ready");
+
+				rewriteFreshnessProject(projectDir, 3);
+				const failure = new Error("embedding endpoint unavailable");
+				embeddingMock.impl = async () => {
+					throw failure;
+				};
+
+				await expect(engine.update("Fail Before Batch")).rejects.toThrow("embedding endpoint unavailable");
+
+				const after = rowFor("Fail Before Batch");
+				expect(after?.status).toBe("error");
+				expect(after?.updated_at).toBe(before?.updated_at);
+				expect(after?.indexed_at).toBe(before?.indexed_at);
+				// precondition: nothing was stored, so the only writes this pass made are the bookkeeping ones
+				expect(storedBatchCount("Fail Before Batch")).toBe(0);
+				// precondition: the clock really moved, otherwise the equality above is vacuous
+				expect(before?.updated_at).toBeGreaterThan(1_700_000_000_000);
+			} finally {
+				nowSpy.mockRestore();
+				embeddingMock.impl = null;
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("leaves updated_at untouched when an update fails after a batch was already stored", async () => {
+			const projectDir = makeFreshnessProject("pk-fresh-mid-", 6);
+			const clock = steppingClock(1_700_000_000_000);
+			const nowSpy = vi.spyOn(Date, "now").mockImplementation(clock.now);
+			try {
+				embeddingMock.impl = async (texts) => fakeVectors(texts);
+				await engine.add(projectDir, "Fail After Batch");
+				const before = rowFor("Fail After Batch");
+				expect(before?.status).toBe("ready");
+
+				rewriteFreshnessProject(projectDir, 6);
+				// one chunk per request, so the pass spans several batches and the failure lands mid-pipeline
+				vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "1");
+				let batches = 0;
+				embeddingMock.impl = async (texts) => {
+					batches += 1;
+					if (batches > 1) throw new Error("embedding stream reset");
+					return fakeVectors(texts);
+				};
+
+				let progressObserved = false;
+				let failure: unknown;
+				try {
+					await engine.update("Fail After Batch", (message) => {
+						if (message.startsWith("Stored update batch")) progressObserved = true;
+					});
+					throw new Error("update unexpectedly succeeded");
+				} catch (error) {
+					failure = error;
+				}
+
+				// L-4: a progress-keyed test must fail loudly rather than certify nothing
+				if (!progressObserved) throw new Error("progress event never observed");
+				expect((failure as Error).message).toBe("embedding stream reset");
+				// precondition: a batch really was stored, which is the write that used to move updated_at
+				expect(storedBatchCount("Fail After Batch")).toBeGreaterThan(0);
+
+				const after = rowFor("Fail After Batch");
+				expect(after?.status).toBe("error");
+				expect(after?.updated_at).toBe(before?.updated_at);
+				expect(after?.indexed_at).toBe(before?.indexed_at);
+				// precondition: the clock really moved between the successful add and the failed update
+				expect(before?.updated_at).toBeGreaterThan(1_700_000_000_000);
+			} finally {
+				// in the finally, so the batch-size stub is released even when an assertion or the L-4 guard above throws
+				vi.unstubAllEnvs();
+				nowSpy.mockRestore();
+				embeddingMock.impl = null;
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("still refreshes updated_at when an update completes", async () => {
+			const projectDir = makeFreshnessProject("pk-fresh-ok-", 3);
+			try {
+				embeddingMock.impl = async (texts) => fakeVectors(texts);
+				await engine.add(projectDir, "Successful Update");
+				const before = rowFor("Successful Update");
+
+				rewriteFreshnessProject(projectDir, 3);
+				// a stepping clock, so a legitimately refreshed timestamp is distinguishable from the stored one
+				const clock = steppingClock(before?.updated_at ?? 0, 60_000);
+				const nowSpy = vi.spyOn(Date, "now").mockImplementation(clock.now);
+				try {
+					await engine.update("Successful Update");
+				} finally {
+					nowSpy.mockRestore();
+				}
+
+				const after = rowFor("Successful Update");
+				expect(after?.status).toBe("ready");
+				expect(after?.updated_at).toBeGreaterThan(before?.updated_at ?? 0);
+				expect(after?.indexed_at).toBeGreaterThan(before?.indexed_at ?? 0);
+			} finally {
+				embeddingMock.impl = null;
 				rmSync(projectDir, { recursive: true, force: true });
 			}
 		});

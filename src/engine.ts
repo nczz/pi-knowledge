@@ -124,9 +124,11 @@ import {
 	startIndexingJob,
 	updateIndexingJob,
 	updateKBCounts,
+	updateKBCountsOnly,
 	updateKBEmbeddingMetadata,
 	updateKBSourceOptions,
 	updateKBStatus,
+	updateKBStatusOnly,
 } from "./storage/sqlite.ts";
 
 export type SearchMode =
@@ -1822,7 +1824,9 @@ export class KnowledgeEngine {
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options), access);
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
-		updateKBStatus(this.db, kb.id, "indexing");
+		// status bookkeeping only: updated_at must keep pointing at the last fully successful pass, so that an update
+		// which then fails cannot have advanced the freshness timestamp merely by starting
+		updateKBStatusOnly(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
 		const compatibility = inspectEmbeddingCompatibility(
@@ -1925,7 +1929,8 @@ export class KnowledgeEngine {
 				addedVectorCount += newVectors.length;
 				insertedChunkIds.push(...insertChunks(this.db, kb.id, batch));
 				addedCount += batch.length;
-				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+				// progress bookkeeping: an unfinished pass must not refresh updated_at, which means "last fully successful"
+				updateKBCountsOnly(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 				const storedMessage = `Stored update batch: +${addedCount} chunks, =${unchanged} unchanged`;
 				updateIndexingJob(this.db, kb.id, {
 					phase: "storing",
@@ -2170,9 +2175,9 @@ export class KnowledgeEngine {
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			if (insertedChunkIds.length > 0) {
 				deleteChunksByIds(this.db, insertedChunkIds);
-				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+				updateKBCountsOnly(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 			}
-			updateKBStatus(this.db, kb.id, isCancellationError(e) ? kb.status : "error");
+			updateKBStatusOnly(this.db, kb.id, isCancellationError(e) ? kb.status : "error");
 			finishIndexingJob(
 				this.db,
 				kb.id,

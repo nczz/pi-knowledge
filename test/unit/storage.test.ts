@@ -12,8 +12,11 @@ import {
 	openDatabase,
 	resolveHostKnowledgeDir,
 	startIndexingJob,
+	updateKBCounts,
+	updateKBCountsOnly,
 	updateKBEmbeddingMetadata,
 	updateKBStatus,
+	updateKBStatusOnly,
 } from "../../src/storage/sqlite.ts";
 
 describe("knowledge storage path", () => {
@@ -136,6 +139,90 @@ describe("knowledge base embedding metadata", () => {
 			const updated = getKB(db, kb.id);
 			expect(updated?.indexed_at).toBe(200);
 			expect(updated?.updated_at).toBe(300);
+		} finally {
+			db.close();
+			now.mockRestore();
+		}
+	});
+
+	it("writes only the status column from updateKBStatusOnly", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-status-only-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "status-only", source_type: "text" });
+			currentTime = 200;
+			markKBIndexed(db, kb.id);
+			currentTime = 300;
+			const before = getKB(db, kb.id);
+
+			// the freshness epoch must survive a bookkeeping status write, while the status itself still changes
+			currentTime = 400;
+			updateKBStatusOnly(db, kb.id, "indexing");
+
+			const after = getKB(db, kb.id);
+			expect(after?.status).toBe("indexing");
+			expect(after?.updated_at).toBe(before?.updated_at);
+			expect(after?.indexed_at).toBe(before?.indexed_at);
+			expect(after?.chunk_count).toBe(before?.chunk_count);
+			expect(after?.file_count).toBe(before?.file_count);
+		} finally {
+			db.close();
+			now.mockRestore();
+		}
+	});
+
+	it("writes only the count columns from updateKBCountsOnly", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-counts-only-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "counts-only", source_type: "text" });
+			currentTime = 200;
+			markKBIndexed(db, kb.id);
+			currentTime = 300;
+			const before = getKB(db, kb.id);
+
+			currentTime = 400;
+			updateKBCountsOnly(db, kb.id, 7, 3);
+
+			const after = getKB(db, kb.id);
+			expect(after?.chunk_count).toBe(7);
+			expect(after?.file_count).toBe(3);
+			expect(after?.updated_at).toBe(before?.updated_at);
+			expect(after?.indexed_at).toBe(before?.indexed_at);
+			expect(after?.status).toBe(before?.status);
+		} finally {
+			db.close();
+			now.mockRestore();
+		}
+	});
+
+	it("still refreshes updated_at from updateKBStatus and updateKBCounts", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-refreshing-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "refreshing", source_type: "text" });
+			const before = getKB(db, kb.id);
+
+			currentTime = 500;
+			updateKBStatus(db, kb.id, "ready");
+			expect(getKB(db, kb.id)?.updated_at).toBe(500);
+
+			currentTime = 700;
+			updateKBCounts(db, kb.id, 2, 1);
+			expect(getKB(db, kb.id)?.updated_at).toBe(700);
+			expect(getKB(db, kb.id)?.indexed_at).toBe(before?.indexed_at);
 		} finally {
 			db.close();
 			now.mockRestore();
