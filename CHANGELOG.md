@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-21
+
+### Fixed
+- Removed the fixed five-minute asynchronous directory-scan deadline so progressing large plan/add/update, diagnostics, and watcher traversals can complete; operators can opt into an explicit limit with `PI_KNOWLEDGE_SCAN_TIMEOUT_MS` (#26).
+- Fixed Windows profile startup by passing ACL-hardening paths to PowerShell outside `-Command` argv, preserving clean JSON output, surfacing bounded stderr diagnostics, and handling expected atomic manifest and shutdown-file races without weakening ACL checks (#27).
+
 ## [0.16.0] - 2026-11-19
 
 ### Added

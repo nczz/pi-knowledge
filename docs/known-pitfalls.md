@@ -344,6 +344,19 @@ Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能�
 - public tool wrapper 即使只是 show/list/symbol lookup，也要在 runtime initialization 前後觀察 AbortSignal。今天查詢很快不代表未來 symbol table 或 DB startup 一定便宜。
 
 
+## 大型目錄不能用固定 wall-clock 時間判定失控
+
+Directory scan的安全邊界應限制entry數、總bytes、深度、單檔大小、path access與pending work，並持續觀察`AbortSignal`。固定五分鐘之類的總經過時間會把仍持續進展的慢磁碟、Windows Defender掃描或大型repo誤判為失控，而且無法中斷已卡在底層filesystem call的單次`await`。
+
+非同步directory scan預設不設wall-clock timeout。需要operator policy時使用`PI_KNOWLEDGE_SCAN_TIMEOUT_MS`；正整數代表每次traversal的毫秒上限，`0`停用。這是daemon runtime設定，不是KB source option或tool參數；修改後需重啟selected profile daemon。Planning、add/update、diagnostics與watcher必須共用同一scanner語意，不能各自藏一個timeout常數。
+
+## PowerShell `-Command`後不能假設trailing argv會進入`$args`
+
+Windows PowerShell把`-Command`後的tokens當成command text；Node `execFileSync(..., [\"-Command\", script, path])`不會把`path`綁到`$args[0]`。Path可能成為額外expression污染stdout，而`$args[0]`仍是`$null`，導致ACL hardening在profile resolution階段失敗。
+
+安全路徑應讓`-Command`後只保留script，並透過dedicated child environment variable或其他不需shell quoting的channel傳入path。不得把path直接插入PowerShell source，也不得為了相容性跳過ACL hardening。stderr需pipe並以bounded訊息回報；包含空白、apostrophe與Unicode的路徑，以及重複hardening，必須在真實Windows PowerShell上驗證。讀取會被atomic replace的private runtime file時，先完成較慢的PowerShell ACL驗證，再建立`lstat`／`open` identity window；反向順序會讓正常daemon manifest更新在ACL subprocess期間被誤判成path replacement。Shutdown刪除manifest／lock後，reader若收到錯誤只能在path已確認不存在時視為正常缺席；path仍存在的ACL或parse錯誤必須fail closed。
+Ancestor ACL的danger mask只能由可替換既有path component的primitive rights組成，例如`Delete`、`DeleteSubdirectoriesAndFiles`、`ChangePermissions`與`TakeOwnership`。不要直接用`Modify`或`FullControl`這類composite enum做bitwise match；它們包含`Synchronize`等共用bit，會把標準Windows home ACL中的execute-only capability ACE誤判為可寫／可刪權限。
+
 ## onnxruntime exit crash (macOS arm64)
 
 **症狀**: Pi 結束時 `libc++abi: terminating due to uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument`
