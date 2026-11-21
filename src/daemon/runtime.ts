@@ -90,7 +90,7 @@ export function readDaemonManifest(profile: KnowledgeProfile): DaemonManifest | 
 		}
 		return manifest;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if (!existsSync(path) || (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
 }
@@ -103,7 +103,7 @@ export function readDaemonOwner(profile: KnowledgeProfile): DaemonOwnerRecord | 
 		if (owner.profile_id !== profile.id) throw new Error("Daemon lock belongs to a different knowledge profile");
 		return owner;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		if (!existsSync(path) || (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
 }

@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveKnowledgeProfile, selectedProfileName } from "../../src/profiles.ts";
@@ -7,7 +7,7 @@ import { resolveKnowledgeProfile, selectedProfileName } from "../../src/profiles
 const tempDirs: string[] = [];
 
 function makeHome(): string {
-	const home = mkdtempSync(join(tmpdir(), "pk-profile-"));
+	const home = mkdtempSync(join(process.platform === "win32" ? homedir() : tmpdir(), "pk-profile-"));
 	tempDirs.push(home);
 	return home;
 }
@@ -16,7 +16,7 @@ afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("knowledge profiles", () => {
+describe("knowledge profiles", { timeout: process.platform === "win32" ? 20_000 : 5_000 }, () => {
 	it("uses one default profile unless a named profile is selected", () => {
 		const homeDir = makeHome();
 		const env = {};
@@ -88,7 +88,7 @@ describe("knowledge profiles", () => {
 		expect(profile.storageDir).toBe(realpathSync.native(join(homeDir, "pi-host", "knowledge")));
 	});
 
-	it("rejects a registry whose permissions allow another user to read it", () => {
+	it.skipIf(process.platform === "win32")("rejects a registry whose permissions allow another user to read it", () => {
 		const homeDir = makeHome();
 		const profile = resolveKnowledgeProfile("default", { env: {}, homeDir });
 		chmodSync(profile.registryPath, 0o644);

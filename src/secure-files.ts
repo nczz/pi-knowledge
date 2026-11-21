@@ -134,11 +134,10 @@ export function hardenPrivateFile(path: string, label: string): void {
 
 export function readPrivateJson(path: string, label: string): unknown {
 	assertOwnedDirectory(dirname(path));
+	if (process.platform === "win32") assertWindowsPathPrivate(path);
 	const direct = lstatSync(path);
 	if (direct.isSymbolicLink() || !direct.isFile()) throw new Error(`Invalid ${label}: ${path}`);
-	if (process.platform === "win32") {
-		assertWindowsPathPrivate(path);
-	} else {
+	if (process.platform !== "win32") {
 		if (typeof process.getuid === "function" && direct.uid !== process.getuid()) {
 			throw new Error(`${label} is not owned by the current user: ${path}`);
 		}
