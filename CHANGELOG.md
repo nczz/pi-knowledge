@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.16.2] - 2026-11-22
+
+### Fixed
+- Kept default Pi/OMP session startup cold until a knowledge tool or opt-in auto-injection is used; `PI_KNOWLEDGE_WATCH=true` remains the explicit eager daemon/watcher path (#28).
+- Replaced whole-descriptor Windows `Set-Acl` hardening with idempotent owner+DACL-only .NET security updates that preserve SACL/group data, avoid `SeSecurityPrivilege`, verify postconditions, and combine path/ancestor checks in one PowerShell process (#29).
+- Made updates stage chunks/symbols and publish an immutable vector generation with one SQLite commit, so a failed update preserves the prior searchable generation and does not advance successful-index timestamps; failed jobs remain visible in status/doctor (supersedes #30).
+- Validated `PI_KNOWLEDGE_SCAN_TIMEOUT_MS` at daemon startup and clarified that an explicit limit covers the indexing pass between traversal yields, including completed entry/file counts in timeout errors (#26).
+- Filtered native watcher events through the scannable snapshot even during the initial baseline, preventing suggested-excluded Windows changes from scheduling unnecessary updates.
 
 ## [0.16.1] - 2026-11-21
 

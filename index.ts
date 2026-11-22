@@ -318,8 +318,9 @@ async function configureClient(nodePath: string | undefined, signal?: AbortSigna
 
 function registerKnowledgeExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
+		if (!WATCH_ENABLED) return;
 		const client = await ensureClient();
-		if (WATCH_ENABLED) await client.enableWatchers();
+		await client.enableWatchers();
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -349,11 +350,9 @@ function registerKnowledgeExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("before_agent_start", async (event) => {
-		const client = await ensureClient();
-		const kbs = await client.list();
-		if (kbs.length === 0) return undefined;
-		const guidance = `${kbs.length} knowledge base${kbs.length === 1 ? " is" : "s are"} available. Use knowledge_show to inspect their untrusted labels, knowledge_symbol_search for exact symbols/config keys/env vars/routes/headings, then knowledge_search for broader domain or implementation context.`;
+	pi.on("before_agent_start", (event) => {
+		const guidance =
+			"Local knowledge tools are available on demand. Use knowledge_show to inspect untrusted labels, knowledge_symbol_search for exact symbols/config keys/env vars/routes/headings, then knowledge_search for broader domain or implementation context.";
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
 		};

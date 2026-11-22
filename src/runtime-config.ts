@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { hardenPrivateFile, readPrivateJson, writeJsonAtomic } from "./secure-files.ts";
+import { readPrivateJson, writeJsonAtomic } from "./secure-files.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 export type RuntimeConfig = {
@@ -23,8 +23,7 @@ function isRuntimeConfig(value: unknown): value is RuntimeConfig {
 export function readRuntimeConfig(knowledgeDir = getDefaultKnowledgeDir()): RuntimeConfig {
 	const configPath = runtimeConfigPath(knowledgeDir);
 	if (!existsSync(configPath)) return {};
-	hardenPrivateFile(configPath, "pi-knowledge runtime config");
-	const parsed = readPrivateJson(configPath, "pi-knowledge runtime config");
+	const parsed = readPrivateJson(configPath, "pi-knowledge runtime config", { harden: true });
 	if (!isRuntimeConfig(parsed)) throw new Error(`Invalid pi-knowledge runtime config: ${configPath}`);
 	return parsed;
 }

@@ -37,6 +37,7 @@ function knowledgeBase(overrides: Partial<KnowledgeBase> = {}): KnowledgeBase {
 		embedding_model: "test",
 		embedding_signature: null,
 		embedding_dimension: null,
+		vector_file: null,
 		status: "ready",
 		...overrides,
 	};

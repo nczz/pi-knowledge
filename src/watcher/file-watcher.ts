@@ -1,4 +1,4 @@
-import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, realpathSync, statSync, watch } from "node:fs";
 import { resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createSkippedScanStats, iterateScannableFileVisitsAsync, type ScanOptions } from "../indexer/chunker.ts";
@@ -12,7 +12,6 @@ const scanControllers = new Map<string, AbortController>();
 const scanGenerations = new Map<string, object>();
 const scanRequested = new Set<string>();
 const eventPaths = new Map<string, Set<string | undefined>>();
-const baselineEvents = new Set<string>();
 const baselineRootStamps = new Map<string, string | undefined>();
 let scanPermit = Promise.resolve();
 const generations = new Map<string, object>();
@@ -136,12 +135,7 @@ function requestScan(
 			const eventRelevant =
 				events !== undefined &&
 				[...events].some((path) => eventTouchesSnapshot(path, previous) || eventTouchesSnapshot(path, next));
-			if (
-				baselineEvents.delete(kbId) ||
-				baselineChanged ||
-				(previous && snapshotsDiffer(previous, next)) ||
-				eventRelevant
-			) {
+			if (baselineChanged || (previous && snapshotsDiffer(previous, next)) || eventRelevant) {
 				scheduleUpdate(kbId, onUpdate);
 			}
 		} while (scanRequested.has(kbId));
@@ -188,16 +182,16 @@ export function startWatcher(
 	generations.set(kbId, generation);
 	const initialScan = startPoller(kbId, generation, dirPath, onUpdate, options);
 	try {
+		const eventRoot = realpathSync.native(dirPath);
 		const watcher = watch(dirPath, { recursive: true }, (_event, filename) => {
 			if (generations.get(kbId) !== generation) return;
-			if (!snapshots.has(kbId)) baselineEvents.add(kbId);
 			const paths = eventPaths.get(kbId) ?? new Set<string | undefined>();
 			if (!paths.has(undefined)) {
 				if (filename === null || paths.size >= MAX_EVENT_PATHS) {
 					paths.clear();
 					paths.add(undefined);
 				} else {
-					paths.add(resolve(dirPath, filename.toString()));
+					paths.add(resolve(eventRoot, filename.toString()));
 				}
 			}
 			eventPaths.set(kbId, paths);
@@ -234,7 +228,6 @@ export function stopWatcher(kbId: string): void {
 	}
 	eventPaths.delete(kbId);
 	baselineRootStamps.delete(kbId);
-	baselineEvents.delete(kbId);
 }
 
 export function stopAllWatchers(): void {

@@ -150,9 +150,9 @@ Root `index.ts` 保持 startup-light：
 
 - 不再 runtime import `engine.ts`、SQLite 或 watcher。
 - lazy import daemon client/profile resolver。
-- session start 執行 `ensure`；所有 engine-backed tool、auto-inject、before-agent-start 透過 daemon client。唯一例外是上述 `knowledge_configure` no-runtime bootstrap，它只驗證/持久化明確 Node path並立即重試 ensure，不開 DB或 engine。
-- session shutdown 等待 in-flight ensure 完成後清理 client reference，但不停止 daemon。
-- 不提供 local engine fallback。
+- 預設 session start與 before-agent-start不解析 profile、不執行 ACL檢查、不啟動 daemon；before-agent-start只注入靜態工具指引。
+- `PI_KNOWLEDGE_WATCH=true`在 session start eager ensure並 monotonic enable watcher；所有 engine-backed tool與 opt-in auto-inject在第一次使用時 lazy ensure。唯一例外是上述 `knowledge_configure` no-runtime bootstrap，它只驗證/持久化明確 Node path並立即重試 ensure，不開 DB或 engine。
+- session shutdown 等待可能的 in-flight ensure 完成後清理 client reference，但不停止 daemon。
 
 Public tool descriptions、approval、confirmation、search miss formatting與結構化 `details` 必須保持相容。
 
@@ -205,6 +205,7 @@ Daemon 在 startup reconcile，以及 add/update/remove/clear/import 成功後�
 - `file_count`、`chunk_count`是最近一次成功持久化的 KB計數。`updated_at`是最近一次完整成功 add/update/import 的 Unix epoch毫秒；indexing、error、cancel或其他 row bookkeeping 不得推進此時間。它仍不是 per-file freshness watermark。
 - 既有 v5 database 升級時，daemon 依序以最近保留的成功 indexing job、現存 chunk 的最晚 `indexed_at`、最後 `0` 做保守回填；不得用會被 status bookkeeping 推進的舊 row `updated_at`。`0` 表示沒有可證明的成功時間，consumer 應保持 silent/fail-open。
 - `status` 的封閉集合為 `ready | indexing | error | stale`。`generated_at`是 daemon產生本次 point-in-time snapshot的 Unix epoch毫秒。
+- source-backed update已有 published generation時，KB維持原本 `ready`/`stale`可搜尋狀態；running/failed/cancelled由 `indexing_jobs`表達。更新使用 staging tables與不可變 vector generation，最後以單一 SQLite transaction切換 chunks/symbols/vector pointer/metadata/timestamps。失敗保留舊 generation與 `updated_at`/`indexed_at`，status/doctor另揭露 failed update。只有沒有可用 published generation或其一致性無法保證時才使用 `indexing`/`error`。
 - clear 保留檔案並寫入空 `kbs`。
 - snapshot 與 temp file 都使用 `0600`；tmp + fsync + rename，consumer 永遠只看到完整舊版或完整新版。
 - snapshot error 不回滾也不改變已成功的 mutation；daemon 保存最近 snapshot error供 status/manifest診斷並寫不含敏感 path的 stderr。Watcher背景更新也必須同步更新或清除 manifest診斷。

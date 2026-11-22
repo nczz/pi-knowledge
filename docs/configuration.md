@@ -76,10 +76,10 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PI_KNOWLEDGE_WATCH` | unset | Set to `true` to start file watchers for directory KBs. The polling fallback remains available when native `fs.watch` fails. |
-| `PI_KNOWLEDGE_AUTO_INJECT` | unset | Set to `true` to auto-search KB context before model calls. This is opt-in. |
+| `PI_KNOWLEDGE_WATCH` | unset | Set to `true` to connect to the selected daemon at session start and enable directory KB watchers. Without this flag, default Pi/OMP session startup remains cold until a tool or auto-injection needs the daemon. The polling fallback remains available when native `fs.watch` fails. |
+| `PI_KNOWLEDGE_AUTO_INJECT` | unset | Set to `true` to auto-search KB context before model calls. This is opt-in and lazily connects to the daemon on the first eligible context event. |
 | `PI_KNOWLEDGE_STALE_INDEXING_MS` | built-in stale threshold | Override the stale indexing threshold used by diagnostics and `knowledge_doctor`. |
-| `PI_KNOWLEDGE_SCAN_TIMEOUT_MS` | `0` (disabled) | Optional wall-clock limit in milliseconds for each asynchronous directory traversal used by plan/add/update, live diagnostics, and watcher snapshots. `0` allows progressing large scans to run without an elapsed-time failure while existing entry-count, byte, depth, file-size, access, and cancellation bounds remain active. Restart the selected profile daemon after changing this setting. |
+| `PI_KNOWLEDGE_SCAN_TIMEOUT_MS` | `0` (disabled) | Optional wall-clock limit in milliseconds for each asynchronous directory traversal pass used by plan/add/update, live diagnostics, and watcher snapshots. Caller work between yielded files also counts, so update extraction/chunking/embedding/storage can consume the budget. Timeout errors report visited entries and yielded files. Invalid values fail daemon startup. `0` keeps progressing large scans unbounded while entry-count, byte, depth, file-size, access, and cancellation bounds remain active. Restart the selected profile daemon after changing this setting. |
 | `PI_KNOWLEDGE_SEARCH_PROFILE` | `auto` | Select the default search tuning profile. Values: `auto`, `balanced`, `low_token`, `precision`, `recall`, `long_context`, `code`, `docs`. Tool `profile` parameters override this. |
 | `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT` | profile default | Override the result limit used only when `knowledge_search` does not pass `limit`. Clamped to 1-50. |
 | `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH` | profile default | Override returned snippet length. Clamped to 80-4000 characters. |
@@ -154,7 +154,8 @@ omp install npm:pi-knowledge
 Compatibility guarantees:
 
 - The packaged `extension.js` loads built `dist/index.js` when present and falls back to source `index.ts` for local development.
-- Runtime modules are imported lazily, after the extension is actually used.
+- Default session startup and `before_agent_start` remain daemon-free; tools and opt-in auto-injection connect lazily, while `PI_KNOWLEDGE_WATCH=true` is the explicit eager path.
+- Windows profile/runtime hardening uses Windows PowerShell 5.1 only as a process host for typed .NET owner+DACL operations. It preserves group/SACL data, does not request `SeSecurityPrivilege`, verifies path and ancestor trust fail-closed, and never interpolates paths into PowerShell source.
 - Local embedding/reranking models and PDF/DOCX parsers run in an isolated Node worker, not in the Pi or OMP TUI process. Node IPC is preferred; stdin/stdout JSONL transport is used automatically when host IPC is unavailable.
 - Native SQLite loading includes a fallback for hoisted plugin dependency layouts.
 - OMP path resolution can use `OMP_KNOWLEDGE_DIR`, `OMP_CODING_AGENT_DIR`, and `OMP_PROFILE`.

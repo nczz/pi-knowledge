@@ -158,10 +158,10 @@ interface ToolDefinition<TParams extends TSchema> {
 
 | Event | 用途 | pi-knowledge 使用 |
 |-------|------|------------------|
-| `session_start` | 初始化 | ✅ ensure selected profile daemon；必要時 monotonic enable watcher |
-| `session_shutdown` | Cleanup | ✅ 釋放 extension client/session state；不停止 daemon、不關 DB/watcher/model worker |
-| `before_agent_start` | 修改 system prompt | ✅ 從 daemon 注入 KB metadata |
-| `context` | 修改 messages | ✅ 透過 daemon auto-inject search results (opt-in) |
+| `session_start` | 初始化 | ✅ 預設 no-op；只有 `PI_KNOWLEDGE_WATCH=true` 才 eager ensure daemon並 monotonic enable watcher |
+| `session_shutdown` | Cleanup | ✅ 等待可能的 in-flight ensure並釋放 extension client/session state；不停止 daemon、不關 DB/watcher/model worker |
+| `before_agent_start` | 修改 system prompt | ✅ 只注入靜態工具指引，不讀 profile或啟動 daemon |
+| `context` | 修改 messages | ✅ opt-in auto-inject第一次需要檢索時 lazy ensure daemon |
 | `tool_call` | 攔截 | ❌ 不需要 |
 | `input` | 攔截輸入 | ❌ 不需要 |
 
@@ -212,7 +212,7 @@ export function loadClipboardNative() {
 1. **入口**: default export ExtensionFactory；root `index.ts`保持 startup-light
 2. **Tool 註冊**: registerTool + TypeBox schema；同一份 public tool definitions也供 MCP使用
 3. **State ownership**: production extension只持有 daemon client；SQLite、vectors、watchers、model/document worker與 `coverage.json`都由 selected profile daemon擁有
-4. **Lifecycle**: session_start ensure daemon → before_agent_start/context讀取狀態 → session_shutdown只釋放 client state
+4. **Lifecycle**: 預設 session_start/before_agent_start保持 cold；tool或 opt-in context第一次使用時 lazy ensure daemon，watch=true才 eager ensure；session_shutdown只釋放 client state
 5. **進度/取消**: onUpdate與 AbortSignal跨 authenticated daemon RPC轉送
 6. **Background work**: watcher與 indexing job state在 daemon，不掛在單一 Pi session
 7. **Model lifecycle**: local models只在 daemon擁有的隔離 worker載入；Pi TUI與 MCP adapter都不 import `onnxruntime-node`

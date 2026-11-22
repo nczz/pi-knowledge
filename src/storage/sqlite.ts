@@ -21,6 +21,7 @@ export interface KnowledgeBase {
 	embedding_model: string;
 	embedding_signature: string | null;
 	embedding_dimension: number | null;
+	vector_file: string | null;
 	status: "ready" | "indexing" | "error" | "stale";
 }
 
@@ -78,8 +79,55 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const ITERATION_BATCH_SIZE = 500;
+
+const UPDATE_STAGING_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS update_staged_chunks (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_tokenized TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL DEFAULT 'text',
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_update_staged_chunks_kb_id ON update_staged_chunks(kb_id);
+
+CREATE TABLE IF NOT EXISTS update_staged_symbols (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL DEFAULT 'text',
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  container_name TEXT,
+  signature TEXT,
+  text TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_update_staged_symbols_kb_id ON update_staged_symbols(kb_id);
+
+CREATE TABLE IF NOT EXISTS update_removed_chunks (
+  kb_id TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  PRIMARY KEY (kb_id, chunk_id),
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+  FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+`;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -101,6 +149,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   embedding_model TEXT NOT NULL DEFAULT 'multilingual-e5-small',
   embedding_signature TEXT,
   embedding_dimension INTEGER,
+  vector_file TEXT,
   status TEXT NOT NULL DEFAULT 'ready'
 );
 
@@ -164,6 +213,8 @@ CREATE INDEX IF NOT EXISTS idx_symbols_kb_name ON symbols(kb_id, normalized_name
 CREATE INDEX IF NOT EXISTS idx_symbols_kb_kind ON symbols(kb_id, kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 
+
+${UPDATE_STAGING_SCHEMA_SQL}
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   content_tokenized,
   content=chunks,
@@ -435,6 +486,14 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			}
 			continue;
 		}
+		if (v === 7) {
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "vector_file")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN vector_file TEXT");
+			}
+			db.exec(UPDATE_STAGING_SCHEMA_SQL);
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -505,16 +564,11 @@ export function deleteKB(db: Database.Database, id: string): void {
 }
 
 export function updateKBStatus(db: Database.Database, id: string, status: KnowledgeBase["status"]): void {
-	db.prepare("UPDATE knowledge_bases SET status = ?, updated_at = ? WHERE id = ?").run(status, Date.now(), id);
+	db.prepare("UPDATE knowledge_bases SET status = ? WHERE id = ?").run(status, id);
 }
 
 export function updateKBCounts(db: Database.Database, id: string, chunkCount: number, fileCount: number): void {
-	db.prepare("UPDATE knowledge_bases SET chunk_count = ?, file_count = ?, updated_at = ? WHERE id = ?").run(
-		chunkCount,
-		fileCount,
-		Date.now(),
-		id,
-	);
+	db.prepare("UPDATE knowledge_bases SET chunk_count = ?, file_count = ? WHERE id = ?").run(chunkCount, fileCount, id);
 }
 export function markKBIndexed(db: Database.Database, id: string): void {
 	const now = Date.now();
@@ -522,11 +576,7 @@ export function markKBIndexed(db: Database.Database, id: string): void {
 }
 
 export function updateKBSourceOptions(db: Database.Database, id: string, sourceOptions: string): void {
-	db.prepare("UPDATE knowledge_bases SET source_options = ?, updated_at = ? WHERE id = ?").run(
-		sourceOptions,
-		Date.now(),
-		id,
-	);
+	db.prepare("UPDATE knowledge_bases SET source_options = ? WHERE id = ?").run(sourceOptions, id);
 }
 
 export function updateKBEmbeddingMetadata(
@@ -538,9 +588,9 @@ export function updateKBEmbeddingMetadata(
 ): void {
 	db.prepare(
 		`UPDATE knowledge_bases
-     SET embedding_model = ?, embedding_signature = ?, embedding_dimension = ?, updated_at = ?
+     SET embedding_model = ?, embedding_signature = ?, embedding_dimension = ?
      WHERE id = ?`,
-	).run(embeddingModel, embeddingSignature, embeddingDimension, Date.now(), id);
+	).run(embeddingModel, embeddingSignature, embeddingDimension, id);
 }
 
 // --- Indexing Jobs ---
@@ -679,6 +729,71 @@ export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkI
 	return ids;
 }
 
+export function insertStagedChunks(db: Database.Database, kbId: string, chunks: ChunkInsert[]): string[] {
+	const ids: string[] = [];
+	const stmt = db.prepare(
+		`INSERT INTO update_staged_chunks (
+			id, kb_id, content_hash, content, content_tokenized, file_path, file_type, start_line, end_line,
+			metadata_json, indexed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	);
+	const now = Date.now();
+	const insertMany = db.transaction((items: ChunkInsert[]) => {
+		for (const chunk of items) {
+			const id = randomUUID();
+			ids.push(id);
+			stmt.run(
+				id,
+				kbId,
+				chunk.content_hash,
+				chunk.content,
+				chunk.content_tokenized,
+				chunk.file_path,
+				chunk.file_type,
+				chunk.start_line,
+				chunk.end_line,
+				chunk.metadata_json,
+				now,
+			);
+		}
+	});
+	insertMany(chunks);
+	return ids;
+}
+
+export function iterateStagedChunksByKB(db: Database.Database, kbId: string): IterableIterator<Chunk> {
+	return iterateStagedChunkRowsByKB(db, kbId);
+}
+
+export function stageRemovedChunkIds(db: Database.Database, kbId: string, chunkIds: string[]): void {
+	if (chunkIds.length === 0) return;
+	const statement = db.prepare("INSERT INTO update_removed_chunks (kb_id, chunk_id) VALUES (?, ?)");
+	const insertMany = db.transaction((ids: string[]) => {
+		for (const id of ids) statement.run(kbId, id);
+	});
+	for (let offset = 0; offset < chunkIds.length; offset += ITERATION_BATCH_SIZE) {
+		insertMany(chunkIds.slice(offset, offset + ITERATION_BATCH_SIZE));
+	}
+}
+
+export function clearStagedUpdate(db: Database.Database, kbId: string): void {
+	const clear = db.transaction(() => {
+		db.prepare("DELETE FROM update_removed_chunks WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM update_staged_symbols WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM update_staged_chunks WHERE kb_id = ?").run(kbId);
+	});
+	clear();
+}
+
+export function clearAllStagedUpdates(db: Database.Database): void {
+	const clear = db.transaction(() => {
+		db.prepare("DELETE FROM update_removed_chunks").run();
+		db.prepare("DELETE FROM update_staged_symbols").run();
+		db.prepare("DELETE FROM update_staged_chunks").run();
+	});
+	clear();
+}
+
 export function getChunksByKB(db: Database.Database, kbId: string): Chunk[] {
 	return db.prepare("SELECT * FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as Chunk[];
 }
@@ -755,6 +870,25 @@ function* iterateChunkRowsByKB(db: Database.Database, kbId: string): IterableIte
 	let lastRowid = 0;
 	const statement = db.prepare(
 		`SELECT rowid as rowid, * FROM chunks
+		 WHERE kb_id = ? AND rowid > ?
+		 ORDER BY rowid
+		 LIMIT ?`,
+	);
+	while (true) {
+		const rows = statement.all(kbId, lastRowid, ITERATION_BATCH_SIZE) as Array<Chunk & { rowid: number }>;
+		if (rows.length === 0) return;
+		for (const row of rows) {
+			lastRowid = row.rowid;
+			const { rowid: _rowid, ...chunk } = row;
+			yield chunk;
+		}
+	}
+}
+
+function* iterateStagedChunkRowsByKB(db: Database.Database, kbId: string): IterableIterator<Chunk> {
+	let lastRowid = 0;
+	const statement = db.prepare(
+		`SELECT rowid as rowid, * FROM update_staged_chunks
 		 WHERE kb_id = ? AND rowid > ?
 		 ORDER BY rowid
 		 LIMIT ?`,
@@ -865,6 +999,133 @@ export function insertSymbols(db: Database.Database, kbId: string, symbols: Know
 		}
 	});
 	insertMany(symbols);
+}
+
+export function insertStagedSymbols(db: Database.Database, kbId: string, symbols: KnowledgeSymbolInsert[]): void {
+	if (symbols.length === 0) return;
+	const stmt = db.prepare(
+		`INSERT INTO update_staged_symbols (
+			id, kb_id, name, normalized_name, kind, file_path, file_type, start_line, end_line,
+			container_name, signature, text, metadata_json, indexed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	);
+	const now = Date.now();
+	const insertMany = db.transaction((items: KnowledgeSymbolInsert[]) => {
+		for (const symbol of items) {
+			stmt.run(
+				randomUUID(),
+				kbId,
+				symbol.name,
+				normalizeSymbolName(symbol.name),
+				symbol.kind,
+				symbol.file_path,
+				symbol.file_type,
+				symbol.start_line,
+				symbol.end_line,
+				symbol.container_name ?? null,
+				symbol.signature ?? null,
+				symbol.text,
+				symbol.metadata_json,
+				now,
+			);
+		}
+	});
+	insertMany(symbols);
+}
+
+export interface StagedUpdatePublication {
+	vectorFile: string;
+	expectedChunkCount: number;
+	embeddingModel: string;
+	embeddingSignature: string | null;
+	embeddingDimension: number | null;
+	sourceOptions: string;
+	jobMessage: string;
+}
+
+export function publishStagedUpdate(db: Database.Database, kbId: string, publication: StagedUpdatePublication): void {
+	const publish = db.transaction(() => {
+		db.prepare(
+			`DELETE FROM chunks
+			 WHERE kb_id = ?
+			   AND id IN (SELECT chunk_id FROM update_removed_chunks WHERE kb_id = ?)`,
+		).run(kbId, kbId);
+		db.prepare(
+			`INSERT INTO chunks (
+				id, kb_id, content_hash, content, content_tokenized, file_path, file_type, start_line, end_line,
+				metadata_json, indexed_at
+			)
+			SELECT id, kb_id, content_hash, content, content_tokenized, file_path, file_type, start_line, end_line,
+			       metadata_json, indexed_at
+			FROM update_staged_chunks
+			WHERE kb_id = ?
+			ORDER BY rowid`,
+		).run(kbId);
+		db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(kbId);
+		db.prepare(
+			`INSERT INTO symbols (
+				id, kb_id, name, normalized_name, kind, file_path, file_type, start_line, end_line,
+				container_name, signature, text, metadata_json, indexed_at
+			)
+			SELECT id, kb_id, name, normalized_name, kind, file_path, file_type, start_line, end_line,
+			       container_name, signature, text, metadata_json, indexed_at
+			FROM update_staged_symbols
+			WHERE kb_id = ?
+			ORDER BY rowid`,
+		).run(kbId);
+		const counts = db
+			.prepare(
+				`SELECT COUNT(*) AS chunk_count, COUNT(DISTINCT file_path) AS file_count
+				 FROM chunks
+				 WHERE kb_id = ?`,
+			)
+			.get(kbId) as { chunk_count: number; file_count: number };
+		if (counts.chunk_count !== publication.expectedChunkCount) {
+			throw new Error(
+				`Staged update chunk count mismatch: expected ${publication.expectedChunkCount}, got ${counts.chunk_count}`,
+			);
+		}
+		const now = Date.now();
+		db.prepare(
+			`UPDATE knowledge_bases
+			 SET vector_file = ?,
+			     chunk_count = ?,
+			     file_count = ?,
+			     embedding_model = ?,
+			     embedding_signature = ?,
+			     embedding_dimension = ?,
+			     source_options = ?,
+			     indexed_at = ?,
+			     updated_at = ?,
+			     status = 'ready'
+			 WHERE id = ?`,
+		).run(
+			publication.vectorFile,
+			counts.chunk_count,
+			counts.file_count,
+			publication.embeddingModel,
+			publication.embeddingSignature,
+			publication.embeddingDimension,
+			publication.sourceOptions,
+			now,
+			now,
+			kbId,
+		);
+		db.prepare(
+			`UPDATE indexing_jobs
+			 SET status = 'succeeded',
+			     phase = 'succeeded',
+			     message = ?,
+			     updated_at = ?,
+			     last_progress_at = ?,
+			     error_message = NULL
+			 WHERE kb_id = ?`,
+		).run(publication.jobMessage, now, now, kbId);
+		db.prepare("DELETE FROM update_removed_chunks WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM update_staged_symbols WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM update_staged_chunks WHERE kb_id = ?").run(kbId);
+	});
+	publish();
 }
 
 export function getSymbolsByFile(db: Database.Database, kbId: string, filePath: string): KnowledgeSymbolInsert[] {

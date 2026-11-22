@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
 export interface VectorWriter {
@@ -47,9 +47,13 @@ export function openVectorWriter(path: string): VectorWriter {
 		},
 		close(): void {
 			if (closed) return;
-			writeHeader();
-			closeSync(fd);
-			closed = true;
+			try {
+				writeHeader();
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+				closed = true;
+			}
 		},
 	};
 }

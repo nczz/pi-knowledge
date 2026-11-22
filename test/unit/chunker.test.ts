@@ -290,7 +290,9 @@ describe("directory scan timeout", () => {
 			await timed.next();
 			await timed.next();
 			vi.setSystemTime(1_101);
-			await expect(timed.next()).rejects.toThrow("configured 100ms timeout");
+			await expect(timed.next()).rejects.toThrow(
+				"configured 100ms wall-clock limit after visiting 1 entries and yielding 1 files",
+			);
 
 			vi.setSystemTime(2_000);
 			const unbounded = iterateScannableFileVisitsAsync(root, createSkippedScanStats(), { timeoutMs: 0 });

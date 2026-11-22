@@ -5,12 +5,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createKB,
 	finishIndexingJob,
+	getChunksByKB,
 	getDefaultKnowledgeDir,
 	getKB,
 	insertChunks,
+	insertStagedChunks,
 	markKBIndexed,
 	openDatabase,
+	publishStagedUpdate,
 	resolveHostKnowledgeDir,
+	stageRemovedChunkIds,
 	startIndexingJob,
 	updateKBEmbeddingMetadata,
 	updateKBStatus,
@@ -56,7 +60,7 @@ describe("knowledge storage path", () => {
 				legacyPiDir: "/home/me/.pi/knowledge",
 				exists,
 			}),
-		).toBe("/tmp/project/.omp/knowledge");
+		).toBe(join("/tmp/project/.omp", "knowledge"));
 	});
 
 	it("preserves legacy Pi storage for Windows-style home OMP paths", () => {
@@ -135,7 +139,77 @@ describe("knowledge base embedding metadata", () => {
 
 			const updated = getKB(db, kb.id);
 			expect(updated?.indexed_at).toBe(200);
-			expect(updated?.updated_at).toBe(300);
+			expect(updated?.updated_at).toBe(200);
+		} finally {
+			db.close();
+			now.mockRestore();
+		}
+	});
+
+	it("rolls back staged publication without advancing the successful index timestamp", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-publish-"));
+		tempDirs.push(dir);
+		const now = vi.spyOn(Date, "now");
+		let currentTime = 100;
+		now.mockImplementation(() => currentTime);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "atomic", source_type: "file" });
+			const [oldChunkId] = insertChunks(db, kb.id, [
+				{
+					content_hash: "old",
+					content: "Published content",
+					content_tokenized: "published content",
+					file_path: "source.txt",
+					file_type: "text",
+					start_line: 1,
+					end_line: 1,
+					metadata_json: "{}",
+				},
+			]);
+			if (!oldChunkId) throw new Error("Missing old chunk");
+			currentTime = 200;
+			markKBIndexed(db, kb.id);
+			const published = getKB(db, kb.id);
+			if (!published) throw new Error("Missing published knowledge base");
+			startIndexingJob(db, kb.id, "update", "Starting update");
+			insertStagedChunks(db, kb.id, [
+				{
+					content_hash: "new",
+					content: "Staged content",
+					content_tokenized: "staged content",
+					file_path: "source.txt",
+					file_type: "text",
+					start_line: 1,
+					end_line: 1,
+					metadata_json: "{}",
+				},
+			]);
+			stageRemovedChunkIds(db, kb.id, [oldChunkId]);
+			currentTime = 300;
+
+			expect(() =>
+				publishStagedUpdate(db, kb.id, {
+					vectorFile: `${kb.id}.generation.bin`,
+					expectedChunkCount: 2,
+					embeddingModel: "test",
+					embeddingSignature: "test:dim=1",
+					embeddingDimension: 1,
+					sourceOptions: "{}",
+					jobMessage: "Ready",
+				}),
+			).toThrow("Staged update chunk count mismatch");
+
+			expect(getChunksByKB(db, kb.id).map((chunk) => chunk.content)).toEqual(["Published content"]);
+			expect(getKB(db, kb.id)).toMatchObject({
+				updated_at: published.updated_at,
+				indexed_at: published.indexed_at,
+				vector_file: published.vector_file,
+			});
+			const staged = db.prepare("SELECT COUNT(*) AS count FROM update_staged_chunks WHERE kb_id = ?").get(kb.id) as {
+				count: number;
+			};
+			expect(staged.count).toBe(1);
 		} finally {
 			db.close();
 			now.mockRestore();

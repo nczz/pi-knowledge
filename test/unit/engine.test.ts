@@ -9,7 +9,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
@@ -43,7 +43,7 @@ vi.mock("../../src/network/safe-fetch.ts", async (importOriginal) => ({
 	fetchPublicText: safeFetchMock.fetchPublicText,
 }));
 
-const TEST_DIR = "/tmp/pk-test-engine";
+const TEST_DIR = process.platform === "win32" ? join(homedir(), "pk-test-engine") : "/tmp/pk-test-engine";
 
 describe("KnowledgeEngine", () => {
 	let engine: KnowledgeEngine;
@@ -649,7 +649,8 @@ describe("KnowledgeEngine", () => {
 
 				const result = await engine.update("Short Vector Repair");
 				const [kb] = engine.list();
-				const repairedHeader = readFileSync(vectorPath).subarray(0, 8);
+				const activeVectorPath = join(TEST_DIR, "vectors", kb.vector_file ?? `${id}.bin`);
+				const repairedHeader = readFileSync(activeVectorPath).subarray(0, 8);
 
 				expect(result).toEqual({ added: 2, removed: 2, unchanged: 0 });
 				expect(kb.status).toBe("ready");
@@ -689,7 +690,8 @@ describe("KnowledgeEngine", () => {
 
 				const result = await engine.update("Missing Vector Repair", (message) => updates.push(message));
 				const [kb] = engine.list();
-				const repairedHeader = readFileSync(vectorPath).subarray(0, 8);
+				const activeVectorPath = join(TEST_DIR, "vectors", kb.vector_file ?? `${id}.bin`);
+				const repairedHeader = readFileSync(activeVectorPath).subarray(0, 8);
 
 				expect(result).toEqual({ added: 0, removed: 0, unchanged: 2 });
 				expect(kb.status).toBe("ready");
@@ -795,6 +797,51 @@ describe("KnowledgeEngine", () => {
 			expect((await engine.search("billing", { mode: "fast", kb_id: "Cancellable" })).total_count).toBe(0);
 			expect(chunk?.content).toContain("export function preservedSymbol() {}");
 			expect(engine.symbolSearch("preservedSymbol", { exact: true, kb_id: "Cancellable" }).total_count).toBe(1);
+		});
+
+		it("keeps the published generation searchable when an update fails after staging new chunks", async () => {
+			const filePath = join(TEST_DIR, "recoverable-update.txt");
+			writeFileSync(filePath, "PublishedGenerationToken content remains searchable after an update failure.");
+			await engine.add(filePath, "Recoverable Update");
+			const before = engine.list()[0];
+			const originalVectorPath = join(TEST_DIR, "vectors", before.vector_file ?? `${before.id}.bin`);
+			const originalVector = readFileSync(originalVectorPath);
+			writeFileSync(filePath, "UnpublishedGenerationToken content must not leak from failed staging.");
+
+			await expect(
+				engine.update("Recoverable Update", (message) => {
+					if (message.startsWith("Stored update batch:")) throw new Error("forced progress failure");
+				}),
+			).rejects.toThrow("forced progress failure");
+
+			const after = engine.list()[0];
+			const db = openDatabase(TEST_DIR);
+			const job = getIndexingJob(db, after.id);
+			const stagedChunks = db
+				.prepare("SELECT COUNT(*) AS count FROM update_staged_chunks WHERE kb_id = ?")
+				.get(after.id) as { count: number };
+			db.close();
+			expect(after.status).toBe("ready");
+			expect(after.updated_at).toBe(before.updated_at);
+			expect(after.indexed_at).toBe(before.indexed_at);
+			expect(after.chunk_count).toBe(before.chunk_count);
+			expect(after.vector_file).toBe(before.vector_file);
+			expect(readFileSync(originalVectorPath)).toEqual(originalVector);
+			expect(stagedChunks.count).toBe(0);
+			expect(job?.status).toBe("failed");
+			expect(
+				engine
+					.doctor()
+					.issues.some(
+						(issue) =>
+							issue.kb_name === "Recoverable Update" &&
+							issue.message.includes("previous published generation remains searchable"),
+					),
+			).toBe(true);
+			expect((await engine.search("PublishedGenerationToken", { mode: "fast", kb_id: after.id })).total_count).toBe(1);
+			expect((await engine.search("UnpublishedGenerationToken", { mode: "fast", kb_id: after.id })).total_count).toBe(
+				0,
+			);
 		});
 
 		it("updates document files from extractors instead of raw UTF-8 bytes", async () => {

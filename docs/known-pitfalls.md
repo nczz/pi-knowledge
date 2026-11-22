@@ -128,7 +128,7 @@ Export 必須寫到同目錄 temporary file，成功完成後才 rename 到使�
 
 `fs.watch(dir, { recursive: true })` 在 macOS/Node 環境中仍可能因 `EMFILE: too many open files` 或平台限制失效。`startWatcher` 必須保留 polling fallback；狀態顯示的 active watcher count 應計入 native watcher 或 poller。測試 watcher 時至少等待 `POLL_MS + DEBOUNCE_MS`。
 
-Watcher snapshot 必須套用與 indexing scanner 一致的 suggested exclusions / include / exclude options。否則大型 repo 即使 indexing 排除了 `node_modules`、`.git`、`dist`、runtime cache，watcher 仍會每輪掃完整 tree 或因 ignored file 改動觸發 update。
+Watcher snapshot 必須套用與 indexing scanner 一致的 suggested exclusions / include / exclude options。否則大型 repo 即使 indexing 排除了 `node_modules`、`.git`、`dist`、runtime cache，watcher 仍會每輪掃完整 tree 或因 ignored file 改動觸發 update。Initial baseline 期間的 native event 也必須先以 canonical root 正規化，再對前後 scannable snapshot 判斷 relevance；不能因為 baseline 尚未完成就把所有 event 無條件排成 update。
 
 ## SQLite iterator/update lifecycle
 
@@ -277,16 +277,16 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - directory add/update 開始前要做 metadata-only planning scan，先回報可索引檔案數、scannable bytes 與 skipped summary，讓使用者在 expensive embedding 前知道任務規模。
 - directory scan 要串流處理檔案，不能先把全部檔案內容收進 `ScannedFile[]` 再開始 chunking。保留相容 helper 可以，但 production add/update/diagnostics path 必須吃 iterator。
 - binary detection 只能讀固定大小 sample。不要用 `readFileSync` 讀完整檔案後再檢查前 512 bytes。
-- chunks 要分批寫入 SQLite，`updated_at` 和 counts 要隨 batch 更新，讓 `knowledge_status` 能判斷是否仍活著。
-- vector file 要 streaming append，最後回寫 header；不要在索引路徑用單一巨大 `Buffer.alloc`。
-- update 不能建立 `newChunks`、`chunksToAdd`、`finalChunks` 這類大型全量陣列後才開始處理。新增向量應寫入 temporary vector file，刪除應分批，正式 vector file 應依 DB iterator 重建。
+- chunks與symbols要分批寫入 update staging tables，liveness由 `indexing_jobs.updated_at`/`last_progress_at`表達；`knowledge_bases.updated_at`與 published counts只能在完整成功 publication時推進。
+- vector file要 streaming append並在 header完成後 fsync；不要在索引路徑用單一巨大 `Buffer.alloc`。
+- update不能建立`newChunks`、`chunksToAdd`、`finalChunks`這類大型全量陣列。新增 rows、刪除集合與symbols應進 staging tables，最終向量應寫不可變 generation file；單一 SQLite transaction再切換 active vector pointer並合併 rows。失敗保留舊 generation可搜尋，startup清理無引用 staging/temp/generation artifacts。
 - chunk identity 不能只看 content。大型 codebase 常有重複模板、空函式、產生器輸出或同名設定片段；若 hash 不含 path/line/metadata，update 會把不同檔案的相同內容當同一個 chunk，刪除其中一個檔案時會留下 stale/orphan chunk。
 - AST chunk identity 必須用 normalized metadata；如果直接 hash 原始 AST node text 或只 hash symbol 名稱，重複方法、同名 class 或 update 後移動的 code 會造成 stale chunk 或錯誤 vector reuse。
 - progress 必須包含目前 phase、已處理量、elapsed 與 chunks/sec，能估算檔案總量時要回報 file ETA。大型檔案會讓 file ETA 偏樂觀，所以不能只顯示 files processed；同一檔案內 chunks 持續增加時，使用者也必須看得出仍有進展。
 - progress 不能只靠 `onUpdate`。大型索引常跨越多個 prompt 或 TUI render；phase、last message、last progress time、processed counts、skipped、added/removed/unchanged 與 error/cancelled state 必須持久化，讓 `knowledge_status` 可以判斷正在進展還是真的卡死。
 - progress 與 diagnostics 必須揭露 skipped file count/reasons/samples，否則使用者無法判斷是索引器漏掉還是安全排除。
-- `knowledge_status` 必須標示超過 stale threshold 的 `indexing` KB，並提示先確認沒有 active Pi process，再 remove/rebuild。
-- `knowledge_search` 必須跳過 `indexing` 和 `error` KB，避免中斷後的半成品被 agent 當成可靠檢索結果。
+- `knowledge_status`必須標示超過 stale threshold的 legacy `indexing` KB或 running job，也要標示 failed update仍使用上一個 published generation；後者可搜尋但需要修正錯誤後重試。
+- `knowledge_search`必須跳過沒有一致 published generation的`indexing`和`error` KB；source-backed update若舊 generation仍完整，應維持`ready`/`stale`並繼續搜尋舊版。
 - query-time semantic/hybrid search 不應把整個 KB vector file 或全部 chunk IDs 載入長駐 cache。大型 KB 搜尋要用 streaming/ranged read 掃描 top-K，只保留候選向量給 MMR/diversity。
 - diagnostics 不能把所有 chunk content 或所有來源內容載入記憶體，也不應讀取完整來源檔案；只保留 stale/orphan/coverage 判斷需要的 file path、file type、size 和 indexed_at metadata。
 - `knowledge_doctor` 必須把 status/diagnostics 收斂成 health score 與 concrete actions，避免使用者看見一堆統計但不知道下一步。
@@ -348,14 +348,14 @@ Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能�
 
 Directory scan的安全邊界應限制entry數、總bytes、深度、單檔大小、path access與pending work，並持續觀察`AbortSignal`。固定五分鐘之類的總經過時間會把仍持續進展的慢磁碟、Windows Defender掃描或大型repo誤判為失控，而且無法中斷已卡在底層filesystem call的單次`await`。
 
-非同步directory scan預設不設wall-clock timeout。需要operator policy時使用`PI_KNOWLEDGE_SCAN_TIMEOUT_MS`；正整數代表每次traversal的毫秒上限，`0`停用。這是daemon runtime設定，不是KB source option或tool參數；修改後需重啟selected profile daemon。Planning、add/update、diagnostics與watcher必須共用同一scanner語意，不能各自藏一個timeout常數。
+非同步directory scan預設不設wall-clock timeout。需要operator policy時使用`PI_KNOWLEDGE_SCAN_TIMEOUT_MS`；正整數限制generator建立到完成之間的整個traversal pass，因此caller在yield之間執行的extraction、chunking、embedding或storage也計入。Timeout錯誤要回報已走訪entries與已yield files；無效設定在daemon startup一次驗證並fail fast，不能讓watcher/diagnostics反覆失敗。`0`停用；planning、add/update、diagnostics與watcher共用同一語意。
 
 ## PowerShell `-Command`後不能假設trailing argv會進入`$args`
 
 Windows PowerShell把`-Command`後的tokens當成command text；Node `execFileSync(..., [\"-Command\", script, path])`不會把`path`綁到`$args[0]`。Path可能成為額外expression污染stdout，而`$args[0]`仍是`$null`，導致ACL hardening在profile resolution階段失敗。
 
-安全路徑應讓`-Command`後只保留script，並透過dedicated child environment variable或其他不需shell quoting的channel傳入path。不得把path直接插入PowerShell source，也不得為了相容性跳過ACL hardening。stderr需pipe並以bounded訊息回報；包含空白、apostrophe與Unicode的路徑，以及重複hardening，必須在真實Windows PowerShell上驗證。讀取會被atomic replace的private runtime file時，先完成較慢的PowerShell ACL驗證，再建立`lstat`／`open` identity window；反向順序會讓正常daemon manifest更新在ACL subprocess期間被誤判成path replacement。Shutdown刪除manifest／lock後，reader若收到錯誤只能在path已確認不存在時視為正常缺席；path仍存在的ACL或parse錯誤必須fail closed。
-Ancestor ACL的danger mask只能由可替換既有path component的primitive rights組成，例如`Delete`、`DeleteSubdirectoriesAndFiles`、`ChangePermissions`與`TakeOwnership`。不要直接用`Modify`或`FullControl`這類composite enum做bitwise match；它們包含`Synchronize`等共用bit，會把標準Windows home ACL中的execute-only capability ACE誤判為可寫／可刪權限。
+安全路徑應讓`-Command`後只保留script，並透過dedicated child environment variable或其他不需shell quoting的channel傳入path。不得把path直接插入PowerShell source，也不得為了相容性跳過ACL hardening。Windows hardening只能讀寫`Owner | Access` sections：用typed `DirectoryInfo`/`FileInfo`取得owner+DACL，必要時建立新的 owner+DACL descriptor並以`SetAccessControl`寫回，絕不載入或persist Group/Audit/SACL。這避免要求`SeSecurityPrivilege`並保留既有SACL/group資料。每次操作要先semantic check、只在需要時寫入、再post-verify；private path與ancestor trust應在同一PowerShell process完成。
+stderr需pipe並以bounded訊息回報；包含空白、apostrophe與Unicode的路徑、既有protected directory、SACL fixture與重複hardening，必須在真實Windows PowerShell 5.1上驗證。讀取會被atomic replace的private runtime file時，先完成較慢的ACL驗證，再建立`lstat`／`open` identity window；反向順序會讓正常daemon manifest更新在ACL subprocess期間被誤判成path replacement。Shutdown刪除manifest／lock後，reader若收到錯誤只能在path已確認不存在時視為正常缺席；path仍存在的ACL或parse錯誤必須fail closed。
 
 ## onnxruntime exit crash (macOS arm64)
 

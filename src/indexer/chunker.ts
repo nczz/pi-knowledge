@@ -497,13 +497,14 @@ export async function* iterateScannableFileVisitsAsync(
 	const excludePaths = normalizeScanPaths(options.excludePaths);
 	const includeSuggestedText = options.includeSuggestedText === true;
 	let visitedEntries = 0;
+	let yieldedFiles = 0;
 	let totalBytes = 0;
 
 	const assertScanActive = (): void => {
 		if (signal?.aborted) throw new Error("Cancelled");
 		if (timeoutMs > 0 && Date.now() - startedAt > timeoutMs) {
 			throw new Error(
-				`Directory scan exceeded the configured ${timeoutMs}ms timeout; increase ${DIRECTORY_SCAN_TIMEOUT_ENV} or set it to 0 to disable the wall-clock limit`,
+				`Directory indexing pass exceeded the configured ${timeoutMs}ms wall-clock limit after visiting ${visitedEntries} entries and yielding ${yieldedFiles} files; caller work between yielded files counts toward this limit. Increase ${DIRECTORY_SCAN_TIMEOUT_ENV} or set it to 0 to disable the limit`,
 			);
 		}
 	};
@@ -636,6 +637,7 @@ export async function* iterateScannableFileVisitsAsync(
 					addSkipped(skipped, { path: relPath, reason: "inaccessible", size: info.size });
 					continue;
 				}
+				yieldedFiles++;
 				yield {
 					path: safePath,
 					relPath,

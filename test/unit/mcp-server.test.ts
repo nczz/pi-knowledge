@@ -369,6 +369,7 @@ describe("MCP stdio adapter", () => {
 				embedding_model: "test",
 				embedding_signature: null,
 				embedding_dimension: null,
+				vector_file: null,
 				status: "ready",
 			},
 			{
@@ -387,6 +388,7 @@ describe("MCP stdio adapter", () => {
 				embedding_signature: null,
 				embedding_dimension: null,
 				status: "ready",
+				vector_file: null,
 			},
 		]);
 		const execute = vi.fn<NonNullable<ToolDefinition["execute"]>>(async () => ({

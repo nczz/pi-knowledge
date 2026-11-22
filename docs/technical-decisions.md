@@ -226,18 +226,18 @@
 - directory scan 用 iterator/callback 型 API 串流產生檔案，production add/update path 不先收集所有 `ScannedFile.content`；diagnostics 使用 metadata-only scanner，不讀取完整檔案內容。
 - binary detection 只讀固定 sample，不用 `readFileSync` 讀完整檔案後再取前段。
 - embedding batch 是硬上限，目前為 64 chunks；單一大檔產生大量 chunks 時也不能超過此上限。
-- 每個 batch 成功後立即寫入 SQLite 並更新 KB counts，讓 `updated_at` 代表索引仍有進展。
-- vector file 用 header placeholder + append vectors + close 時回寫 header 的方式串流寫入。
-- update 以 hash manifest 判斷新增/刪除/未變更，新增向量先寫入 temporary vector file，最後依 SQLite chunk iterator 重建正式 vector file。
-- 刪除 chunks 必須分批執行，避免大型 KB 超過 SQLite parameter limit。
+- 每個 batch 成功後立即寫入 update staging tables並更新 persisted indexing job；`knowledge_bases.updated_at`與 published counts只代表最近一次完整成功 publication，不作為 liveness heartbeat。
+- vector file 用 header placeholder + append vectors + fsync + close 時回寫 header 的方式串流寫入。
+- update 以 hash manifest判斷新增/刪除/未變更；新 chunks/symbols與刪除集合先寫 staging tables，新向量與最終向量寫入不可變 generation file。最後一個 SQLite transaction切換 active vector filename、合併 rows、更新 metadata/counts/成功時間與 job狀態；commit後舊 vector generation才可清理。
+- publication前失敗或 process crash不影響既有 live rows/vector pointer；下一次 daemon initialize清理無引用 staging/temp/generation artifacts。已有 published generation的 KB在 update期間維持可搜尋，failed update由 persisted job與 status/doctor揭露。
 - directory add/update 開始前先做 metadata-only planning scan，回報可索引檔案數、scannable bytes 與 skipped summary；這個 planning pass 不讀完整檔案內容。
 - add/update/import 都必須提供 progress；能估算時包含 elapsed、chunks/sec 與 file ETA。大型檔案可能讓 file ETA 偏樂觀，因此進度文字必須同時顯示 chunk throughput。
 - add/update/import 的 job state 必須持久化到 SQLite，包含 operation、status、phase、last message、started_at、last_progress_at、processed files/chunks、skipped、added、removed、unchanged 與 error_message。
 - JSONL import 必須逐行讀取、bounded batch parse/embed/store；JSONL export 必須用 chunk iterator + write stream。Import/export 是大型 KB 的搬運路徑，不能把全檔、全部 chunks 或全部 JSON strings 一次放進 heap。
-- `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
-- `knowledge_status` diagnostics 需用 chunk iterator 與 streaming source scan，不載入全部 chunk content 或全部來源內容，並以 persisted job state 區分「仍在進展」和「卡住」。
-- `knowledge_doctor` 以 health score + blocking/warning/info issues + concrete action 收斂使用者下一步。
-- `knowledge_search` 跳過 `indexing` 和 `error` KB，只搜尋 `ready` 或 `stale` KB。
+- `knowledge_status` 需要同時偵測 legacy/stale `indexing` status與長時間沒有進展的 running job；failed update使用上一個 generation時必須明確顯示，不能假裝完全健康。
+- `knowledge_status` diagnostics 需用 chunk iterator與 streaming source scan，不載入全部 chunk content或全部來源內容，並以 persisted job state區分「仍在進展」、「更新失敗但舊版可搜尋」和「卡住」。
+- `knowledge_doctor` 以 health score + blocking/warning/info issues + concrete action收斂使用者下一步；failed update保留舊 generation時是 warning，不是讓 KB離線的 error。
+- `knowledge_search`只搜尋有一致 published generation的 `ready`或`stale` KB；跳過沒有安全 generation的 `indexing`和`error` KB。
 - semantic/hybrid search 以 vector file ranged reads 掃描 top-K，不把整個 KB 的 Float32 vectors 或全部 chunk IDs 放進長駐 cache。
 
 **理由**:
@@ -287,6 +287,7 @@
 - `extension.js` 是 package entry shim；build 後優先載入 `dist/index.js`，本地開發未 build 時 fallback 到 source `index.ts`。
 - root `index.ts` 保持 startup-light；Pi virtual modules 只允許 type-only 或本地 shim，不在 import 時解析 native runtime。
 - production extension 只 lazy import profile resolver 與 daemon client；engine、storage、watcher、model/document worker由 selected profile daemon載入並持有，session shutdown只釋放 client state。
+- production extension的預設 `session_start`與 `before_agent_start`不得解析 profile、執行 Windows ACL subprocess或 ensure daemon；tools與 opt-in auto-inject lazy ensure，只有 `PI_KNOWLEDGE_WATCH=true`在 session start eager ensure並 monotonic enable watcher。
 - 本地 embedding/reranker 透過 daemon內的 model worker子程序載入 `@huggingface/transformers` / `onnxruntime-node`，不讓 Pi/OMP TUI 主程序直接載入 ONNX native backend。
 - `better-sqlite3` 只在 daemon runtime path載入；resolution仍支援 Bun/hoisted dependency情境的非 literal package name與 parent walk fallback。
 - `default` profile storage選擇順序是 `PI_KNOWLEDGE_DIR`、`OMP_KNOWLEDGE_DIR`、已原子保存的 profile registry、最後才是唯一一個既有 host-derived legacy database；同時找到多個 legacy database時 fail closed並要求明確選擇。

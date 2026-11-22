@@ -89,8 +89,15 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		0,
 	);
 	const totalStuck = snapshot.diagnostics.filter((diagnostic) => diagnostic.stuck_indexing).length;
-	const totalIndexing = snapshot.knowledge_bases.filter(
-		(kb) => kb.status === "indexing" && !diagnosticsByKb.get(kb.id)?.stuck_indexing,
+	const totalIndexing = snapshot.diagnostics.filter(
+		(diagnostic) =>
+			(diagnostic.status === "indexing" || diagnostic.job?.status === "running") && !diagnostic.stuck_indexing,
+	).length;
+	const totalFailedUpdates = snapshot.diagnostics.filter(
+		(diagnostic) =>
+			diagnostic.job?.operation === "update" &&
+			diagnostic.job.status === "failed" &&
+			(diagnostic.status === "ready" || diagnostic.status === "stale"),
 	).length;
 	const totalErrors = snapshot.knowledge_bases.filter((kb) => kb.status === "error").length;
 	const totalEmbedding =
@@ -105,6 +112,7 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		totalStuck === 0 &&
 		totalIndexing === 0 &&
 		totalErrors === 0 &&
+		totalFailedUpdates === 0 &&
 		totalEmbedding === 0 &&
 		snapshot.knowledge_bases.length > 0
 	) {
@@ -115,11 +123,12 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		totalStuck > 0 ||
 		totalIndexing > 0 ||
 		totalErrors > 0 ||
+		totalFailedUpdates > 0 ||
 		totalEmbedding > 0
 	) {
 		lines.push(
 			"",
-			`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing, ${totalIndexing} indexing, ${totalErrors} errors, ${totalEmbedding} embedding issues — run knowledge_update, correct embedding configuration, or rebuild affected KBs`,
+			`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing, ${totalIndexing} indexing, ${totalFailedUpdates} failed updates using the previous generation, ${totalErrors} errors, ${totalEmbedding} embedding issues — run knowledge_update, correct embedding configuration, or rebuild affected KBs`,
 		);
 	}
 	return lines.join("\n");

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -8,6 +9,7 @@ import {
 	fsyncSync,
 	lstatSync,
 	openSync,
+	readdirSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -93,18 +95,17 @@ import {
 	summarizeSearchTuning,
 } from "./search/tuning.ts";
 import { searchVectorFile } from "./search/vector.ts";
-import { ensureOwnerOnlyDirectory, prepareSafeNewFile, publishNewFile } from "./secure-files.ts";
+import { ensureOwnerOnlyDirectory, fsyncDirectory, prepareSafeNewFile, publishNewFile } from "./secure-files.ts";
 import {
 	type Chunk,
 	type ChunkInsert,
+	clearAllStagedUpdates,
+	clearStagedUpdate,
 	countSymbols,
 	createKB,
-	deleteChunksByIds,
 	deleteKB,
-	deleteSymbolsByKB,
 	finishIndexingJob,
 	getChunkById,
-	getChunkCount,
 	getChunksByFile,
 	getFileCount,
 	getKB,
@@ -112,20 +113,24 @@ import {
 	getSymbolCount,
 	getSymbolsByFile,
 	insertChunks,
+	insertStagedChunks,
+	insertStagedSymbols,
 	insertSymbols,
 	iterateChunkIdsByKB,
 	iterateChunksByKB,
+	iterateStagedChunksByKB,
 	type KnowledgeBase,
 	type KnowledgeSymbol,
 	listKBs,
 	markKBIndexed,
 	openDatabase,
+	publishStagedUpdate,
 	searchSymbols,
+	stageRemovedChunkIds,
 	startIndexingJob,
 	updateIndexingJob,
 	updateKBCounts,
 	updateKBEmbeddingMetadata,
-	updateKBSourceOptions,
 	updateKBStatus,
 } from "./storage/sqlite.ts";
 
@@ -270,8 +275,6 @@ interface ImportedChunk {
 	end_line: number;
 	metadata_json?: string;
 }
-
-type KnowledgeSymbolInsert = Parameters<typeof insertSymbols>[2][number];
 
 interface ImportHeader {
 	name: string;
@@ -1413,15 +1416,49 @@ export class KnowledgeEngine {
 	async initialize(knowledgeDir: string): Promise<void> {
 		this.knowledgeDir = knowledgeDir;
 		this.db = openDatabase(knowledgeDir);
+		clearAllStagedUpdates(this.db);
+		const vectorDir = join(this.knowledgeDir, "vectors");
+		if (existsSync(vectorDir)) {
+			const knowledgeBases = listKBs(this.db);
+			const activeVectorFiles = new Set(
+				knowledgeBases.map((kb) => kb.vector_file).filter((file): file is string => file !== null),
+			);
+			const inactiveLegacyVectorFiles = new Set(
+				knowledgeBases.filter((kb) => kb.vector_file !== null).map((kb) => `${kb.id}.bin`),
+			);
+			const generationPattern =
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bin$/i;
+			for (const entry of readdirSync(vectorDir, { withFileTypes: true })) {
+				if (!entry.isFile()) continue;
+				const inactiveGeneration = generationPattern.test(entry.name) && !activeVectorFiles.has(entry.name);
+				if (entry.name.endsWith(".tmp") || inactiveGeneration || inactiveLegacyVectorFiles.has(entry.name)) {
+					rmSync(join(vectorDir, entry.name), { force: true });
+				}
+			}
+		}
 		this.disposing = false;
 	}
 
-	private vectorPathFor(kbId: string): string {
-		return join(this.knowledgeDir, "vectors", `${kbId}.bin`);
+	private vectorPathFor(kbId: string, vectorFile?: string | null): string {
+		const file = vectorFile ?? `${kbId}.bin`;
+		const legacyFile = `${kbId}.bin`;
+		const generationPrefix = `${kbId}.`;
+		if (file !== legacyFile && (!file.startsWith(generationPrefix) || !file.endsWith(".bin") || file.includes("/"))) {
+			throw new Error(`Invalid vector file for knowledge base ${kbId}`);
+		}
+		if (file.includes("\\")) throw new Error(`Invalid vector file for knowledge base ${kbId}`);
+		return join(this.knowledgeDir, "vectors", file);
 	}
 
-	private deleteVectorFile(kbId: string): void {
-		rmSync(this.vectorPathFor(kbId), { force: true });
+	private deleteVectorFiles(kbId: string, vectorFile?: string | null): void {
+		const vectorDir = join(this.knowledgeDir, "vectors");
+		rmSync(this.vectorPathFor(kbId, vectorFile), { force: true });
+		if (!existsSync(vectorDir)) return;
+		for (const entry of readdirSync(vectorDir, { withFileTypes: true })) {
+			if (entry.isFile() && entry.name.startsWith(`${kbId}.`) && entry.name.endsWith(".bin")) {
+				rmSync(join(vectorDir, entry.name), { force: true });
+			}
+		}
 	}
 
 	plan(source: string, options: AddOptions = {}, signal?: AbortSignal, access?: FilesystemAccessPolicy): IndexPlan {
@@ -1765,7 +1802,7 @@ export class KnowledgeEngine {
 					e instanceof Error ? e.message : String(e),
 				);
 				deleteKB(this.db, kb.id);
-				this.deleteVectorFile(kb.id);
+				this.deleteVectorFiles(kb.id, kb.vector_file);
 			}
 			throw e;
 		}
@@ -1822,7 +1859,7 @@ export class KnowledgeEngine {
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options), access);
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingBatchSize = resolveIndexEmbedBatchSize();
-		updateKBStatus(this.db, kb.id, "indexing");
+		clearStagedUpdate(this.db, kb.id);
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
 		const compatibility = inspectEmbeddingCompatibility(
@@ -1835,14 +1872,13 @@ export class KnowledgeEngine {
 		let rebuildMessage = compatibility.compatible
 			? undefined
 			: `Embedding vectors for "${kb.name}" are incompatible (${describeEmbeddingCompatibility(compatibility)}); rebuilding all vectors`;
+		let replacementVectorFile: string | undefined;
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
-		const insertedChunkIds: string[] = [];
-		const stagedSymbols: KnowledgeSymbolInsert[] = [];
 
 		try {
-			const vectorPath = this.vectorPathFor(kb.id);
+			const vectorPath = this.vectorPathFor(kb.id, kb.vector_file);
 			addedVectorPath = tempVectorPath(`${vectorPath}.added`);
 			addedVectorWriter = openVectorWriter(addedVectorPath);
 			let latestSkippedTotal = 0;
@@ -1923,9 +1959,8 @@ export class KnowledgeEngine {
 					newVectorIndexByHash.set(batch[i].content_hash, indexes);
 				}
 				addedVectorCount += newVectors.length;
-				insertedChunkIds.push(...insertChunks(this.db, kb.id, batch));
+				insertStagedChunks(this.db, kb.id, batch);
 				addedCount += batch.length;
-				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 				const storedMessage = `Stored update batch: +${addedCount} chunks, =${unchanged} unchanged`;
 				updateIndexingJob(this.db, kb.id, {
 					phase: "storing",
@@ -1967,8 +2002,10 @@ export class KnowledgeEngine {
 				onProgress?.(message);
 				scannedFiles = 1;
 				const chunks = await chunkUrl(kb.source_path, signal);
-				stagedSymbols.push(
-					...extractSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), kb.source_path, "html"),
+				insertStagedSymbols(
+					this.db,
+					kb.id,
+					extractSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), kb.source_path, "html"),
 				);
 				await processChunks(chunks);
 			} else if (kb.source_type === "directory") {
@@ -2001,12 +2038,12 @@ export class KnowledgeEngine {
 							}
 							unchanged++;
 						}
-						stagedSymbols.push(...getSymbolsByFile(this.db, kb.id, file.relPath));
+						insertStagedSymbols(this.db, kb.id, getSymbolsByFile(this.db, kb.id, file.relPath));
 						continue;
 					}
 					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
 					scannedFiles++;
-					stagedSymbols.push(...analysis.symbols);
+					insertStagedSymbols(this.db, kb.id, analysis.symbols);
 					await processChunks(analysis.chunks);
 					if (scannedFiles % 25 === 0) {
 						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
@@ -2041,7 +2078,7 @@ export class KnowledgeEngine {
 				const extracted = await extractSourceFileContent(kb.source_path, signal, undefined, access);
 				scannedFiles = 1;
 				const analysis = await analyzeIndexableContent(extracted.content, kb.source_path, extracted.fileType);
-				stagedSymbols.push(...analysis.symbols);
+				insertStagedSymbols(this.db, kb.id, analysis.symbols);
 				await processChunks(analysis.chunks);
 			}
 			await flushPending();
@@ -2052,6 +2089,7 @@ export class KnowledgeEngine {
 			for (const entries of existingHashes.values()) {
 				idsToRemove.push(...entries.map((entry) => entry.id));
 			}
+			stageRemovedChunkIds(this.db, kb.id, idsToRemove);
 			const idsToRemoveSet = new Set(idsToRemove);
 			const changesMessage = `Changes: +${addedCount} -${idsToRemove.length} =${unchanged}`;
 			updateIndexingJob(this.db, kb.id, {
@@ -2065,7 +2103,8 @@ export class KnowledgeEngine {
 			});
 			onProgress?.(changesMessage);
 
-			replacementVectorPath = tempVectorPath(vectorPath);
+			replacementVectorFile = `${kb.id}.${randomUUID()}.bin`;
+			replacementVectorPath = this.vectorPathFor(kb.id, replacementVectorFile);
 			const vectorWriter = openVectorWriter(replacementVectorPath);
 			const oldVectorReader = openVectorReader(vectorPath);
 			const newVectorReader = openVectorReader(addedVectorPath);
@@ -2094,93 +2133,111 @@ export class KnowledgeEngine {
 				if (!repairedVector) throw new Error(`Embedding provider returned no repaired vector for chunk: ${chunk.id}`);
 				return repairedVector;
 			};
+			const appendFinalChunk = async (chunk: Chunk): Promise<void> => {
+				if (signal?.aborted) throw new Error("Cancelled");
+				const oldVectorIndex = takeVectorIndex(oldVectorIndexByHash, chunk.content_hash);
+				const newVectorIndex = takeVectorIndex(newVectorIndexByHash, chunk.content_hash);
+				let vector =
+					oldVectorReader && oldVectorIndex !== undefined
+						? oldVectorReader.read(oldVectorIndex)
+						: newVectorReader && newVectorIndex !== undefined
+							? newVectorReader.read(newVectorIndex)
+							: undefined;
+				if (!vector) vector = await repairMissingVector(chunk);
+				finalEmbeddingDimension ??= vector.length;
+				vectorWriter.append([vector]);
+				finalChunkCount++;
+				if (finalChunkCount % 1_000 === 0) {
+					if (!this.db) throw new Error("Engine not initialized");
+					const message = `Rebuilding vector file: ${finalChunkCount} chunks written`;
+					updateIndexingJob(this.db, kb.id, {
+						phase: "rebuilding_vectors",
+						message,
+						processed_files: scannedFiles,
+						processed_chunks: finalChunkCount,
+						added_chunks: addedCount,
+						removed_chunks: idsToRemove.length,
+						unchanged_chunks: unchanged,
+					});
+					onProgress?.(message);
+				}
+			};
 			try {
 				for (const chunk of iterateChunksByKB(this.db, kb.id)) {
-					if (signal?.aborted) throw new Error("Cancelled");
-					if (idsToRemoveSet.has(chunk.id)) continue;
-					const oldVectorIndex = takeVectorIndex(oldVectorIndexByHash, chunk.content_hash);
-					const newVectorIndex = takeVectorIndex(newVectorIndexByHash, chunk.content_hash);
-					let vector =
-						oldVectorReader && oldVectorIndex !== undefined
-							? oldVectorReader.read(oldVectorIndex)
-							: newVectorReader && newVectorIndex !== undefined
-								? newVectorReader.read(newVectorIndex)
-								: undefined;
-					if (!vector) vector = await repairMissingVector(chunk);
-					finalEmbeddingDimension ??= vector.length;
-					vectorWriter.append([vector]);
-					finalChunkCount++;
-					if (finalChunkCount % 1_000 === 0) {
-						const message = `Rebuilding vector file: ${finalChunkCount} chunks written`;
-						updateIndexingJob(this.db, kb.id, {
-							phase: "rebuilding_vectors",
-							message,
-							processed_files: scannedFiles,
-							processed_chunks: finalChunkCount,
-							added_chunks: addedCount,
-							removed_chunks: idsToRemove.length,
-							unchanged_chunks: unchanged,
-						});
-						onProgress?.(message);
-					}
+					if (!idsToRemoveSet.has(chunk.id)) await appendFinalChunk(chunk);
 				}
+				for (const chunk of iterateStagedChunksByKB(this.db, kb.id)) await appendFinalChunk(chunk);
 			} finally {
 				oldVectorReader?.close();
 				newVectorReader?.close();
 				vectorWriter.close();
 			}
-			renameSync(replacementVectorPath, vectorPath);
-			replacementVectorPath = undefined;
+			fsyncDirectory(join(this.knowledgeDir, "vectors"));
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			addedVectorPath = undefined;
-			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
-			deleteSymbolsByKB(this.db, kb.id);
-			insertSymbols(this.db, kb.id, stagedSymbols);
-
-			updateKBEmbeddingMetadata(
-				this.db,
-				kb.id,
-				embeddingModel,
-				finalEmbeddingDimension === undefined ? null : embeddingSignature(embeddingConfig, finalEmbeddingDimension),
-				finalEmbeddingDimension ?? null,
-			);
-			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
-			updateKBSourceOptions(this.db, kb.id, serializeAddOptions(parseAddOptions(kb.source_options)));
-			markKBIndexed(this.db, kb.id);
-			updateKBStatus(this.db, kb.id, "ready");
 			const skippedReadySuffix =
 				latestSkippedTotal > 0 ? `, skipped ${latestSkippedTotal} (${latestSkippedSummary})` : "";
 			const readyMessage = `Ready: +${addedCount} -${idsToRemove.length} =${unchanged}${skippedReadySuffix}`;
+			const publishingMessage = `Publishing update: +${addedCount} -${idsToRemove.length} =${unchanged}${skippedReadySuffix}`;
 			updateIndexingJob(this.db, kb.id, {
-				phase: "ready",
-				message: readyMessage,
+				phase: "publishing",
+				message: publishingMessage,
 				processed_files: scannedFiles,
 				processed_chunks: finalChunkCount,
 				added_chunks: addedCount,
 				removed_chunks: idsToRemove.length,
 				unchanged_chunks: unchanged,
 			});
-			finishIndexingJob(this.db, kb.id, "succeeded", readyMessage);
-			onProgress?.(readyMessage);
+			onProgress?.(publishingMessage);
+			if (!replacementVectorFile) throw new Error("Update vector generation was not created");
+			publishStagedUpdate(this.db, kb.id, {
+				vectorFile: replacementVectorFile,
+				expectedChunkCount: finalChunkCount,
+				embeddingModel,
+				embeddingSignature:
+					finalEmbeddingDimension === undefined ? null : embeddingSignature(embeddingConfig, finalEmbeddingDimension),
+				embeddingDimension: finalEmbeddingDimension ?? null,
+				sourceOptions: serializeAddOptions(parseAddOptions(kb.source_options)),
+				jobMessage: readyMessage,
+			});
+			replacementVectorPath = undefined;
+			replacementVectorFile = undefined;
+			try {
+				rmSync(vectorPath, { force: true });
+				fsyncDirectory(join(this.knowledgeDir, "vectors"));
+			} catch {
+				// The committed generation remains active; startup cleanup retries removal of the inactive file.
+			}
+			try {
+				onProgress?.(readyMessage);
+			} catch {
+				// Publication is already durable; an observer failure cannot roll back the committed generation.
+			}
 
 			return { added: addedCount, removed: idsToRemove.length, unchanged };
-		} catch (e) {
+		} catch (error) {
 			addedVectorWriter?.close();
 			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
-			if (insertedChunkIds.length > 0) {
-				deleteChunksByIds(this.db, insertedChunkIds);
-				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+			let cleanupError: unknown;
+			try {
+				clearStagedUpdate(this.db, kb.id);
+			} catch (stagingError) {
+				cleanupError = stagingError;
 			}
-			updateKBStatus(this.db, kb.id, isCancellationError(e) ? kb.status : "error");
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			const cleanupSuffix =
+				cleanupError === undefined
+					? ""
+					: `; staging cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
 			finishIndexingJob(
 				this.db,
 				kb.id,
-				isCancellationError(e) ? "cancelled" : "failed",
-				isCancellationError(e) ? "Update cancelled." : "Update failed.",
-				e instanceof Error ? e.message : String(e),
+				isCancellationError(error) ? "cancelled" : "failed",
+				isCancellationError(error) ? "Update cancelled." : "Update failed.",
+				`${errorMessage}${cleanupSuffix}`,
 			);
-			throw e;
+			throw error;
 		}
 	}
 
@@ -2333,7 +2390,7 @@ export class KnowledgeEngine {
 		for (const kb of kbs) {
 			throwIfAborted(signal);
 			if (kb.chunk_count === 0) continue;
-			const vectorPath = this.vectorPathFor(kb.id);
+			const vectorPath = this.vectorPathFor(kb.id, kb.vector_file);
 
 			if (retrievalMode === "fast") {
 				allResults.push(
@@ -2683,7 +2740,7 @@ export class KnowledgeEngine {
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
 		deleteKB(this.db, kb.id);
-		this.deleteVectorFile(kb.id);
+		this.deleteVectorFiles(kb.id, kb.vector_file);
 		return true;
 	}
 
@@ -2699,7 +2756,7 @@ export class KnowledgeEngine {
 		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
 		for (const kb of listKBs(this.db)) {
 			deleteKB(this.db, kb.id);
-			this.deleteVectorFile(kb.id);
+			this.deleteVectorFiles(kb.id, kb.vector_file);
 		}
 	}
 
@@ -2919,6 +2976,19 @@ export class KnowledgeEngine {
 					action:
 						"Check knowledge_status for the last progress message. If no Pi process is actively indexing it, remove and rebuild this KB.",
 					action_code: "wait_for_indexing",
+				});
+			}
+			if (
+				diagnostic.job?.operation === "update" &&
+				diagnostic.job.status === "failed" &&
+				(diagnostic.status === "ready" || diagnostic.status === "stale")
+			) {
+				issues.push({
+					severity: "warning",
+					kb_name: diagnostic.kb_name,
+					message: "The latest update failed; the previous published generation remains searchable.",
+					action: "Correct the reported update error, then run knowledge_update again.",
+					action_code: "run_update",
 				});
 			}
 			if (diagnostic.status === "error") {
@@ -3436,7 +3506,7 @@ export class KnowledgeEngine {
 					error instanceof Error ? error.message : String(error),
 				);
 				deleteKB(this.db, kb.id);
-				this.deleteVectorFile(kb.id);
+				this.deleteVectorFiles(kb.id, kb.vector_file);
 			}
 			throw error;
 		}

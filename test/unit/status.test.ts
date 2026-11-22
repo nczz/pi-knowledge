@@ -21,6 +21,7 @@ const MISMATCH_SNAPSHOT: KnowledgeStatusSnapshot = {
 			embedding_model: "multilingual-e5-small",
 			embedding_signature: "indexed-signature",
 			embedding_dimension: 384,
+			vector_file: null,
 			status: "ready",
 		},
 	],
@@ -152,6 +153,45 @@ describe("knowledge status formatting", () => {
 		});
 
 		expect(output).toContain("1 stuck indexing, 0 indexing");
+		expect(output).not.toContain("Health: ✓");
+	});
+
+	it("reports a failed update while keeping the published generation available", () => {
+		const diagnostic = MISMATCH_SNAPSHOT.diagnostics[0];
+		if (!diagnostic) throw new Error("缺少更新失敗測試資料");
+		const output = formatKnowledgeStatus({
+			snapshot: {
+				...MISMATCH_SNAPSHOT,
+				diagnostics: [
+					{
+						...diagnostic,
+						job: {
+							kb_id: "kb-zh",
+							operation: "update",
+							status: "failed",
+							phase: "failed",
+							message: "Update failed.",
+							started_at: UPDATED_AT,
+							updated_at: UPDATED_AT + 1_000,
+							last_progress_at: UPDATED_AT + 1_000,
+							processed_files: 1,
+							processed_chunks: 1,
+							total_files: 1,
+							skipped_total: 0,
+							added_chunks: 1,
+							removed_chunks: 0,
+							unchanged_chunks: 0,
+							error_message: "provider unavailable",
+						},
+					},
+				],
+			},
+			storagePath: "/tmp/知識庫",
+			watchCount: 0,
+			now: UPDATED_AT + 2_000,
+		});
+
+		expect(output).toContain("failed updates using the previous generation");
 		expect(output).not.toContain("Health: ✓");
 	});
 });

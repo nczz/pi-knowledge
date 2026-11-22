@@ -72,6 +72,29 @@ beforeEach(() => {
 	state.rejectNextUpdateMessage = undefined;
 });
 
+describe("daemon runtime configuration", () => {
+	it("rejects an invalid directory indexing timeout before engine initialization", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_SCAN_TIMEOUT_MS", "not-a-timeout");
+		try {
+			const { KnowledgeDaemonService } = await import("../../src/daemon/service.ts");
+			const service = new KnowledgeDaemonService({
+				name: "default",
+				id: "test-profile",
+				storageDir: "/tmp/storage",
+				runtimeDir: "/tmp/storage/.runtime",
+				profileRoot: "/tmp",
+				registryPath: "/tmp/profiles.json",
+			});
+
+			await expect(service.initialize(false)).rejects.toThrow(
+				"PI_KNOWLEDGE_SCAN_TIMEOUT_MS must be 0 or a positive integer",
+			);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+});
+
 describe("daemon watcher update coordination", () => {
 	it("runs one follow-up update when a watcher event arrives during an active update", async () => {
 		const { KnowledgeDaemonService } = await import("../../src/daemon/service.ts");

@@ -18,7 +18,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { assertWindowsPathAncestorsTrusted, assertWindowsPathPrivate, hardenWindowsPath } from "./windows-security.ts";
+import { assertWindowsPathPrivate, ensureWindowsPathPrivate } from "./windows-security.ts";
 
 export function assertOwnedDirectory(path: string): void {
 	const info = lstatSync(path);
@@ -26,8 +26,7 @@ export function assertOwnedDirectory(path: string): void {
 		throw new Error(`Expected a real directory owned by the current user: ${path}`);
 	}
 	if (process.platform === "win32") {
-		assertWindowsPathPrivate(path);
-		assertWindowsPathAncestorsTrusted(path);
+		assertWindowsPathPrivate(path, true);
 	} else {
 		if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
 			throw new Error(`Directory is not owned by the current user: ${path}`);
@@ -57,8 +56,8 @@ export function assertOwnedDirectory(path: string): void {
 
 export function ensurePrivateDirectory(path: string): string {
 	mkdirSync(path, { recursive: true, mode: 0o700 });
-	hardenWindowsPath(path, true);
-	assertOwnedDirectory(path);
+	if (process.platform === "win32") ensureWindowsPathPrivate(path, true);
+	else assertOwnedDirectory(path);
 	return realpathSync.native(path);
 }
 
@@ -123,7 +122,7 @@ export function hardenPrivateFile(path: string, label: string): void {
 	const info = lstatSync(path);
 	if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Invalid ${label}: ${path}`);
 	if (process.platform === "win32") {
-		hardenWindowsPath(path, false);
+		ensureWindowsPathPrivate(path, false, false);
 	} else {
 		if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
 			throw new Error(`${label} is not owned by the current user: ${path}`);
@@ -132,9 +131,18 @@ export function hardenPrivateFile(path: string, label: string): void {
 	}
 }
 
-export function readPrivateJson(path: string, label: string): unknown {
-	assertOwnedDirectory(dirname(path));
-	if (process.platform === "win32") assertWindowsPathPrivate(path);
+export interface ReadPrivateJsonOptions {
+	harden?: boolean;
+}
+
+export function readPrivateJson(path: string, label: string, options: ReadPrivateJsonOptions = {}): unknown {
+	if (process.platform === "win32") {
+		if (options.harden) ensureWindowsPathPrivate(path, false);
+		else assertWindowsPathPrivate(path, false);
+	} else {
+		assertOwnedDirectory(dirname(path));
+		if (options.harden) hardenPrivateFile(path, label);
+	}
 	const direct = lstatSync(path);
 	if (direct.isSymbolicLink() || !direct.isFile()) throw new Error(`Invalid ${label}: ${path}`);
 	if (process.platform !== "win32") {
@@ -165,7 +173,7 @@ export function writeJsonAtomic(path: string, value: unknown): void {
 		closeSync(fd);
 		fd = undefined;
 		renameSync(temp, path);
-		hardenWindowsPath(path, false);
+		if (process.platform === "win32") ensureWindowsPathPrivate(path, false, false);
 		fsyncDirectory(parent);
 	} finally {
 		if (fd !== undefined) closeSync(fd);

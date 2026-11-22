@@ -88,7 +88,11 @@ describe("model worker client", () => {
 		vi.resetModules();
 		vi.unstubAllEnvs();
 		childProcessMock.execFileSync.mockReset();
-		childProcessMock.execFileSync.mockReturnValue("v24.0.0\n");
+		childProcessMock.execFileSync.mockImplementation((file: unknown) =>
+			typeof file === "string" && file.toLowerCase().endsWith("powershell.exe")
+				? `${JSON.stringify({ private: true, ancestors_trusted: true, changed: false })}\n`
+				: "v24.0.0\n",
+		);
 		childProcessMock.fork.mockReset();
 		childProcessMock.spawn.mockReset();
 		Object.defineProperty(process, "execPath", { value: ORIGINAL_EXEC_PATH, configurable: true });

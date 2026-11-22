@@ -16,6 +16,7 @@ import type {
 } from "../engine.ts";
 import { KnowledgeEngine } from "../engine.ts";
 import type { FilesystemAccessPolicy } from "../filesystem-access.ts";
+import { resolveDirectoryScanTimeoutMs } from "../indexer/chunker.ts";
 import { configureModelWorkerNodePath, shutdownModelWorker } from "../model-worker-client.ts";
 import { configureDaemonNodePath, resolveDaemonNodePath } from "../node-runtime.ts";
 import type { KnowledgeProfile } from "../profiles.ts";
@@ -338,6 +339,7 @@ export class KnowledgeDaemonService {
 
 	async initialize(watchersEnabled: boolean): Promise<void> {
 		if (this.initialized) return;
+		resolveDirectoryScanTimeoutMs();
 		await this.engine.initialize(this.profile.storageDir);
 		this.initialized = true;
 		this.refreshCoverageSnapshot();
