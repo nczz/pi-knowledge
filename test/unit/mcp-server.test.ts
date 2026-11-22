@@ -7,6 +7,7 @@ import type { ToolDefinition } from "../../index.ts";
 import { KnowledgeDaemonClient } from "../../src/daemon/client.ts";
 import { canonicalizeAllowedRoots, McpStdioAdapter, parseMcpArguments } from "../../src/mcp/server.ts";
 import type { KnowledgeProfile } from "../../src/profiles.ts";
+import { ProviderError } from "../../src/provider-errors.ts";
 import { isObjectRecord } from "../../src/type-guards.ts";
 
 const tempDirs: string[] = [];
@@ -427,6 +428,40 @@ describe("MCP stdio adapter", () => {
 		);
 		expect(resultFor(messages, 2)).toMatchObject({
 			result: { content: [{ type: "text", text: "search failed" }], isError: true },
+		});
+	});
+
+	it("preserves safe provider failure details in MCP tool errors", async () => {
+		const messages = await runAdapter(
+			[
+				{ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+				{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "knowledge_search", arguments: {} } },
+			],
+			[
+				tool("knowledge_search", "read", async () => {
+					throw new ProviderError("Reranker API error: 429 rate limited", {
+						provider: "reranker",
+						operation: "rerank",
+						kind: "http",
+						status: 429,
+					});
+				}),
+			],
+		);
+		expect(resultFor(messages, 2)).toMatchObject({
+			result: {
+				content: [{ type: "text", text: "Reranker API error: 429 rate limited" }],
+				isError: true,
+				details: {
+					provider_failure: {
+						provider: "reranker",
+						operation: "rerank",
+						kind: "http",
+						status: 429,
+					},
+					retryability: "retryable",
+				},
+			},
 		});
 	});
 

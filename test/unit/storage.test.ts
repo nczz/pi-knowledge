@@ -7,6 +7,7 @@ import {
 	finishIndexingJob,
 	getChunksByKB,
 	getDefaultKnowledgeDir,
+	getIndexingJob,
 	getKB,
 	insertChunks,
 	insertStagedChunks,
@@ -213,6 +214,70 @@ describe("knowledge base embedding metadata", () => {
 		} finally {
 			db.close();
 			now.mockRestore();
+		}
+	});
+
+	it("persists provider failure facts and clears them when a new job starts", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-provider-failure-"));
+		tempDirs.push(dir);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, { name: "provider-failure", source_type: "text" });
+			startIndexingJob(db, kb.id, "update", "Updating");
+			finishIndexingJob(db, kb.id, "failed", "Update failed.", "provider unavailable", {
+				provider: "embedding",
+				operation: "embed_documents",
+				kind: "http",
+				status: 503,
+			});
+
+			expect(getIndexingJob(db, kb.id)).toMatchObject({
+				status: "failed",
+				error_message: "provider unavailable",
+				error_provider: "embedding",
+				provider_operation: "embed_documents",
+				error_kind: "http",
+				error_status: 503,
+				error_code: null,
+			});
+
+			startIndexingJob(db, kb.id, "update", "Retrying");
+			expect(getIndexingJob(db, kb.id)).toMatchObject({
+				status: "running",
+				error_message: null,
+				error_provider: null,
+				provider_operation: null,
+				error_kind: null,
+				error_status: null,
+				error_code: null,
+			});
+		} finally {
+			db.close();
+		}
+	});
+
+	it("migrates schema-v7 indexing jobs to structured provider failure columns", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-provider-migration-"));
+		tempDirs.push(dir);
+		const original = openDatabase(dir);
+		try {
+			for (const column of ["error_provider", "provider_operation", "error_kind", "error_status", "error_code"]) {
+				original.exec(`ALTER TABLE indexing_jobs DROP COLUMN ${column}`);
+			}
+			original.prepare("UPDATE schema_version SET version = 7").run();
+		} finally {
+			original.close();
+		}
+
+		const migrated = openDatabase(dir);
+		try {
+			const columns = migrated.prepare("PRAGMA table_info(indexing_jobs)").all() as Array<{ name: string }>;
+			expect(columns.map((column) => column.name)).toEqual(
+				expect.arrayContaining(["error_provider", "provider_operation", "error_kind", "error_status", "error_code"]),
+			);
+			expect(migrated.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+		} finally {
+			migrated.close();
 		}
 	});
 

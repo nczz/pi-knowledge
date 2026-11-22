@@ -19,6 +19,7 @@ import type { FilesystemAccessPolicy } from "../filesystem-access.ts";
 import { configureDaemonNodePath, resolveDaemonNodePath } from "../node-runtime.ts";
 import type { KnowledgeProfile } from "../profiles.ts";
 import { resolveKnowledgeProfile } from "../profiles.ts";
+import { ProviderError } from "../provider-errors.ts";
 import type { KnowledgeBase } from "../storage/sqlite.ts";
 import {
 	DAEMON_PROTOCOL_VERSION,
@@ -134,8 +135,9 @@ function requestDaemon<T>(
 					const frame = parseDaemonServerFrame(JSON.parse(line));
 					if (frame.id !== requestId) throw new Error("Daemon response request id mismatch");
 					if (frame.type === "progress") onProgress?.(frame.message);
-					else if (frame.type === "error") finish(new Error(frame.message));
-					else finish(undefined, frame.result as T);
+					else if (frame.type === "error") {
+						finish(frame.details ? new ProviderError(frame.message, frame.details) : new Error(frame.message));
+					} else finish(undefined, frame.result as T);
 				} catch (error) {
 					finish(error instanceof Error ? error : new Error(String(error)));
 				}

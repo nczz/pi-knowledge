@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { embedInModelWorker, measureEmbeddingInputInModelWorker } from "../model-worker-client.ts";
 import {
+	isAbortError,
+	type ProviderOperation,
+	providerCancelledError,
+	providerFailureDetails,
+	providerHttpError,
+	providerNetworkError,
+} from "../provider-errors.ts";
+import {
 	decorateEmbeddingInput,
 	decorationSupportedByLocalModel,
 	type EmbeddingDecorationStrategy,
@@ -97,10 +105,6 @@ function localEmbeddingConfig(maxChars: number, decoration: ResolvedEmbeddingDec
 function cleanEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
-}
-
-function isAbortError(error: unknown): boolean {
-	return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function clearIdleTimer(): void {
@@ -385,23 +389,32 @@ async function assertLocalInputsWithinBudget(
 
 async function embedPreparedInputsViaAPI(
 	preparedInputs: string[],
+	role: EmbeddingRole,
 	config: EmbeddingConfig,
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
+	const operation: ProviderOperation = role === "query" ? "embed_query" : "embed_documents";
 	const apiKey = cleanEnv(process.env.PI_KNOWLEDGE_EMBEDDING_API_KEY) ?? cleanEnv(process.env.OPENAI_API_KEY);
 	if (!config.baseUrl) throw new Error("OpenAI embedding base URL is not configured");
 	const endpoint = new URL("embeddings", `${config.baseUrl.replace(/\/+$/, "")}/`);
 	const headers: Record<string, string> = { "Content-Type": "application/json" };
 	if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-	const res = await fetch(endpoint, {
-		method: "POST",
-		headers,
-		body: JSON.stringify({ input: preparedInputs, model: config.model }),
-		signal,
-	});
+	let res: Response;
+	try {
+		res = await fetch(endpoint, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ input: preparedInputs, model: config.model }),
+			signal,
+		});
+	} catch (error) {
+		if (signal?.aborted || isAbortError(error)) throw providerCancelledError("embedding", operation, error);
+		throw providerNetworkError(error, "embedding", operation);
+	}
 	if (!res.ok) {
 		const detail = await res.text().catch(() => "");
-		throw new Error(`OpenAI embedding API error: ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
+		const message = `OpenAI embedding API error: ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`;
+		throw providerHttpError(message, "embedding", operation, res.status);
 	}
 	const payload = (await res.json()) as unknown;
 	if (!payload || typeof payload !== "object" || !("data" in payload && Array.isArray(payload.data))) {
@@ -449,11 +462,14 @@ export async function embedTextsWithConfig(
 		if (!inputValidated) {
 			assertMeasurementWithinBudget(apiInputMeasurement(preparedInputs, config), role, config.provider);
 		}
-		if (signal?.aborted) throw new Error("Cancelled");
+		const operation: ProviderOperation = role === "query" ? "embed_query" : "embed_documents";
+		if (signal?.aborted) throw providerCancelledError("embedding", operation, signal.reason);
 		try {
-			return { vectors: await embedPreparedInputsViaAPI(preparedInputs, config, signal), config };
+			return { vectors: await embedPreparedInputsViaAPI(preparedInputs, role, config, signal), config };
 		} catch (error) {
-			if (signal?.aborted || isAbortError(error)) throw new Error("Cancelled");
+			const details = providerFailureDetails(error);
+			if (details?.kind === "cancelled") throw error;
+			if (signal?.aborted || isAbortError(error)) throw providerCancelledError("embedding", operation, error);
 			if (!config.apiFallbackToLocal || !options.allowApiFallback) throw error;
 			console.warn(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,

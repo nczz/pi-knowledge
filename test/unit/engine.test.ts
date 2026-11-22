@@ -844,6 +844,49 @@ describe("KnowledgeEngine", () => {
 			);
 		});
 
+		it("persists retryable provider failures while preserving the published update generation", async () => {
+			const filePath = join(TEST_DIR, "provider-failure-update.txt");
+			writeFileSync(filePath, "PublishedProviderToken remains searchable after a provider failure.");
+			await engine.add(filePath, "Provider Failure Update");
+			const before = engine.list()[0];
+			writeFileSync(filePath, "UnpublishedProviderToken must not leak from failed provider staging.");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:test-embedding");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://embedding.example/v1");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn().mockResolvedValue(new Response("provider overloaded", { status: 503, statusText: "Unavailable" })),
+			);
+
+			await expect(engine.update("Provider Failure Update")).rejects.toThrow(
+				"OpenAI embedding API error: 503 provider overloaded",
+			);
+
+			const after = engine.list()[0];
+			const db = openDatabase(TEST_DIR);
+			const job = getIndexingJob(db, after.id);
+			db.close();
+			expect(after.status).toBe("ready");
+			expect(after.updated_at).toBe(before.updated_at);
+			expect(after.indexed_at).toBe(before.indexed_at);
+			expect(job).toMatchObject({
+				status: "failed",
+				error_provider: "embedding",
+				provider_operation: "embed_documents",
+				error_kind: "http",
+				error_status: 503,
+				error_code: null,
+			});
+			expect(
+				engine
+					.doctor()
+					.issues.find(
+						(issue) => issue.kb_name === "Provider Failure Update" && issue.action_code === "retry_provider_request",
+					),
+			).toMatchObject({ severity: "warning" });
+			expect((await engine.search("PublishedProviderToken", { mode: "fast", kb_id: after.id })).total_count).toBe(1);
+			expect((await engine.search("UnpublishedProviderToken", { mode: "fast", kb_id: after.id })).total_count).toBe(0);
+		});
+
 		it("updates document files from extractors instead of raw UTF-8 bytes", async () => {
 			const filePath = join(TEST_DIR, "source.docx");
 			writeFileSync(filePath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));

@@ -498,3 +498,28 @@ CommonJS dependencies。
 - MCP HTTP 也是同機 transport；不是跨機器、多使用者或未受信網路服務。需要不同 capability 的 client 必須使用不同 endpoint/token/process。
 - `coverage.json` 是敏感且 advisory 的 profile scope/status，不是 per-file freshness authority，也不能反向控制 daemon。
 - 不相容 build 由 authenticated retirement 後重啟；client 不得直接以 PID 猜測 kill。
+
+---
+
+## ADR-025: Provider failure contract 跨 daemon、MCP 與 persisted job
+
+**狀態**: 已決定
+
+**背景**: OpenAI-compatible embedding 與 API reranker 原本只保留格式化訊息。HTTP status 在 provider call site 已知，卻在 daemon RPC、MCP tool error 與 indexing job persistence 邊界被壓成普通 `Error`；上層因此只能解析文字，無法可靠區分 rate limit、服務中斷、credential/config rejection、timeout 與使用者取消。
+
+**決策**:
+- Embedding 與 reranker 共用最小 failure facts：`provider`、`operation`、`kind`，以及可選的 HTTP `status` 或經白名單字元/長度驗證的 network `code`；exported `ProviderError` 也以 direct read-only properties 提供相同 facts，caller 不需解析 message 或內部 metadata。
+- `kind` 固定區分 `http`、`network`、`timeout`、`cancelled`。保留既有 human-readable message 與 process 內原始 `cause`，但跨 process 只傳安全 facts，不序列化 headers、credentials、stack 或任意 provider payload。
+- Daemon protocol 使用 optional details，client 收到後重建 typed provider error；MCP tool error 在既有文字之外提供相同 facts 與 retryability。
+- HTTP 408/425/429/5xx、network 與 timeout 為 retryable guidance；其他 4xx 為 non-retryable guidance。這個分類不自動 retry，避免 mutation 重送與 rate-limit amplification。
+- Indexing job 只持久化最小 facts。既有 published generation 的 update 失敗時仍維持 ready/stale 與可搜尋，`knowledge_status` 顯示 provider facts，`knowledge_doctor` 提供 retry 或修正設定的 machine-readable action。
+
+**理由**:
+- Structured facts 讓 Pi/OMP、MCP client、status 與 doctor 共用同一判斷，不依賴英文訊息 parsing。
+- Optional protocol field 與 nullable schema migration 保持舊 job、非 provider error 及同版本 daemon lifecycle 的相容性。
+- 不持久化 response body 或 endpoint，降低 secret/敏感 provider output 長期留存風險。
+
+**限制**:
+- Retryability 是一般 HTTP/network operational guidance，不保證特定 provider 的 request 可安全重送。
+- Local model worker failure 仍使用既有 worker error contract；未經 HTTP API 的錯誤不冒充 provider HTTP status。
+- 本次 schema 變更不要求重建 KB 或 vectors。

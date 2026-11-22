@@ -122,7 +122,7 @@ describe("embedding provider", () => {
 		expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer embedding-key");
 	});
 
-	it("surfaces API embedding failures by default instead of silently falling back", async () => {
+	it("preserves structured HTTP failures without changing the embedding error message", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1");
 		vi.stubEnv("OPENAI_API_KEY", "test-key");
@@ -131,10 +131,87 @@ describe("embedding provider", () => {
 			vi.fn(async () => new Response("context window exceeded", { status: 400 })),
 		);
 
-		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		const [{ embedDocuments }, { ProviderError }] = await Promise.all([
+			import("../../src/embedding/provider.ts"),
+			import("../../src/provider-errors.ts"),
+		]);
+		const error = await embedDocuments(["hello"]).catch((candidate: unknown) => candidate);
 
-		await expect(embedDocuments(["hello"])).rejects.toThrow("OpenAI embedding API error: 400 context window exceeded");
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "OpenAI embedding API error: 400 context window exceeded",
+			provider: "embedding",
+			operation: "embed_documents",
+			kind: "http",
+			status: 400,
+			providerFailure: {
+				provider: "embedding",
+				operation: "embed_documents",
+				kind: "http",
+				status: 400,
+			},
+		});
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
+	});
+
+	it("retains safe network codes from the fetch cause chain", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+		const fetchError = new TypeError("fetch failed", { cause });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw fetchError;
+			}),
+		);
+
+		const [{ embedDocuments }, { ProviderError }] = await Promise.all([
+			import("../../src/embedding/provider.ts"),
+			import("../../src/provider-errors.ts"),
+		]);
+		const error = await embedDocuments(["hello"]).catch((candidate: unknown) => candidate);
+
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "fetch failed",
+			cause: fetchError,
+			providerFailure: {
+				provider: "embedding",
+				operation: "embed_documents",
+				kind: "network",
+				code: "ECONNREFUSED",
+			},
+		});
+	});
+
+	it("preserves the embedding abort as the cause of a structured cancellation", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		const controller = new AbortController();
+		const abort = new DOMException("The operation was aborted.", "AbortError");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				controller.abort();
+				throw abort;
+			}),
+		);
+
+		const [{ embedDocuments }, { ProviderError }] = await Promise.all([
+			import("../../src/embedding/provider.ts"),
+			import("../../src/provider-errors.ts"),
+		]);
+		const error = await embedDocuments(["hello"], controller.signal).catch((candidate: unknown) => candidate);
+
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "Cancelled",
+			cause: abort,
+			providerFailure: {
+				provider: "embedding",
+				operation: "embed_documents",
+				kind: "cancelled",
+			},
+		});
 	});
 
 	it("rejects API embedding input above the configured safety cap without truncating or sending it", async () => {

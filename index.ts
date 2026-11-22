@@ -4,6 +4,15 @@ import type { FilesystemAccessPolicy } from "./src/filesystem-access.ts";
 import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
 import { formatKnowledgeStatus } from "./src/status.ts";
 
+export type {
+	ProviderFailureDetails,
+	ProviderFailureKind,
+	ProviderFailureRetryability,
+	ProviderName,
+	ProviderOperation,
+} from "./src/provider-errors.ts";
+export { ProviderError } from "./src/provider-errors.ts";
+
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
 type ToolUpdate = (result: ToolResult) => void;
 type ToolApproval = "read" | "write" | "exec";

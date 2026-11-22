@@ -72,6 +72,8 @@ Local embeddings, local/HF reranking, and PDF/DOCX extraction require a real Nod
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, context-window errors, server batch limits, or instruction mismatches and can produce a KB with a different embedding model than intended. Query-time fallback is opt-in and supports only E5 `on`/`off` semantics; indexing fallback is disabled to prevent mixed vector spaces in one KB. OpenAI-compatible embedding requests send `Authorization: Bearer <key>` only when `PI_KNOWLEDGE_EMBEDDING_API_KEY` or `OPENAI_API_KEY` is configured. Instruction decoration is applied once before both safety-cap validation and the HTTP request.
 
+Embedding and reranker API failures use the exported `ProviderError` class and expose provider, operation, HTTP/network/timeout/cancellation kind, optional numeric HTTP `status`, and an optional validated network `code` as direct read-only properties. The same safe facts survive the profile daemon and MCP response. Credentials, headers, and arbitrary provider response fields are not copied into this metadata. HTTP 408/425/429 and 5xx, network failures, and timeouts are reported as retryable; other 4xx failures direct the operator to endpoint, credential, model, or request-limit configuration. This classification does not trigger automatic retries. If `knowledge_update` fails after a KB already has a published generation, that generation remains searchable while the failed job and provider facts remain visible in `knowledge_status` and `knowledge_doctor`.
+
 ## Runtime Features and Diagnostics
 
 | Variable | Default | Purpose |

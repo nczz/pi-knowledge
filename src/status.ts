@@ -1,4 +1,5 @@
 import type { KnowledgeStatusSnapshot } from "./engine.ts";
+import { providerFailureDetailsFromStoredFields, providerFailureLabel } from "./provider-errors.ts";
 
 export interface KnowledgeStatusFormatOptions {
 	snapshot: KnowledgeStatusSnapshot;
@@ -57,6 +58,8 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 			);
 			if (diagnostic.job.message) lines.push(`    last: ${diagnostic.job.message}`);
 			if (diagnostic.job.error_message) lines.push(`    error: ${diagnostic.job.error_message}`);
+			const providerFailure = providerFailureDetailsFromStoredFields(diagnostic.job);
+			if (providerFailure) lines.push(`    provider: ${providerFailureLabel(providerFailure)}`);
 		}
 		if (diagnostic.scan_error) lines.push(`    ⚠️ source scan failed: ${diagnostic.scan_error}`);
 		else

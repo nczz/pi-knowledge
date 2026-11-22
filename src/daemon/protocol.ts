@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isProviderFailureDetails, type ProviderFailureDetails } from "../provider-errors.ts";
 import { isObjectRecord } from "../type-guards.ts";
 
 export const DAEMON_PROTOCOL_VERSION = 1;
@@ -140,6 +141,7 @@ export interface DaemonErrorFrame {
 	id: string;
 	code: string;
 	message: string;
+	details?: ProviderFailureDetails;
 }
 
 export type DaemonServerFrame = DaemonProgressFrame | DaemonResultFrame | DaemonErrorFrame;
@@ -177,6 +179,9 @@ export function parseDaemonServerFrame(value: unknown): DaemonServerFrame {
 	if (value.type === "progress" && typeof value.message === "string") return value as unknown as DaemonProgressFrame;
 	if (value.type === "result" && "result" in value) return value as unknown as DaemonResultFrame;
 	if (value.type === "error" && typeof value.code === "string" && typeof value.message === "string") {
+		if (value.details !== undefined && !isProviderFailureDetails(value.details)) {
+			throw new Error("Invalid daemon error details");
+		}
 		return value as unknown as DaemonErrorFrame;
 	}
 	throw new Error("Invalid daemon response frame");

@@ -73,6 +73,12 @@ import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { extractDocumentInModelWorker, shutdownModelWorker } from "./model-worker-client.ts";
 import { fetchPublicText } from "./network/safe-fetch.ts";
+import {
+	classifyProviderFailure,
+	providerFailureDetails,
+	providerFailureDetailsFromStoredFields,
+	providerFailureLabel,
+} from "./provider-errors.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { MAX_SEARCH_WINDOW } from "./search/contracts.ts";
 import { diversifyRankedChunks, interleaveByFile, type RankedChunk } from "./search/diversity.ts";
@@ -296,6 +302,8 @@ export interface DoctorIssue {
 		| "rebuild_vectors"
 		| "reindex_for_embedding_budget"
 		| "check_source"
+		| "retry_provider_request"
+		| "fix_provider_config"
 		| "none";
 }
 
@@ -1800,6 +1808,7 @@ export class KnowledgeEngine {
 					isCancellationError(e) ? "cancelled" : "failed",
 					isCancellationError(e) ? "Indexing cancelled." : "Indexing failed.",
 					e instanceof Error ? e.message : String(e),
+					providerFailureDetails(e),
 				);
 				deleteKB(this.db, kb.id);
 				this.deleteVectorFiles(kb.id, kb.vector_file);
@@ -2236,6 +2245,7 @@ export class KnowledgeEngine {
 				isCancellationError(error) ? "cancelled" : "failed",
 				isCancellationError(error) ? "Update cancelled." : "Update failed.",
 				`${errorMessage}${cleanupSuffix}`,
+				providerFailureDetails(error),
 			);
 			throw error;
 		}
@@ -2983,12 +2993,30 @@ export class KnowledgeEngine {
 				diagnostic.job.status === "failed" &&
 				(diagnostic.status === "ready" || diagnostic.status === "stale")
 			) {
+				const providerFailure = providerFailureDetailsFromStoredFields(diagnostic.job);
+				const retryability = providerFailure ? classifyProviderFailure(providerFailure) : "unknown";
+				const label = providerFailure ? providerFailureLabel(providerFailure) : undefined;
 				issues.push({
 					severity: "warning",
 					kb_name: diagnostic.kb_name,
-					message: "The latest update failed; the previous published generation remains searchable.",
-					action: "Correct the reported update error, then run knowledge_update again.",
-					action_code: "run_update",
+					message:
+						retryability === "retryable"
+							? `The latest update failed because of a retryable provider failure (${label}); the previous published generation remains searchable.`
+							: retryability === "non_retryable"
+								? `The latest update failed because the provider rejected the request (${label}); the previous published generation remains searchable.`
+								: "The latest update failed; the previous published generation remains searchable.",
+					action:
+						retryability === "retryable"
+							? "Retry knowledge_update after the provider recovers."
+							: retryability === "non_retryable"
+								? "Check the provider endpoint, credentials, model, and request limits before running knowledge_update again."
+								: "Correct the reported update error, then run knowledge_update again.",
+					action_code:
+						retryability === "retryable"
+							? "retry_provider_request"
+							: retryability === "non_retryable"
+								? "fix_provider_config"
+								: "run_update",
 				});
 			}
 			if (diagnostic.status === "error") {
@@ -3504,6 +3532,7 @@ export class KnowledgeEngine {
 					isCancellationError(error) ? "cancelled" : "failed",
 					isCancellationError(error) ? "Import cancelled." : `Import failed near line ${lineNumber}.`,
 					error instanceof Error ? error.message : String(error),
+					providerFailureDetails(error),
 				);
 				deleteKB(this.db, kb.id);
 				this.deleteVectorFiles(kb.id, kb.vector_file);

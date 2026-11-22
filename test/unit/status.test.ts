@@ -182,6 +182,11 @@ describe("knowledge status formatting", () => {
 							removed_chunks: 0,
 							unchanged_chunks: 0,
 							error_message: "provider unavailable",
+							error_provider: "embedding",
+							provider_operation: "embed_documents",
+							error_kind: "http",
+							error_status: 503,
+							error_code: null,
 						},
 					},
 				],
@@ -192,6 +197,7 @@ describe("knowledge status formatting", () => {
 		});
 
 		expect(output).toContain("failed updates using the previous generation");
+		expect(output).toContain("provider: embedding/embed_documents · http · HTTP 503 · retryable");
 		expect(output).not.toContain("Health: ✓");
 	});
 });

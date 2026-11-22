@@ -1,3 +1,11 @@
+import {
+	isAbortError,
+	providerCancelledError,
+	providerFailureDetails,
+	providerHttpError,
+	providerNetworkError,
+	providerTimeoutError,
+} from "../provider-errors.ts";
 import type { RerankCandidate } from "./reranker.ts";
 import type { ApiRerankerConfig } from "./reranker-config.ts";
 
@@ -16,17 +24,29 @@ function valueAtPath(value: unknown, path: string): unknown {
 	return current;
 }
 
-function createAbortSignal(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+function createAbortSignal(
+	timeoutMs: number,
+	signal?: AbortSignal,
+): {
+	signal: AbortSignal;
+	cleanup: () => void;
+	timedOut: () => boolean;
+	timeoutMessage: string;
+} {
 	const controller = new AbortController();
 	const abortFromParent = (): void => controller.abort(signal?.reason);
 	if (signal?.aborted) abortFromParent();
 	else signal?.addEventListener("abort", abortFromParent, { once: true });
-	const timeout = setTimeout(
-		() => controller.abort(new Error(`Reranker API timed out after ${timeoutMs}ms`)),
-		timeoutMs,
-	);
+	const timeoutMessage = `Reranker API timed out after ${timeoutMs}ms`;
+	let timeoutTriggered = false;
+	const timeout = setTimeout(() => {
+		timeoutTriggered = true;
+		controller.abort(new Error(timeoutMessage));
+	}, timeoutMs);
 	return {
 		signal: controller.signal,
+		timedOut: () => timeoutTriggered,
+		timeoutMessage,
 		cleanup() {
 			clearTimeout(timeout);
 			signal?.removeEventListener("abort", abortFromParent);
@@ -83,7 +103,8 @@ export async function rerankViaApi(
 		});
 		if (!response.ok) {
 			const detail = await response.text().catch(() => "");
-			throw new Error(`Reranker API error: ${response.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
+			const message = `Reranker API error: ${response.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`;
+			throw providerHttpError(message, "reranker", "rerank", response.status);
 		}
 		const data = (await response.json()) as unknown;
 		const results = valueAtPath(data, config.resultsPath);
@@ -93,7 +114,11 @@ export async function rerankViaApi(
 		else ranked.sort((a, b) => b.score - a.score);
 		return ranked.slice(0, topK);
 	} catch (error) {
-		if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw new Error("Cancelled");
+		const details = providerFailureDetails(error);
+		if (details) throw error;
+		if (signal?.aborted) throw providerCancelledError("reranker", "rerank", error);
+		if (abort.timedOut()) throw providerTimeoutError(abort.timeoutMessage, "reranker", "rerank", error);
+		if (error instanceof TypeError || isAbortError(error)) throw providerNetworkError(error, "reranker", "rerank");
 		throw error;
 	} finally {
 		abort.cleanup();

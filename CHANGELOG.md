@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.16.3] - 2026-11-22
+
+### Fixed
+- Preserved embedding and reranker HTTP status, network code, timeout, and cancellation facts as direct properties on the exported `ProviderError`, across daemon and MCP boundaries; failed updates now persist safe provider diagnostics and distinguish retryable outages from configuration rejection without replacing the last searchable generation (#31).
+
 ## [0.16.2] - 2026-11-22
 
 ### Fixed

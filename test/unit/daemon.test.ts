@@ -3,7 +3,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureDaemonClient, KnowledgeDaemonClient } from "../../src/daemon/client.ts";
 import { MAX_RPC_FRAME_BYTES } from "../../src/daemon/protocol.ts";
 import {
@@ -17,6 +17,7 @@ import {
 import { DaemonAlreadyRunningError, ProfileDaemonServer } from "../../src/daemon/server.ts";
 import { configureDaemonNodePath } from "../../src/node-runtime.ts";
 import type { KnowledgeProfile } from "../../src/profiles.ts";
+import { ProviderError } from "../../src/provider-errors.ts";
 import { writeJsonAtomic } from "../../src/secure-files.ts";
 
 const tempDirs: string[] = [];
@@ -74,6 +75,8 @@ afterEach(() => {
 	else process.env.PI_KNOWLEDGE_DIR = originalKnowledgeDir;
 	if (originalRuntimeDir === undefined) delete process.env.PI_KNOWLEDGE_RUNTIME_DIR;
 	else process.env.PI_KNOWLEDGE_RUNTIME_DIR = originalRuntimeDir;
+	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -102,6 +105,43 @@ describe("profile daemon lifecycle", () => {
 		await server.waitUntilStopped();
 		expect(existsSync(daemonManifestPath(profile))).toBe(false);
 	});
+
+	it("round-trips structured provider failures through daemon RPC", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:test-embedding");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://embedding.example/v1");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue(new Response("provider overloaded", { status: 503, statusText: "Unavailable" })),
+		);
+		const profile = makeProfile("provider-error");
+		const server = new ProfileDaemonServer(profile);
+		await server.start();
+		try {
+			const client = new KnowledgeDaemonClient(profile);
+			let failure: unknown;
+			try {
+				await client.add("Provider error RPC fixture", "Provider Error RPC");
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toBeInstanceOf(ProviderError);
+			expect(failure).toMatchObject({
+				message: "OpenAI embedding API error: 503 provider overloaded",
+				provider: "embedding",
+				operation: "embed_documents",
+				kind: "http",
+				status: 503,
+				providerFailure: {
+					provider: "embedding",
+					operation: "embed_documents",
+					kind: "http",
+					status: 503,
+				},
+			});
+		} finally {
+			await server.shutdown();
+		}
+	}, 30_000);
 
 	it("refuses a second live daemon for the same profile", async () => {
 		const profile = makeProfile("singleton");

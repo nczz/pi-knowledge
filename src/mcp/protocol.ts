@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 import type { ToolDefinition } from "../../index.ts";
 import type { KnowledgeDaemonClient } from "../daemon/client.ts";
 import type { KnowledgeProfile } from "../profiles.ts";
+import { classifyProviderFailure, providerFailureDetails } from "../provider-errors.ts";
 import { isObjectRecord } from "../type-guards.ts";
 
 export const MODERN_MCP_PROTOCOL = "2026-07-28";
@@ -409,9 +410,18 @@ export class McpProtocolSession {
 			const normalized = result as Record<string, unknown>;
 			return era === "modern" ? this.modernResult(normalized) : normalized;
 		} catch (error) {
+			const providerFailure = providerFailureDetails(error);
 			const failed = {
 				content: [{ type: "text", text: mcpErrorMessage(error) }],
 				isError: true,
+				...(providerFailure
+					? {
+							details: {
+								provider_failure: providerFailure,
+								retryability: classifyProviderFailure(providerFailure),
+							},
+						}
+					: {}),
 			};
 			return era === "modern" ? this.modernResult(failed) : failed;
 		} finally {

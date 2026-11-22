@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ProviderError } from "../../src/provider-errors.ts";
 import { rerankViaApi } from "../../src/search/reranker-api.ts";
 import type { ApiRerankerConfig } from "../../src/search/reranker-config.ts";
 
@@ -136,28 +137,126 @@ describe("API reranker", () => {
 		]);
 	});
 
-	it("surfaces HTTP failures without falling back to the local worker", async () => {
+	it("preserves structured HTTP failures without changing the reranker error message", async () => {
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => new Response("bad key", { status: 401 })),
 		);
 
-		await expect(rerankViaApi("query", [{ chunkId: "chunk", content: "doc" }], 1, baseConfig)).rejects.toThrow(
-			"Reranker API error: 401 bad key",
+		const error = await rerankViaApi("query", [{ chunkId: "chunk", content: "doc" }], 1, baseConfig).catch(
+			(candidate: unknown) => candidate,
 		);
+
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "Reranker API error: 401 bad key",
+			provider: "reranker",
+			operation: "rerank",
+			kind: "http",
+			status: 401,
+			providerFailure: {
+				provider: "reranker",
+				operation: "rerank",
+				kind: "http",
+				status: 401,
+			},
+		});
 	});
 
-	it("normalizes aborts to Cancelled", async () => {
+	it("retains safe network codes from reranker fetch failures", async () => {
+		const cause = Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => {
-				throw new DOMException("The operation was aborted.", "AbortError");
+				throw new TypeError("fetch failed", { cause });
 			}),
 		);
 
-		await expect(rerankViaApi("query", [{ chunkId: "chunk", content: "doc" }], 1, baseConfig)).rejects.toThrow(
-			"Cancelled",
+		const error = await rerankViaApi("query", [{ chunkId: "chunk", content: "doc" }], 1, baseConfig).catch(
+			(candidate: unknown) => candidate,
 		);
+
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "fetch failed",
+			provider: "reranker",
+			operation: "rerank",
+			kind: "network",
+			code: "ECONNRESET",
+			providerFailure: {
+				provider: "reranker",
+				operation: "rerank",
+				kind: "network",
+				code: "ECONNRESET",
+			},
+		});
+	});
+
+	it("preserves caller cancellation separately from reranker timeouts", async () => {
+		const controller = new AbortController();
+		const abort = new DOMException("The operation was aborted.", "AbortError");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				controller.abort();
+				throw abort;
+			}),
+		);
+
+		const error = await rerankViaApi(
+			"query",
+			[{ chunkId: "chunk", content: "doc" }],
+			1,
+			baseConfig,
+			controller.signal,
+		).catch((candidate: unknown) => candidate);
+
+		expect(error).toBeInstanceOf(ProviderError);
+		expect(error).toMatchObject({
+			message: "Cancelled",
+			cause: abort,
+			providerFailure: {
+				provider: "reranker",
+				operation: "rerank",
+				kind: "cancelled",
+			},
+		});
+	});
+
+	it("classifies the reranker-owned deadline as a timeout rather than cancellation", async () => {
+		vi.useFakeTimers();
+		try {
+			const abort = new DOMException("The operation was aborted.", "AbortError");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async (_input: URL | string, init?: RequestInit) =>
+						await new Promise<Response>((_resolve, reject) => {
+							init?.signal?.addEventListener("abort", () => reject(abort), { once: true });
+						}),
+				),
+			);
+			const pending = rerankViaApi("query", [{ chunkId: "chunk", content: "doc" }], 1, {
+				...baseConfig,
+				timeoutMs: 50,
+			}).catch((candidate: unknown) => candidate);
+
+			await vi.advanceTimersByTimeAsync(50);
+			const error = await pending;
+
+			expect(error).toBeInstanceOf(ProviderError);
+			expect(error).toMatchObject({
+				message: "Reranker API timed out after 50ms",
+				cause: abort,
+				providerFailure: {
+					provider: "reranker",
+					operation: "rerank",
+					kind: "timeout",
+				},
+			});
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("rejects malformed result indexes", async () => {

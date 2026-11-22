@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import type { KnowledgeProfile } from "../profiles.ts";
+import { type ProviderFailureDetails, providerFailureDetails } from "../provider-errors.ts";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SHUTDOWN_GRACE_MS,
@@ -51,9 +52,9 @@ export interface ProfileDaemonServerOptions {
 	failStop?: (message: string) => never;
 }
 
-function errorFrame(id: string, code: string, message: string): DaemonErrorFrame {
+function errorFrame(id: string, code: string, message: string, details?: ProviderFailureDetails): DaemonErrorFrame {
 	const boundedMessage = message.length > 4_096 ? `${message.slice(0, 4_096)}…` : message;
-	return { type: "error", id, code, message: boundedMessage };
+	return { type: "error", id, code, message: boundedMessage, ...(details ? { details } : {}) };
 }
 
 function endpointAcceptsConnections(endpoint: string, timeoutMs = 500): Promise<boolean> {
@@ -460,7 +461,12 @@ export class ProfileDaemonServer {
 			if (!controller.signal.aborted) {
 				this.writeFrame(
 					socket,
-					errorFrame(frame.id, "operation_failed", error instanceof Error ? error.message : String(error)),
+					errorFrame(
+						frame.id,
+						"operation_failed",
+						error instanceof Error ? error.message : String(error),
+						providerFailureDetails(error),
+					),
 				);
 			}
 		} finally {

@@ -333,6 +333,15 @@ OpenAI-compatible provider 不能假設服務端一定回傳 unit vectors。Dot 
 - `knowledge_status` 的 aggregate health 必須包含 embedding mismatch/config error；不能同時列 warning 又顯示 `Health: ✓`。
 
 
+### Provider status 不能只留在 call site
+
+只在 embedding 或 reranker HTTP helper 上加 `status` property 不足以形成產品合約；production path 還會經過 profile daemon RPC、MCP tool response，indexing failure 也需要在目前 TUI progress 消失後由 status/doctor 解讀。
+
+- 共用 failure facts 必須只包含 provider、operation、kind、HTTP status 或安全 network code；不可把 headers、API key、任意 response JSON 或 stack 序列化。
+- Timeout 與 caller cancellation 必須分開。Reranker 自己的 deadline 是 retryable timeout；外部 AbortSignal 是 cancellation。
+- Retryability 只提供 action guidance，不自動 retry mutation。
+- Update provider failure 不得破壞既有 published generation；persisted failed job 是診斷狀態，不是把可搜尋 KB 降為 error。
+
 ## Cancellation boundaries must preserve unrelated work
 
 Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能把共享資源或既有 KB 推進失敗狀態。

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
+import type { ProviderFailureDetails } from "../provider-errors.ts";
 
 export interface KnowledgeBase {
 	id: string;
@@ -42,6 +43,11 @@ export interface IndexingJob {
 	removed_chunks: number;
 	unchanged_chunks: number;
 	error_message: string | null;
+	error_provider: ProviderFailureDetails["provider"] | null;
+	provider_operation: ProviderFailureDetails["operation"] | null;
+	error_kind: ProviderFailureDetails["kind"] | null;
+	error_status: number | null;
+	error_code: string | null;
 }
 
 export interface Chunk {
@@ -79,7 +85,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const ITERATION_BATCH_SIZE = 500;
 
 const UPDATE_STAGING_SCHEMA_SQL = `
@@ -185,6 +191,11 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
   removed_chunks INTEGER NOT NULL DEFAULT 0,
   unchanged_chunks INTEGER NOT NULL DEFAULT 0,
   error_message TEXT,
+  error_provider TEXT,
+  provider_operation TEXT,
+  error_kind TEXT,
+  error_status INTEGER,
+  error_code TEXT,
   FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
 );
 
@@ -494,6 +505,22 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			db.exec(UPDATE_STAGING_SCHEMA_SQL);
 			continue;
 		}
+		if (v === 8) {
+			const columns = new Set(
+				(db.prepare("PRAGMA table_info(indexing_jobs)").all() as Array<{ name: string }>).map((column) => column.name),
+			);
+			const additions = [
+				["error_provider", "TEXT"],
+				["provider_operation", "TEXT"],
+				["error_kind", "TEXT"],
+				["error_status", "INTEGER"],
+				["error_code", "TEXT"],
+			] as const;
+			for (const [name, type] of additions) {
+				if (!columns.has(name)) db.exec(`ALTER TABLE indexing_jobs ADD COLUMN ${name} ${type}`);
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -621,7 +648,12 @@ export function startIndexingJob(
 			added_chunks = 0,
 			removed_chunks = 0,
 			unchanged_chunks = 0,
-			error_message = NULL`,
+			error_message = NULL,
+			error_provider = NULL,
+			provider_operation = NULL,
+			error_kind = NULL,
+			error_status = NULL,
+			error_code = NULL`,
 	).run(kbId, operation, message, now, now, now);
 }
 
@@ -679,6 +711,7 @@ export function finishIndexingJob(
 	status: Extract<IndexingJob["status"], "succeeded" | "failed" | "cancelled">,
 	message: string,
 	errorMessage?: string,
+	providerFailure?: ProviderFailureDetails,
 ): void {
 	const now = Date.now();
 	db.prepare(
@@ -688,9 +721,27 @@ export function finishIndexingJob(
 			message = ?,
 			updated_at = ?,
 			last_progress_at = ?,
-			error_message = ?
+			error_message = ?,
+			error_provider = ?,
+			provider_operation = ?,
+			error_kind = ?,
+			error_status = ?,
+			error_code = ?
 		WHERE kb_id = ?`,
-	).run(status, status, message, now, now, errorMessage ?? null, kbId);
+	).run(
+		status,
+		status,
+		message,
+		now,
+		now,
+		errorMessage ?? null,
+		providerFailure?.provider ?? null,
+		providerFailure?.operation ?? null,
+		providerFailure?.kind ?? null,
+		providerFailure?.status ?? null,
+		providerFailure?.code ?? null,
+		kbId,
+	);
 }
 
 export function getIndexingJob(db: Database.Database, kbId: string): IndexingJob | undefined {
@@ -1118,7 +1169,12 @@ export function publishStagedUpdate(db: Database.Database, kbId: string, publica
 			     message = ?,
 			     updated_at = ?,
 			     last_progress_at = ?,
-			     error_message = NULL
+			     error_message = NULL,
+			     error_provider = NULL,
+			     provider_operation = NULL,
+			     error_kind = NULL,
+			     error_status = NULL,
+			     error_code = NULL
 			 WHERE kb_id = ?`,
 		).run(publication.jobMessage, now, now, kbId);
 		db.prepare("DELETE FROM update_removed_chunks WHERE kb_id = ?").run(kbId);
