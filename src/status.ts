@@ -18,6 +18,11 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		`Knowledge bases: ${snapshot.knowledge_bases.length}`,
 		`Active watchers: ${watchCount}`,
 	];
+	for (const mutation of snapshot.active_mutations) {
+		const target = mutation.target ? ` for ${JSON.stringify(mutation.target)}` : "";
+		const ageSeconds = Math.max(0, Math.round((now - mutation.started_at) / 1_000));
+		lines.push(`Active mutation: ${mutation.operation}${target} — running ${ageSeconds}s — id ${mutation.id}`);
+	}
 	if (snapshot.embedding_error) lines.push(`Embedding configuration: ⚠️ ${snapshot.embedding_error}`);
 	lines.push("");
 
@@ -109,6 +114,7 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 			const embedding = embeddingByKb.get(kb.id);
 			return count + (embedding && !embedding.compatibility.compatible ? 1 : 0);
 		}, 0) + (snapshot.embedding_error ? 1 : 0);
+	const totalActiveMutations = snapshot.active_mutations.length;
 	if (
 		totalStale === 0 &&
 		totalOrphans === 0 &&
@@ -117,6 +123,7 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		totalErrors === 0 &&
 		totalFailedUpdates === 0 &&
 		totalEmbedding === 0 &&
+		totalActiveMutations === 0 &&
 		snapshot.knowledge_bases.length > 0
 	) {
 		lines.push("", "Health: ✓ all indexes up to date and embedding-compatible");
@@ -127,11 +134,12 @@ export function formatKnowledgeStatus(options: KnowledgeStatusFormatOptions): st
 		totalIndexing > 0 ||
 		totalErrors > 0 ||
 		totalFailedUpdates > 0 ||
-		totalEmbedding > 0
+		totalEmbedding > 0 ||
+		totalActiveMutations > 0
 	) {
 		lines.push(
 			"",
-			`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing, ${totalIndexing} indexing, ${totalFailedUpdates} failed updates using the previous generation, ${totalErrors} errors, ${totalEmbedding} embedding issues — run knowledge_update, correct embedding configuration, or rebuild affected KBs`,
+			`Health: ⚠️ ${totalStale} stale, ${totalOrphans} orphans, ${totalStuck} stuck indexing, ${totalIndexing} indexing, ${totalActiveMutations} active mutations, ${totalFailedUpdates} failed updates using the previous generation, ${totalErrors} errors, ${totalEmbedding} embedding issues — wait for active work, run knowledge_update, correct embedding configuration, or rebuild affected KBs`,
 		);
 	}
 	return lines.join("\n");

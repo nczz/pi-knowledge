@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MutationBusyError } from "../../src/mutation-coordinator.ts";
 
 const state = vi.hoisted(() => ({
 	watcherCallback: undefined as ((kbId: string) => void) | undefined,
 	updates: [] as Array<ReturnType<typeof Promise.withResolvers<{ added: number; removed: number; unchanged: number }>>>,
 	updateCalls: 0,
-	rejectNextUpdateMessage: undefined as string | undefined,
+	rejectNextUpdate: undefined as Error | undefined,
 }));
 
 vi.mock("../../src/engine.ts", () => ({
@@ -25,10 +26,10 @@ vi.mock("../../src/engine.ts", () => ({
 
 		update(): Promise<{ added: number; removed: number; unchanged: number }> {
 			state.updateCalls++;
-			if (state.rejectNextUpdateMessage) {
-				const message = state.rejectNextUpdateMessage;
-				state.rejectNextUpdateMessage = undefined;
-				return Promise.reject(new Error(message));
+			if (state.rejectNextUpdate) {
+				const error = state.rejectNextUpdate;
+				state.rejectNextUpdate = undefined;
+				return Promise.reject(error);
 			}
 			const deferred = Promise.withResolvers<{ added: number; removed: number; unchanged: number }>();
 			state.updates.push(deferred);
@@ -69,7 +70,7 @@ beforeEach(() => {
 	state.watcherCallback = undefined;
 	state.updates = [];
 	state.updateCalls = 0;
-	state.rejectNextUpdateMessage = undefined;
+	state.rejectNextUpdate = undefined;
 });
 
 describe("daemon runtime configuration", () => {
@@ -169,7 +170,15 @@ describe("daemon watcher update coordination", () => {
 		);
 		await service.initialize(true);
 		if (!state.watcherCallback) throw new Error("Watcher callback was not registered");
-		state.rejectNextUpdateMessage = "Mutation for another knowledge base is already running";
+		state.rejectNextUpdate = new MutationBusyError(
+			{ keys: ["global:mutation"], operation: "update", target: "Watched" },
+			{
+				id: "active-mutation",
+				operation: "add",
+				target: "Another knowledge base",
+				started_at: Date.now(),
+			},
+		);
 
 		state.watcherCallback("watched-kb");
 		await vi.waitFor(() => expect(state.updateCalls).toBe(2));
@@ -177,7 +186,7 @@ describe("daemon watcher update coordination", () => {
 		await service.dispose();
 	});
 
-	it("waits for a new filesystem event after a permanent watcher update failure", async () => {
+	it("does not retry an untyped failure merely because its message says already running", async () => {
 		vi.useFakeTimers();
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 		const { KnowledgeDaemonService } = await import("../../src/daemon/service.ts");
@@ -195,7 +204,7 @@ describe("daemon watcher update coordination", () => {
 		try {
 			await service.initialize(true);
 			if (!state.watcherCallback) throw new Error("Watcher callback was not registered");
-			state.rejectNextUpdateMessage = "Source no longer exists";
+			state.rejectNextUpdate = new Error("Provider request is already running and failed");
 
 			state.watcherCallback("watched-kb");
 			await vi.advanceTimersByTimeAsync(6_000);

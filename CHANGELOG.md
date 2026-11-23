@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.16.4] - 2026-11-23
+
+### Fixed
+- Replaced anonymous promise-keyed write guards with explicit mutation ownership released before failures reach callers, restored same- and cross-KB writes after provider failures without restarting the daemon, reported the actual active owner in status/doctor/lightweight daemon status and busy errors, and limited watcher retries to typed mutation contention (#32).
+
 ## [0.16.3] - 2026-11-22
 
 ### Fixed

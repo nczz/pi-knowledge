@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_EMBEDDING_INPUT_POLICY, CURRENT_URL_STRUCTURE_POLICY, KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import type * as ModelWorkerClient from "../../src/model-worker-client.ts";
+import { MutationBusyError } from "../../src/mutation-coordinator.ts";
 import type * as SafeFetch from "../../src/network/safe-fetch.ts";
 import {
 	createKB,
@@ -325,19 +326,27 @@ describe("KnowledgeEngine", () => {
 			expect(tail.total_count).toBe(1);
 		});
 
-		it("rejects overlapping adds for the same knowledge base name", async () => {
+		it("tracks the active mutation owner and releases it after overlapping add rejection", async () => {
 			const first = engine.add("Original overlap content about authentication tokens and sessions.", "Overlap Add");
+			const active = engine.statusSnapshot();
 			const second = engine.add("Replacement overlap content about billing invoices and payments.", "Overlap Add");
+			const secondAssertion = expect(second).rejects.toThrow(
+				'Cannot start add for "Overlap Add"; add for "Overlap Add" is already running',
+			);
 
-			await expect(second).rejects.toThrow('Mutation for "Overlap Add" is already running');
+			expect(active).toMatchObject({
+				active_mutations: [{ operation: "add", target: "Overlap Add", started_at: expect.any(Number) }],
+			});
+			await secondAssertion;
 			await first;
+			expect(engine.statusSnapshot()).toMatchObject({ active_mutations: [] });
 			expect(engine.list()).toHaveLength(1);
 		});
 
 		it("blocks clear while add is in flight", async () => {
 			const addRun = engine.add("Clear guard content about authentication tokens and sessions.", "Clear Guard Add");
 
-			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.clear()).toThrow(MutationBusyError);
 			await addRun;
 			expect(engine.list()).toHaveLength(1);
 		});
@@ -345,7 +354,7 @@ describe("KnowledgeEngine", () => {
 		it("blocks remove while add is in flight", async () => {
 			const addRun = engine.add("Remove guard content about authentication tokens and sessions.", "Remove Guard Add");
 
-			expect(() => engine.remove("Remove Guard Add")).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.remove("Remove Guard Add")).toThrow(MutationBusyError);
 			await addRun;
 			expect(engine.list()).toHaveLength(1);
 		});
@@ -731,8 +740,8 @@ describe("KnowledgeEngine", () => {
 			const [{ id }] = engine.list();
 			const updateRun = engine.update(id);
 
-			expect(() => engine.remove(id)).toThrow("A knowledge-base mutation is already running");
-			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.remove(id)).toThrow(MutationBusyError);
+			expect(() => engine.clear()).toThrow(MutationBusyError);
 			await updateRun;
 		});
 
@@ -885,6 +894,37 @@ describe("KnowledgeEngine", () => {
 			).toMatchObject({ severity: "warning" });
 			expect((await engine.search("PublishedProviderToken", { mode: "fast", kb_id: after.id })).total_count).toBe(1);
 			expect((await engine.search("UnpublishedProviderToken", { mode: "fast", kb_id: after.id })).total_count).toBe(0);
+		});
+
+		it("releases the global mutation after a network provider failure so unrelated writes can continue", async () => {
+			const failedSource = join(TEST_DIR, "network-failure-update.txt");
+			const unrelatedSource = join(TEST_DIR, "unrelated-update.txt");
+			writeFileSync(failedSource, "PublishedNetworkToken remains available after a network failure.");
+			writeFileSync(unrelatedSource, "UnrelatedInitialToken remains independently updateable.");
+			await engine.add(failedSource, "Network Failure Update");
+			await engine.add(unrelatedSource, "Unrelated Update");
+			writeFileSync(failedSource, "UnpublishedNetworkToken must not become visible.");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:test-embedding");
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://embedding.example/v1");
+			const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					throw new TypeError("fetch failed", { cause });
+				}),
+			);
+
+			await expect(engine.update("Network Failure Update")).rejects.toThrow("fetch failed");
+			expect(engine.statusSnapshot().active_mutations).toEqual([]);
+
+			vi.unstubAllGlobals();
+			vi.unstubAllEnvs();
+			writeFileSync(unrelatedSource, "UnrelatedChangedToken proves cross-KB writes recover without daemon restart.");
+			await expect(engine.update("Unrelated Update")).resolves.toMatchObject({ added: 1, removed: 1 });
+			expect(engine.remove("Network Failure Update")).toBe(true);
+			expect(
+				(await engine.search("UnrelatedChangedToken", { mode: "fast", kb_id: "Unrelated Update" })).total_count,
+			).toBe(1);
 		});
 
 		it("updates document files from extractors instead of raw UTF-8 bytes", async () => {
@@ -2077,7 +2117,7 @@ describe("KnowledgeEngine", () => {
 
 			const importRun = engine.importKB(inputPath);
 
-			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.clear()).toThrow(MutationBusyError);
 			await importRun;
 			expect(engine.list()).toHaveLength(1);
 		});
@@ -2101,7 +2141,7 @@ describe("KnowledgeEngine", () => {
 
 			const importRun = engine.importKB(inputPath);
 
-			expect(() => engine.remove("Guarded Remove Import")).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.remove("Guarded Remove Import")).toThrow(MutationBusyError);
 			await importRun;
 			expect(engine.list()).toHaveLength(1);
 		});
@@ -2154,7 +2194,7 @@ describe("KnowledgeEngine", () => {
 			const outputPath = join(TEST_DIR, "export-guard.jsonl");
 			const exportRun = engine.exportKB("Export Guard", outputPath);
 
-			expect(() => engine.remove("Export Guard")).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.remove("Export Guard")).toThrow(MutationBusyError);
 			await exportRun;
 			expect(existsSync(outputPath)).toBe(true);
 		});

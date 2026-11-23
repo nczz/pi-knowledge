@@ -143,6 +143,41 @@ describe("profile daemon lifecycle", () => {
 		}
 	}, 30_000);
 
+	it("exposes the active mutation owner through lightweight daemon ping", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:test-embedding");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://embedding.example/v1");
+		const providerResponse = Promise.withResolvers<Response>();
+		const fetchMock = vi.fn(() => providerResponse.promise);
+		vi.stubGlobal("fetch", fetchMock);
+		const profile = makeProfile("active-owner");
+		const server = new ProfileDaemonServer(profile);
+		await server.start();
+		try {
+			const client = new KnowledgeDaemonClient(profile);
+			const add = client.add("Active owner RPC fixture", "Active Owner RPC");
+			await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+			await expect(client.ping()).resolves.toMatchObject({
+				ready: true,
+				active_mutations: [
+					{
+						id: expect.any(String),
+						operation: "add",
+						target: "Active Owner RPC",
+						started_at: expect.any(Number),
+					},
+				],
+			});
+
+			providerResponse.resolve(new Response("provider overloaded", { status: 503, statusText: "Unavailable" }));
+			await expect(add).rejects.toThrow("OpenAI embedding API error: 503 provider overloaded");
+			await expect(client.ping()).resolves.toMatchObject({ active_mutations: [] });
+		} finally {
+			providerResponse.resolve(new Response("provider interrupted", { status: 503, statusText: "Unavailable" }));
+			await server.shutdown();
+		}
+	}, 30_000);
+
 	it("refuses a second live daemon for the same profile", async () => {
 		const profile = makeProfile("singleton");
 		const first = new ProfileDaemonServer(profile);

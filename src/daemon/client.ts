@@ -16,6 +16,7 @@ import type {
 	SymbolSearchResponse,
 } from "../engine.ts";
 import type { FilesystemAccessPolicy } from "../filesystem-access.ts";
+import type { ActiveMutationStatus } from "../mutation-coordinator.ts";
 import { configureDaemonNodePath, resolveDaemonNodePath } from "../node-runtime.ts";
 import type { KnowledgeProfile } from "../profiles.ts";
 import { resolveKnowledgeProfile } from "../profiles.ts";
@@ -48,6 +49,7 @@ export interface DaemonPing {
 	package_version: string;
 	build_identity: string;
 	runtime_configuration_signature: string;
+	active_mutations: ActiveMutationStatus[];
 }
 
 export type ProgressCallback = (message: string) => void;

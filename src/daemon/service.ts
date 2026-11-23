@@ -18,6 +18,7 @@ import { KnowledgeEngine } from "../engine.ts";
 import type { FilesystemAccessPolicy } from "../filesystem-access.ts";
 import { resolveDirectoryScanTimeoutMs } from "../indexer/chunker.ts";
 import { configureModelWorkerNodePath, shutdownModelWorker } from "../model-worker-client.ts";
+import { type ActiveMutationStatus, MutationBusyError } from "../mutation-coordinator.ts";
 import { configureDaemonNodePath, resolveDaemonNodePath } from "../node-runtime.ts";
 import type { KnowledgeProfile } from "../profiles.ts";
 import type { KnowledgeBase } from "../storage/sqlite.ts";
@@ -362,6 +363,10 @@ export class KnowledgeDaemonService {
 		return this.lastSnapshotError;
 	}
 
+	activeMutations(): ActiveMutationStatus[] {
+		return this.engine.activeMutations();
+	}
+
 	private assertReady(): void {
 		if (!this.initialized) throw new Error("Knowledge profile daemon is still initializing");
 		if (this.shuttingDown) throw new Error("Knowledge profile daemon is shutting down");
@@ -375,7 +380,7 @@ export class KnowledgeDaemonService {
 		}
 		void this.coordinateUpdate(`watcher:${randomUUID()}`, kbId, undefined, () => {}).catch((error: unknown) => {
 			if (this.shuttingDown) return;
-			const blockedByMutation = error instanceof Error && error.message.includes("already running");
+			const blockedByMutation = error instanceof MutationBusyError;
 			if (!blockedByMutation) {
 				this.watcherDirty.delete(kbId);
 				console.error("Watcher update failed; waiting for a new filesystem change");

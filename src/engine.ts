@@ -72,6 +72,7 @@ import { finalizeChunksForEmbedding } from "./indexer/embedding-safe-chunks.ts";
 import { htmlToStructuredMarkdown } from "./indexer/html.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { extractDocumentInModelWorker, shutdownModelWorker } from "./model-worker-client.ts";
+import { type ActiveMutationStatus, MutationCoordinator, type MutationOperation } from "./mutation-coordinator.ts";
 import { fetchPublicText } from "./network/safe-fetch.ts";
 import {
 	classifyProviderFailure,
@@ -311,6 +312,7 @@ export interface DoctorReport {
 	health_score: number;
 	summary: string;
 	issues: DoctorIssue[];
+	active_mutations: ActiveMutationStatus[];
 	diagnostics: DiagnosticResult[];
 	actions: Array<{
 		code: NonNullable<DoctorIssue["action_code"]>;
@@ -332,6 +334,7 @@ export interface KnowledgeBaseEmbeddingStatus {
 
 export interface KnowledgeStatusSnapshot {
 	knowledge_bases: KnowledgeBase[];
+	active_mutations: ActiveMutationStatus[];
 	diagnostics: DiagnosticResult[];
 	embeddings: KnowledgeBaseEmbeddingStatus[];
 	embedding_error?: string;
@@ -1401,24 +1404,24 @@ export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
 	private activeUpdates = new Map<string, Promise<{ added: number; removed: number; unchanged: number }>>();
-	private activeMutations = new Map<string, Promise<unknown>>();
+	private readonly mutations = new MutationCoordinator();
 	private disposing = false;
 
-	private runExclusive<T>(keys: string | string[], description: string, operation: () => Promise<T> | T): Promise<T> {
+	private runExclusive<T>(
+		keys: string | string[],
+		operationName: MutationOperation,
+		target: string | undefined,
+		operation: () => Promise<T> | T,
+	): Promise<T> {
 		if (this.disposing) throw new Error("Knowledge engine is shutting down");
-		const mutationKeys = Array.isArray(keys) ? keys : [keys];
-		for (const key of mutationKeys) {
-			if (this.activeMutations.has(key)) throw new Error(`${description} is already running`);
-		}
-		const run = Promise.resolve()
-			.then(operation)
-			.finally(() => {
-				for (const key of mutationKeys) {
-					if (this.activeMutations.get(key) === run) this.activeMutations.delete(key);
-				}
-			});
-		for (const key of mutationKeys) this.activeMutations.set(key, run);
-		return run;
+		return this.mutations.run(
+			{
+				keys: Array.isArray(keys) ? keys : [keys],
+				operation: operationName,
+				...(target ? { target } : {}),
+			},
+			operation,
+		);
 	}
 
 	async initialize(knowledgeDir: string): Promise<void> {
@@ -1571,7 +1574,7 @@ export class KnowledgeEngine {
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		throwIfAborted(signal);
 		validateKnowledgeBaseMetadata(name, undefined);
-		return this.runExclusive(["global:mutation", `kb-name:${name}`], `Mutation for "${name}"`, () =>
+		return this.runExclusive(["global:mutation", `kb-name:${name}`], "add", name, () =>
 			this.addUnlocked(source, name, onProgress, signal, options, access),
 		);
 	}
@@ -1846,10 +1849,8 @@ export class KnowledgeEngine {
 			return activeUpdate;
 		}
 
-		const updateRun = this.runExclusive(
-			["global:mutation", `kb:${updateableKB.id}`],
-			`Mutation for "${updateableKB.name}"`,
-			() => this.runUpdate(updateableKB, onProgress, signal, access),
+		const updateRun = this.runExclusive(["global:mutation", `kb:${updateableKB.id}`], "update", updateableKB.name, () =>
+			this.runUpdate(updateableKB, onProgress, signal, access),
 		).finally(() => {
 			if (this.activeUpdates.get(updateableKB.id) === updateRun) this.activeUpdates.delete(updateableKB.id);
 		});
@@ -2746,7 +2747,7 @@ export class KnowledgeEngine {
 	remove(nameOrId: string): boolean {
 		if (!this.db) return false;
 		if (this.disposing) throw new Error("Knowledge engine is shutting down");
-		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
+		this.mutations.assertAvailable({ keys: ["global:mutation"], operation: "remove", target: nameOrId });
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
 		deleteKB(this.db, kb.id);
@@ -2763,7 +2764,7 @@ export class KnowledgeEngine {
 	clear(): void {
 		if (!this.db) return;
 		if (this.disposing) throw new Error("Knowledge engine is shutting down");
-		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
+		this.mutations.assertAvailable({ keys: ["global:mutation"], operation: "clear" });
 		for (const kb of listKBs(this.db)) {
 			deleteKB(this.db, kb.id);
 			this.deleteVectorFiles(kb.id, kb.vector_file);
@@ -2799,12 +2800,17 @@ export class KnowledgeEngine {
 		return diagnostics;
 	}
 
+	activeMutations(): ActiveMutationStatus[] {
+		return this.mutations.active();
+	}
+
 	statusSnapshot(
 		signal?: AbortSignal,
 		diagnosticsOverride?: DiagnosticResult[],
 		knowledgeBasesOverride?: KnowledgeBase[],
 	): KnowledgeStatusSnapshot {
-		if (!this.db) return { knowledge_bases: [], diagnostics: [], embeddings: [] };
+		if (!this.db)
+			return { knowledge_bases: [], diagnostics: [], embeddings: [], active_mutations: this.activeMutations() };
 		throwIfAborted(signal);
 		const db = this.db;
 		const knowledgeBases = knowledgeBasesOverride ?? listKBs(db);
@@ -2821,6 +2827,7 @@ export class KnowledgeEngine {
 			return {
 				knowledge_bases: knowledgeBases,
 				diagnostics,
+				active_mutations: this.activeMutations(),
 				embeddings: knowledgeBases.map((kb) => {
 					const compatibility = inspectEmbeddingCompatibility(
 						kb.embedding_signature,
@@ -2843,6 +2850,7 @@ export class KnowledgeEngine {
 			return {
 				knowledge_bases: knowledgeBases,
 				diagnostics,
+				active_mutations: this.activeMutations(),
 				embeddings: [],
 				embedding_error: error instanceof Error ? error.message : String(error),
 			};
@@ -2854,7 +2862,8 @@ export class KnowledgeEngine {
 		maxKnowledgeBases = Number.POSITIVE_INFINITY,
 		maxDiagnosticPaths = Number.POSITIVE_INFINITY,
 	): Promise<KnowledgeStatusSnapshot> {
-		if (!this.db) return { knowledge_bases: [], diagnostics: [], embeddings: [] };
+		if (!this.db)
+			return { knowledge_bases: [], diagnostics: [], embeddings: [], active_mutations: this.activeMutations() };
 		const knowledgeBases = listKBs(this.db, Number.isFinite(maxKnowledgeBases) ? maxKnowledgeBases + 1 : undefined);
 		if (knowledgeBases.length > maxKnowledgeBases) {
 			throw new Error(`Knowledge status exceeds the ${maxKnowledgeBases}-knowledge-base RPC limit`);
@@ -2965,6 +2974,7 @@ export class KnowledgeEngine {
 		throwIfAborted(signal);
 		const diagnostics = diagnosticsOverride ?? this.diagnose(signal);
 		const issues: DoctorIssue[] = [];
+		const activeMutations = this.mutations.active();
 		const kbs = knowledgeBasesOverride ?? this.list();
 		if (kbs.length === 0) {
 			issues.push({
@@ -3167,13 +3177,16 @@ export class KnowledgeEngine {
 		const warnings = issues.filter((issue) => issue.severity === "warning").length;
 		const summary =
 			issues.length === 0
-				? "Knowledge system is healthy."
+				? activeMutations.length === 0
+					? "Knowledge system is healthy."
+					: `Knowledge data is healthy; ${activeMutations.length} mutation${activeMutations.length === 1 ? "" : "s"} active.`
 				: `${blocking} blocking, ${warnings} warning, ${issues.length - blocking - warnings} info issues.`;
 
 		return {
 			health_score: healthScore,
 			summary,
 			issues,
+			active_mutations: activeMutations,
 			diagnostics,
 			actions: issues.map((issue) => ({
 				code: issue.action_code ?? "none",
@@ -3208,7 +3221,7 @@ export class KnowledgeEngine {
 		throwIfAborted(signal);
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
-		return this.runExclusive(["global:mutation", `kb:${kb.id}`], `Operation for "${kb.name}"`, () =>
+		return this.runExclusive(["global:mutation", `kb:${kb.id}`], "export", kb.name, () =>
 			this.exportKBUnlocked(kb, outputPath, signal, onProgress, access),
 		);
 	}
@@ -3330,7 +3343,7 @@ export class KnowledgeEngine {
 		access?: FilesystemAccessPolicy,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
-		return this.runExclusive("global:mutation", "Knowledge-base import", () =>
+		return this.runExclusive("global:mutation", "import", undefined, () =>
 			this.importKBUnlocked(inputPath, onProgress, signal, access),
 		);
 	}
@@ -3545,7 +3558,7 @@ export class KnowledgeEngine {
 		this.disposing = true;
 		const activeUpdates = [...this.activeUpdates.values()];
 		if (activeUpdates.length > 0) await Promise.allSettled(activeUpdates);
-		const activeMutations = [...this.activeMutations.values()];
+		const activeMutations = this.mutations.runs();
 		if (activeMutations.length > 0) await Promise.allSettled(activeMutations);
 		const disposeModels = options.disposeModels ?? true;
 		if (disposeModels) {

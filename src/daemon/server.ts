@@ -429,6 +429,7 @@ export class ProfileDaemonServer {
 					package_version: manifest.package_version,
 					runtime_configuration_signature: manifest.runtime_configuration_signature,
 					build_identity: manifest.build_identity,
+					active_mutations: this.service.activeMutations(),
 				},
 			});
 			socket.end();

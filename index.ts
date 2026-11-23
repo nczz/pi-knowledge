@@ -840,6 +840,14 @@ function registerKnowledgeExtension(pi: ExtensionAPI) {
 			const client = await ensureClient();
 			const report = await client.doctor(_signal);
 			const lines = [`Health score: ${report.health_score}/100`, report.summary, ""];
+			if (report.active_mutations.length > 0) {
+				lines.push("Active mutations:");
+				for (const mutation of report.active_mutations) {
+					const target = mutation.target ? ` for ${JSON.stringify(mutation.target)}` : "";
+					lines.push(`- ${mutation.operation}${target}, started ${new Date(mutation.started_at).toISOString()}`);
+				}
+				lines.push("");
+			}
 			if (report.issues.length === 0) {
 				lines.push("No issues found.");
 			} else {

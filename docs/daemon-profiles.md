@@ -119,6 +119,8 @@ PID、heartbeat 或檔案存在本身都不構成 liveness 證明。Client 只�
 
 所有 engine 呼叫都由 daemon service 執行。Watcher callback 也回到同一個 mutation coordinator/service update path，確保 subscriber cancellation、progress、coverage snapshot 與 mutation guard 一致。
 
+Mutation serialization由獨立 coordinator持有顯式 owner token。Owner在任何 operation work／`await`前登記，包含 correlation ID、operation、target與 start time；operation resolve/reject時先在 `finally`依 token釋放所有 keys，再讓結果到達 caller。Busy error必須指向實際 owner，watcher只對 typed busy condition重試，不解析 message。Status/doctor輸出同一份 active owner metadata；lightweight `ping`與`pi-knowledge-daemon status`也輸出 owner list，但不執行 source diagnostics。不得以 elapsed timeout、persisted job已 failed或沒有 running row為由強制釋放仍未 settle的 owner，否則可能讓 SQLite/vector mutation重疊。
+
 ## Daemon lifecycle
 
 - `ensure`: 先 connect；不可達時使用目前 package `import.meta.url` 解析出的絕對 daemon entry，透過共用、profile-aware Node 22+ resolver 以 argument array、`shell:false`、detached stdio啟動，再等待 authenticated readiness。
@@ -127,7 +129,7 @@ PID、heartbeat 或檔案存在本身都不構成 liveness 證明。Client 只�
 - Spawn environment 採 allowlist：profile/storage/runtime/provider必要設定與 credentials；拒絕繼承 `NODE_OPTIONS`、`NODE_PATH` 等 loader injection。Token 不放 argv/environment。
 - `start`: ensure 的 CLI 顯式形式，已啟動時成功回報既有 instance。
 - `run`: foreground daemon，供 service manager 與診斷使用。
-- `status`: 只做 handshake，不啟動 daemon。
+- `status`: 只做 authenticated lightweight handshake、不啟動 daemon、不掃描 retained sources；輸出 ready metadata與 active mutation owners。
 - `stop`: authenticated admin shutdown，等待 server 確認；不得以 PID 猜測直接 kill 正常 daemon。
 - extension session shutdown 只釋放 client state，不停止 daemon。
 - daemon shutdown guard 必須在任何 `await` 前設定，重複 shutdown必須 idempotent。Service先 bounded drain；deadline後 terminate model worker並短暫等待 coordinator。若仍未 settle，整個 daemon fail-stop且不執行競態 cleanup；只有全數 settle才呼叫 `KnowledgeEngine.dispose()`。Engine dispose不得重新無界等待已由 service管理的 operation。

@@ -523,3 +523,23 @@ CommonJS dependencies。
 - Retryability 是一般 HTTP/network operational guidance，不保證特定 provider 的 request 可安全重送。
 - Local model worker failure 仍使用既有 worker error contract；未經 HTTP API 的錯誤不冒充 provider HTTP status。
 - 本次 schema 變更不要求重建 KB 或 vectors。
+
+---
+
+## ADR-026: Explicit mutation ownership and typed busy coordination
+
+**狀態**: 已決定
+
+**背景**: Persisted `indexing_jobs`與 daemon內的 mutation guard具有不同生命週期。只保存 key到 Promise的匿名 map會讓 busy error使用新請求描述、status/doctor無法指出實際 owner，watcher也只能解析英文訊息決定是否重試。Provider failure後即使舊 generation安全保留，缺乏 owner metadata仍會讓 write availability無法診斷。
+
+**決策**:
+- Engine使用顯式 mutation token，包含 random correlation ID、operation、target、start timestamp與所有 serialization keys；token先於 operation work與任何`await`登記。
+- Operation在`try/finally`中執行，resolve/reject都先依 token釋放所有 keys，再把結果傳給 caller。Identity guard避免舊 finalizer刪除不同 owner。
+- Busy rejection使用 typed `MutationBusyError`並引用實際 owner；daemon watcher只對該 type重試，不解析 message。
+- `knowledge_status`與`knowledge_doctor`輸出 active owner metadata，與 persisted job state並列。Lightweight daemon `ping`與 CLI `status`輸出相同 owner list而不掃描 sources；`ready`只代表 authenticated service admission，不宣稱 write path idle。
+- Coordinator不提供 lease expiry或 force unlock。未 settle的 writer繼續持鎖；shutdown仍走 bounded drain/fail-stop，避免重疊 DB/vector handles。
+
+**理由**:
+- 顯式 owner讓失敗後的 release、跨 KB write availability與 busy attribution可直接測試及觀測。
+- Typed busy contract避免 provider/runtime error文字碰巧含有“already running”時形成 watcher retry amplification。
+- 不從 job row推導 lock狀態，保留 atomic generation與 fail-closed mutation安全邊界。

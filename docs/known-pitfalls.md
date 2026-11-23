@@ -342,6 +342,15 @@ OpenAI-compatible provider 不能假設服務端一定回傳 unit vectors。Dot 
 - Retryability 只提供 action guidance，不自動 retry mutation。
 - Update provider failure 不得破壞既有 published generation；persisted failed job 是診斷狀態，不是把可搜尋 KB 降為 error。
 
+## Persisted job completion does not prove mutation ownership was released
+
+`indexing_jobs`是持久化的進度與失敗診斷；daemon mutation ownership是保護 SQLite/vector handles的 in-memory concurrency state。Failed job、沒有`status='running'` row、或daemon handshake ready都不能單獨證明沒有 active writer；應讀取 handshake／status回傳的`active_mutations`。
+
+- Mutation owner必須是顯式 token，先於任何 work／`await`登記，並在 operation的`finally`依 token釋放；不要只存匿名 Promise並用新請求的描述產生 busy message。
+- Busy error、watcher retry、status與doctor共用 typed owner state。不要以`message.includes(\"already running\")`分類，否則 unrelated provider/runtime error也可能形成 retry loop。
+- Provider failure回到 caller前必須已釋放 owner，讓同 KB與跨 KB mutation無需重啟daemon即可繼續；回歸測試要同時驗證前一代仍可搜尋、staging未發布與後續寫入成功。
+- 真正未 settle的 operation仍必須保持 locked並顯示 operation、target、start time與 correlation ID。不可用固定 lease或 job row狀態強制 unlock；那會把 availability問題變成 concurrent publication/data corruption。
+
 ## Cancellation boundaries must preserve unrelated work
 
 Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能把共享資源或既有 KB 推進失敗狀態。

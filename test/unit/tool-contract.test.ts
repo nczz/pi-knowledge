@@ -128,6 +128,14 @@ const toolState = vi.hoisted(() => ({
 				action_code: "rebuild_kb",
 			},
 		],
+		active_mutations: [
+			{
+				id: "mutation-1",
+				operation: "update",
+				target: "repo",
+				started_at: 1_700_000_000_000,
+			},
+		],
 		diagnostics: [],
 		actions: [
 			{
@@ -344,6 +352,7 @@ describe("public tool contracts", () => {
 
 		expect(result?.details).toEqual(toolState.doctorReport);
 		expect(result?.content[0].text).toContain("Action (rebuild_kb):");
+		expect(result?.content[0].text).toContain('Active mutations:\n- update for "repo"');
 	});
 
 	it("exposes search diagnostics details and freshness fields", async () => {

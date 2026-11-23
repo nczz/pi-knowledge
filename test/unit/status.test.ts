@@ -5,6 +5,7 @@ import { formatKnowledgeStatus } from "../../src/status.ts";
 const UPDATED_AT = 1_700_000_000_000;
 
 const MISMATCH_SNAPSHOT: KnowledgeStatusSnapshot = {
+	active_mutations: [],
 	knowledge_bases: [
 		{
 			id: "kb-zh",
@@ -198,6 +199,44 @@ describe("knowledge status formatting", () => {
 
 		expect(output).toContain("failed updates using the previous generation");
 		expect(output).toContain("provider: embedding/embed_documents · http · HTTP 503 · retryable");
+		expect(output).not.toContain("Health: ✓");
+	});
+	it("shows the actual active mutation owner and does not report the system healthy", () => {
+		const output = formatKnowledgeStatus({
+			snapshot: {
+				...MISMATCH_SNAPSHOT,
+				active_mutations: [
+					{
+						id: "mutation-123",
+						operation: "update",
+						target: "繁中專案知識庫",
+						started_at: UPDATED_AT,
+					},
+				],
+				embeddings: [
+					{
+						...MISMATCH_SNAPSHOT.embeddings[0],
+						compatibility: {
+							compatible: true,
+							cause: "match",
+							activeSignature: "indexed-signature",
+							recordedSignature: "indexed-signature",
+							activeDecoration: "strategy=e5",
+							recordedDecoration: "strategy=e5",
+							activeDimension: 384,
+							recordedDimension: 384,
+						},
+						detail: "compatible",
+					},
+				],
+			},
+			storagePath: "/tmp/知識庫",
+			watchCount: 1,
+			now: UPDATED_AT + 12_000,
+		});
+
+		expect(output).toContain('Active mutation: update for "繁中專案知識庫" — running 12s — id mutation-123');
+		expect(output).toContain("1 active mutations");
 		expect(output).not.toContain("Health: ✓");
 	});
 });
